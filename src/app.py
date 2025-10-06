@@ -63,16 +63,25 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
         else:
             form = await request.form()
             data = {k: v for k, v in form.items()}
+        # Merge query params as fallback (Keitaro may only allow URL field)
+        if request.query_params:
+            for k, v in request.query_params.items():
+                data.setdefault(k, v)
     except Exception as e:
         logger.exception(e)
         raise HTTPException(400, "Invalid payload")
 
     # Optional token verification: set POSTBACK_TOKEN env and configure Keitaro header Authorization: Bearer <token>
     if settings.postback_token:
-        if not authorization or not authorization.startswith("Bearer "):
+        supplied_token = None
+        # Prefer header, but accept token/auth from params/body for trackers without header config
+        if authorization and authorization.startswith("Bearer "):
+            supplied_token = authorization.split(" ", 1)[1]
+        if not supplied_token:
+            supplied_token = data.get("token") or data.get("auth")
+        if not supplied_token:
             raise HTTPException(401, "Unauthorized")
-        token = authorization.split(" ", 1)[1]
-        if token != settings.postback_token:
+        if supplied_token != settings.postback_token:
             raise HTTPException(403, "Forbidden")
 
     # Try alias-based routing by campaign_name prefix
