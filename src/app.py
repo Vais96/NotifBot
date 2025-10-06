@@ -56,14 +56,15 @@ async def db_ping():
 @app.post("/keitaro/postback")
 async def keitaro_postback(request: Request, authorization: str | None = Header(default=None)):
     try:
-        # Keitaro can send form-encoded or JSON
-        content_type = request.headers.get("content-type", "")
+        # Keitaro can send form-encoded or JSON; some trackers do POST with empty body and only URL params
+        content_type = (request.headers.get("content-type") or "").lower()
+        data = {}
         if "application/json" in content_type:
             data = await request.json()
-        else:
+        elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
             form = await request.form()
             data = {k: v for k, v in form.items()}
-        # Merge query params as fallback (Keitaro may only allow URL field)
+        # Always merge query params (act as defaults)
         if request.query_params:
             for k, v in request.query_params.items():
                 data.setdefault(k, v)
