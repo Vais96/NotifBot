@@ -69,7 +69,13 @@ async def on_list_users(message: Message):
                 visible.append(u)
     if not visible:
         return await message.answer("Нет данных для отображения")
-    lines = [f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} — {u['full_name'] or ''} | role={u['role']} | team={u['team_id'] or '-'}" for u in visible]
+    rendered = []
+    for u in visible:
+        display_role = u['role']
+        if u['telegram_id'] == me and me in ADMIN_IDS:
+            display_role = 'admin'
+        rendered.append(f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} — {u['full_name'] or ''} | role={display_role} | team={u['team_id'] or '-'}")
+    lines = rendered
     await message.answer("Пользователи:\n" + "\n".join(lines))
 
 def _user_row_controls(u: dict) -> InlineKeyboardMarkup:
