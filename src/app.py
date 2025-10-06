@@ -120,6 +120,12 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
                     used_fallback = True
             except Exception:
                 pass
+    # Log event with final routed user id (even if None)
+    try:
+        await db.log_event(data, buyer_id)
+    except Exception as e:
+        logger.warning(f"Failed to log event: {e}")
+
     if not buyer_id:
         # no route matched and no admin configured
         return JSONResponse({"ok": True, "routed": False})
