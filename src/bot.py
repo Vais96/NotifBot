@@ -17,7 +17,13 @@ ADMIN_IDS = set(settings.admins)
 @dp.message(CommandStart())
 async def on_start(message: Message):
     await db.upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    await message.answer("Привет! Ты зарегистрирован. Роль по умолчанию: buyer. Админ может изменить роль и добавить правила.")
+    # Автоповышение роли для ID из ADMINS
+    if message.from_user.id in ADMIN_IDS:
+        try:
+            await db.set_user_role(message.from_user.id, "admin")
+        except Exception:
+            pass
+    await message.answer("Привет! Ты зарегистрирован. Роль по умолчанию: buyer (если не админ). Админ может изменить роль и добавить правила.")
 
 @dp.message(Command("help"))
 async def on_help(message: Message):
@@ -49,6 +55,8 @@ async def on_list_users(message: Message):
     # get my role and team
     my = next((u for u in users if u["telegram_id"] == me), None)
     my_role = my["role"] if my else "buyer"
+    if me in ADMIN_IDS:
+        my_role = "admin"
     my_team = my.get("team_id") if my else None
     for u in users:
         if my_role in ("admin", "head"):
@@ -122,6 +130,8 @@ async def on_list_routes(message: Message):
     users = await db.list_users()
     my = next((u for u in users if u["telegram_id"] == me), None)
     my_role = (my or {}).get("role", "buyer")
+    if me in ADMIN_IDS:
+        my_role = "admin"
     my_team = (my or {}).get("team_id")
     rows = await db.list_routes()
     # filter by role
@@ -209,8 +219,7 @@ async def on_set_team(message: Message):
     # /setteam <telegram_id> <team_id|-> (- означает убрать из команды)
     me = message.from_user.id
     if me not in ADMIN_IDS:
-        # На будущие итерации: проверить роль head
-        pass
+        return await message.answer("Только для админов")
     parts = message.text.split()
     if len(parts) != 3:
         return await message.answer("Использование: /setteam <telegram_id> <team_id|->")
