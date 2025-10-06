@@ -32,7 +32,7 @@ def _parse_mysql_dsn(dsn: str) -> Dict[str, Any]:
 SCHEMA_SQL = [
     # users with roles and team
     """
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS tg_users (
         telegram_id BIGINT PRIMARY KEY,
         username VARCHAR(255) NULL,
         full_name VARCHAR(255) NULL,
@@ -43,14 +43,14 @@ SCHEMA_SQL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
     """
-    CREATE TABLE IF NOT EXISTS teams (
+    CREATE TABLE IF NOT EXISTS tg_teams (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         name VARCHAR(255) NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
     """
-    CREATE TABLE IF NOT EXISTS routes (
+    CREATE TABLE IF NOT EXISTS tg_routes (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         user_id BIGINT NOT NULL,
         offer VARCHAR(255) NULL,
@@ -59,13 +59,13 @@ SCHEMA_SQL = [
         priority INT NOT NULL DEFAULT 0,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_routes_active (is_active),
-        INDEX idx_routes_match (offer, country, source),
-        CONSTRAINT fk_routes_user FOREIGN KEY (user_id) REFERENCES users (telegram_id) ON DELETE CASCADE
+        INDEX idx_tg_routes_active (is_active),
+        INDEX idx_tg_routes_match (offer, country, source),
+        CONSTRAINT fk_tg_routes_user FOREIGN KEY (user_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
     """
-    CREATE TABLE IF NOT EXISTS events (
+    CREATE TABLE IF NOT EXISTS tg_events (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         status VARCHAR(64) NULL,
         offer VARCHAR(255) NULL,
@@ -111,7 +111,7 @@ async def upsert_user(telegram_id: int, username: Optional[str], full_name: Opti
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO users(telegram_id, username, full_name)
+                INSERT INTO tg_users(telegram_id, username, full_name)
                 VALUES(%s, %s, %s)
                 ON DUPLICATE KEY UPDATE username=VALUES(username), full_name=VALUES(full_name), is_active=1
                 """,
@@ -122,7 +122,7 @@ async def list_users() -> List[Dict[str, Any]]:
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute("SELECT telegram_id, username, full_name, role, team_id, is_active, created_at FROM users ORDER BY created_at DESC")
+            await cur.execute("SELECT telegram_id, username, full_name, role, team_id, is_active, created_at FROM tg_users ORDER BY created_at DESC")
             return await cur.fetchall()
 
 async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
@@ -130,7 +130,7 @@ async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                "SELECT telegram_id, username, full_name, role, team_id, is_active, created_at FROM users WHERE telegram_id=%s",
+                "SELECT telegram_id, username, full_name, role, team_id, is_active, created_at FROM tg_users WHERE telegram_id=%s",
                 (telegram_id,)
             )
             row = await cur.fetchone()
@@ -141,32 +141,32 @@ async def set_user_role(telegram_id: int, role: str) -> None:
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("UPDATE users SET role=%s WHERE telegram_id=%s", (role, telegram_id))
+            await cur.execute("UPDATE tg_users SET role=%s WHERE telegram_id=%s", (role, telegram_id))
 
 async def set_user_active(telegram_id: int, is_active: bool) -> None:
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("UPDATE users SET is_active=%s WHERE telegram_id=%s", (1 if is_active else 0, telegram_id))
+            await cur.execute("UPDATE tg_users SET is_active=%s WHERE telegram_id=%s", (1 if is_active else 0, telegram_id))
 
 async def create_team(name: str) -> int:
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("INSERT INTO teams(name) VALUES(%s)", (name,))
+            await cur.execute("INSERT INTO tg_teams(name) VALUES(%s)", (name,))
             return cur.lastrowid
 
 async def set_user_team(telegram_id: int, team_id: Optional[int]) -> None:
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("UPDATE users SET team_id=%s WHERE telegram_id=%s", (team_id, telegram_id))
+            await cur.execute("UPDATE tg_users SET team_id=%s WHERE telegram_id=%s", (team_id, telegram_id))
 
 async def list_teams() -> List[Dict[str, Any]]:
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute("SELECT id, name, created_at FROM teams ORDER BY id DESC")
+            await cur.execute("SELECT id, name, created_at FROM tg_teams ORDER BY id DESC")
             return await cur.fetchall()
 
 async def add_route(user_id: int, offer: Optional[str], country: Optional[str], source: Optional[str], priority: int = 0) -> int:
@@ -175,7 +175,7 @@ async def add_route(user_id: int, offer: Optional[str], country: Optional[str], 
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO routes(user_id, offer, country, source, priority)
+                INSERT INTO tg_routes(user_id, offer, country, source, priority)
                 VALUES(%s, %s, %s, %s, %s)
                 """,
                 (user_id, offer, country, source, priority)
@@ -189,8 +189,8 @@ async def list_routes() -> List[Dict[str, Any]]:
             await cur.execute(
                 """
                 SELECT r.id, r.user_id, u.username, u.full_name, r.offer, r.country, r.source, r.priority, r.is_active, r.created_at
-                FROM routes r
-                JOIN users u ON u.telegram_id = r.user_id
+                FROM tg_routes r
+                JOIN tg_users u ON u.telegram_id = r.user_id
                 ORDER BY r.priority DESC, r.created_at DESC
                 """
             )
@@ -205,7 +205,7 @@ async def find_user_for_postback(offer: Optional[str], country: Optional[str], s
                 """
                 SELECT user_id,
                        ((offer IS NOT NULL) + (country IS NOT NULL) + (source IS NOT NULL)) AS weight
-                FROM routes
+                FROM tg_routes
                 WHERE is_active=1
                   AND (%s IS NULL OR offer IS NULL OR offer=%s)
                   AND (%s IS NULL OR country IS NULL OR country=%s)
@@ -233,7 +233,7 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO events(status, offer, country, source, payout, currency, clickid, raw, routed_user_id)
+                INSERT INTO tg_events(status, offer, country, source, payout, currency, clickid, raw, routed_user_id)
                 VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
