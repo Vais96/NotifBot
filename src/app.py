@@ -94,14 +94,21 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     buyer_id = alias.get("buyer_id") if alias else None
     if not buyer_id:
         buyer_id = await db.find_user_for_postback(
-        offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
-        country=data.get("country") or data.get("geo"),
-        source=data.get("source") or data.get("traffic_source_name") or data.get("traffic_source") or data.get("affiliate")
+            offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
+            country=data.get("country") or data.get("geo"),
+            source=data.get("source") or data.get("traffic_source_name") or data.get("traffic_source") or data.get("affiliate")
         )
+    # Fallback to first admin if still not routed (useful for initial testing)
+    used_fallback = False
+    if not buyer_id and settings.admins:
+        buyer_id = settings.admins[0]
+        used_fallback = True
+
+    # Log with final routed user id (including fallback)
     await db.log_event(data, buyer_id)
 
     if not buyer_id:
-        # no route matched, silently accept
+        # no route matched and no admin configured
         return JSONResponse({"ok": True, "routed": False})
 
     # Map status to lead/sale only
@@ -138,7 +145,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     text = "\n".join(lines)
 
     await notify_buyer(buyer_id, text)
-    return {"ok": True, "routed": True, "buyer_id": buyer_id}
+    return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
 
 # Some trackers send GET S2S callbacks; mirror POST handler for query params
 @app.get("/keitaro/postback")
@@ -162,10 +169,14 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     buyer_id = alias.get("buyer_id") if alias else None
     if not buyer_id:
         buyer_id = await db.find_user_for_postback(
-        offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
-        country=data.get("country") or data.get("geo"),
-        source=data.get("source") or data.get("traffic_source_name") or data.get("traffic_source") or data.get("affiliate")
-    )
+            offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
+            country=data.get("country") or data.get("geo"),
+            source=data.get("source") or data.get("traffic_source_name") or data.get("traffic_source") or data.get("affiliate")
+        )
+    used_fallback = False
+    if not buyer_id and settings.admins:
+        buyer_id = settings.admins[0]
+        used_fallback = True
     await db.log_event(data, buyer_id)
 
     if not buyer_id:
@@ -199,7 +210,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     text = "\n".join(lines)
 
     await notify_buyer(buyer_id, text)
-    return {"ok": True, "routed": True, "buyer_id": buyer_id}
+    return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
 
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
