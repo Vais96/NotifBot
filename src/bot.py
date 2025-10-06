@@ -2,11 +2,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums.parse_mode import ParseMode
+from aiogram.client.default import DefaultBotProperties
 from loguru import logger
 from .config import settings
 from . import db
 
-bot = Bot(token=settings.telegram_bot_token, parse_mode=ParseMode.HTML)
+bot = Bot(token=settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
 # Single dispatcher shared with FastAPI webhook
 dp = Dispatcher()
