@@ -89,8 +89,13 @@ async def init_pool() -> aiomysql.Pool:
         _pool = await aiomysql.create_pool(**params, minsize=1, maxsize=10)
         async with _pool.acquire() as conn:
             async with conn.cursor() as cur:
-                for stmt in SCHEMA_SQL:
-                    await cur.execute(stmt)
+                for i, stmt in enumerate(SCHEMA_SQL, start=1):
+                    try:
+                        logger.debug(f"Applying schema statement {i}/{len(SCHEMA_SQL)}")
+                        await cur.execute(stmt)
+                    except Exception as e:
+                        logger.error(f"Schema DDL failed at statement {i}: {stmt}\nError: {e}")
+                        raise
     return _pool
 
 async def close_pool() -> None:
