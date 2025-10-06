@@ -10,7 +10,12 @@ app = FastAPI(title="Keitaro Telegram Notifier")
 
 @app.on_event("startup")
 async def on_startup():
-    await db.init_pool()
+    try:
+        await db.init_pool()
+    except Exception as e:
+        # Log and re-raise so Railway logs show root cause
+        logger.exception(f"DB init failed: {e}")
+        raise
     # set webhook for Telegram
     secret_path = settings.webhook_secret_path.strip()
     if not secret_path.startswith("/"):
@@ -29,6 +34,19 @@ async def on_shutdown():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.get("/db/ping")
+async def db_ping():
+    try:
+        pool = await db.init_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+                row = await cur.fetchone()
+        return {"ok": True, "result": row and int(row[0])}
+    except Exception as e:
+        logger.exception(e)
+        raise HTTPException(500, f"DB ping failed: {e}")
 
 @app.post("/keitaro/postback")
 async def keitaro_postback(request: Request, authorization: str | None = Header(default=None)):

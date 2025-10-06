@@ -3,6 +3,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from loguru import logger
 from .config import settings
 import urllib.parse
+import ssl
 import json
 
 _pool: Optional[aiomysql.Pool] = None
@@ -12,15 +13,21 @@ def _parse_mysql_dsn(dsn: str) -> Dict[str, Any]:
     url = urllib.parse.urlparse(dsn)
     if url.scheme not in ("mysql", "mysql+aiomysql"):
         raise ValueError("DATABASE_URL must start with mysql://")
-    return {
+    qs = urllib.parse.parse_qs(url.query)
+    params: Dict[str, Any] = {
         "host": url.hostname or "localhost",
         "port": url.port or 3306,
         "user": urllib.parse.unquote(url.username or "root"),
         "password": urllib.parse.unquote(url.password or ""),
         "db": (url.path or "/")[1:] or None,
-        "charset": urllib.parse.parse_qs(url.query).get("charset", ["utf8mb4"])[0],
+        "charset": qs.get("charset", ["utf8mb4"])[0],
         "autocommit": True,
+        "connect_timeout": int(qs.get("connect_timeout", [10])[0]),
     }
+    ssl_flag = (qs.get("ssl", ["false"])[0]).lower() in ("1", "true", "on", "required", "require")
+    if ssl_flag:
+        params["ssl"] = ssl.create_default_context()
+    return params
 
 SCHEMA_SQL = [
     # users with roles and team
