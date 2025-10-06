@@ -55,22 +55,24 @@ async def db_ping():
 
 @app.post("/keitaro/postback")
 async def keitaro_postback(request: Request, authorization: str | None = Header(default=None)):
-    try:
-        # Keitaro can send form-encoded or JSON; some trackers do POST with empty body and only URL params
-        content_type = (request.headers.get("content-type") or "").lower()
-        data = {}
-        if "application/json" in content_type:
+    # Parse body leniently; if anything fails, continue with query params only
+    content_type = (request.headers.get("content-type") or "").lower()
+    data = {}
+    if "application/json" in content_type:
+        try:
             data = await request.json()
-        elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        except Exception:
+            data = {}
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
             form = await request.form()
             data = {k: v for k, v in form.items()}
-        # Always merge query params (act as defaults)
-        if request.query_params:
-            for k, v in request.query_params.items():
-                data.setdefault(k, v)
-    except Exception as e:
-        logger.exception(e)
-        raise HTTPException(400, "Invalid payload")
+        except Exception:
+            data = {}
+    # Always merge query params (act as defaults)
+    if request.query_params:
+        for k, v in request.query_params.items():
+            data.setdefault(k, v)
 
     # Optional token verification: set POSTBACK_TOKEN env and configure Keitaro header Authorization: Bearer <token>
     if settings.postback_token:
