@@ -224,10 +224,10 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
         "status": raw.get("status") or raw.get("action"),
         "offer": raw.get("offer") or raw.get("offer_name") or raw.get("campaign") or raw.get("campaign_name"),
         "country": raw.get("country") or raw.get("geo"),
-        "source": raw.get("source") or raw.get("traffic_source") or raw.get("affiliate"),
-        "payout": raw.get("payout"),
-        "currency": raw.get("currency"),
-        "clickid": raw.get("clickid") or raw.get("click_id") or raw.get("subid") or raw.get("sub_id")
+        "source": raw.get("source") or raw.get("traffic_source_name") or raw.get("traffic_source") or raw.get("affiliate") or raw.get("traffic_source_id"),
+        "payout": raw.get("payout") or raw.get("revenue") or raw.get("conversion_revenue") or raw.get("profit") or raw.get("conversion_profit") or raw.get("conversion_cost"),
+        "currency": raw.get("currency") or raw.get("revenue_currency") or raw.get("payout_currency"),
+        "clickid": raw.get("clickid") or raw.get("click_id") or raw.get("subid") or raw.get("sub_id") or raw.get("tid")
     }
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
