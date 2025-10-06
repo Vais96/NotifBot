@@ -1,6 +1,8 @@
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from loguru import logger
+import json
+import html
 from .config import settings
 from .bot import dp, bot, notify_buyer
 from . import db
@@ -127,12 +129,27 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     status = "sale" if raw_status in ("sale", "approved", "conversion", "confirmed") else "lead"
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
-    offer_id = data.get("offer_id")
-    offer_name = data.get("offer_name") or data.get("offer")
+    offer_id = data.get("offer_id") or data.get("offer.id")
+    offer_name = data.get("offer_name") or data.get("offer.name") or data.get("offer")
     subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
     sub_id_3 = data.get("sub_id_3") or data.get("subid3")
-    sale_time = data.get("conversion_sale_time") or data.get("conversion_time")
-    campaign_name = data.get("campaign_name")
+    sale_time = data.get("conversion_sale_time") or data.get("conversion.sale_time") or data.get("conversion_time")
+    campaign_name = data.get("campaign_name") or data.get("campaign.name")
+    # Clean unexpanded placeholders like "{conversion.sale_time}"
+    def _clean(v):
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("{") and s.endswith("}"):
+                return None
+        return v
+    payout = _clean(payout)
+    currency = _clean(currency)
+    offer_id = _clean(offer_id)
+    offer_name = _clean(offer_name)
+    subid = _clean(subid)
+    sub_id_3 = _clean(sub_id_3)
+    sale_time = _clean(sale_time)
+    campaign_name = _clean(campaign_name)
     buyer_alias = None
     lead_alias = None
     if alias:
@@ -153,7 +170,21 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     if campaign_name:
         lines.append(f"<b>Campaign:</b> <code>{campaign_name}</code>")
 
-    text = "\n".join(lines)
+    # Append raw payload dump for debugging/verification
+    raw_for_dump = {k: v for k, v in data.items() if str(k).lower() not in ("token", "auth", "authorization")}
+    try:
+        raw_sorted = dict(sorted(raw_for_dump.items(), key=lambda kv: str(kv[0])))
+    except Exception:
+        raw_sorted = raw_for_dump
+    raw_json = json.dumps(raw_sorted, ensure_ascii=False, indent=2)
+    raw_json_esc = html.escape(raw_json)
+    # Keep total message under Telegram 4096 chars
+    MAX_RAW = 3500
+    if len(raw_json_esc) > MAX_RAW:
+        extra = len(raw_json_esc) - MAX_RAW
+        raw_json_esc = raw_json_esc[:MAX_RAW] + f"\n... (truncated {extra} chars)"
+
+    text = "\n".join(lines) + "\n\n<b>Все поля (как пришли):</b>\n<pre><code>" + raw_json_esc + "</code></pre>"
 
     await notify_buyer(buyer_id, text)
     return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
@@ -211,12 +242,26 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     status = "sale" if raw_status in ("sale", "approved", "conversion", "confirmed") else "lead"
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
-    offer_id = data.get("offer_id")
-    offer_name = data.get("offer_name") or data.get("offer")
+    offer_id = data.get("offer_id") or data.get("offer.id")
+    offer_name = data.get("offer_name") or data.get("offer.name") or data.get("offer")
     subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
     sub_id_3 = data.get("sub_id_3") or data.get("subid3")
-    sale_time = data.get("conversion_sale_time") or data.get("conversion_time")
-    campaign_name = data.get("campaign_name")
+    sale_time = data.get("conversion_sale_time") or data.get("conversion.sale_time") or data.get("conversion_time")
+    campaign_name = data.get("campaign_name") or data.get("campaign.name")
+    def _clean(v):
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("{") and s.endswith("}"):
+                return None
+        return v
+    payout = _clean(payout)
+    currency = _clean(currency)
+    offer_id = _clean(offer_id)
+    offer_name = _clean(offer_name)
+    subid = _clean(subid)
+    sub_id_3 = _clean(sub_id_3)
+    sale_time = _clean(sale_time)
+    campaign_name = _clean(campaign_name)
 
     lines = [
         f"<b>Status:</b> <code>{status}</code>",
@@ -232,7 +277,19 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     if campaign_name:
         lines.append(f"<b>Campaign:</b> <code>{campaign_name}</code>")
 
-    text = "\n".join(lines)
+    raw_for_dump = {k: v for k, v in data.items() if str(k).lower() not in ("token", "auth", "authorization")}
+    try:
+        raw_sorted = dict(sorted(raw_for_dump.items(), key=lambda kv: str(kv[0])))
+    except Exception:
+        raw_sorted = raw_for_dump
+    raw_json = json.dumps(raw_sorted, ensure_ascii=False, indent=2)
+    raw_json_esc = html.escape(raw_json)
+    MAX_RAW = 3500
+    if len(raw_json_esc) > MAX_RAW:
+        extra = len(raw_json_esc) - MAX_RAW
+        raw_json_esc = raw_json_esc[:MAX_RAW] + f"\n... (truncated {extra} chars)"
+
+    text = "\n".join(lines) + "\n\n<b>Все поля (как пришли):</b>\n<pre><code>" + raw_json_esc + "</code></pre>"
 
     await notify_buyer(buyer_id, text)
     return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
