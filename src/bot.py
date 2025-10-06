@@ -13,6 +13,46 @@ bot = Bot(token=settings.telegram_bot_token, default=DefaultBotProperties(parse_
 dp = Dispatcher()
 
 ADMIN_IDS = set(settings.admins)
+def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
+    ]
+    if is_admin:
+        buttons += [
+            [InlineKeyboardButton(text="Пользователи", callback_data="menu:listusers"), InlineKeyboardButton(text="Управление", callback_data="menu:manage")],
+            [InlineKeyboardButton(text="Алиасы", callback_data="menu:aliases")],
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+@dp.message(Command("menu"))
+async def on_menu(message: Message):
+    is_admin = message.from_user.id in ADMIN_IDS
+    await message.answer("Меню:", reply_markup=main_menu(is_admin))
+
+@dp.callback_query(F.data.startswith("menu:"))
+async def on_menu_click(call: CallbackQuery):
+    key = call.data.split(":",1)[1]
+    if key == "whoami":
+        await on_whoami(call.message)
+        return await call.answer()
+    if key == "listroutes":
+        await on_list_routes(call.message)
+        return await call.answer()
+    if key == "listusers":
+        if call.from_user.id not in ADMIN_IDS:
+            return await call.answer("Нет прав", show_alert=True)
+        await on_list_users(call.message)
+        return await call.answer()
+    if key == "manage":
+        if call.from_user.id not in ADMIN_IDS:
+            return await call.answer("Нет прав", show_alert=True)
+        await on_manage(call.message)
+        return await call.answer()
+    if key == "aliases":
+        if call.from_user.id not in ADMIN_IDS:
+            return await call.answer("Нет прав", show_alert=True)
+        await on_aliases(call.message)
+        return await call.answer()
 
 @dp.message(CommandStart())
 async def on_start(message: Message):

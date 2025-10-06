@@ -6,6 +6,11 @@ from .bot import dp, bot, notify_buyer
 from . import db
 from aiogram.types import Update
 
+# Sanitize webhook path for route decorator
+WEBHOOK_PATH = settings.webhook_secret_path.strip()
+if not WEBHOOK_PATH.startswith("/"):
+    WEBHOOK_PATH = "/" + WEBHOOK_PATH
+
 app = FastAPI(title="Keitaro Telegram Notifier")
 
 @app.on_event("startup")
@@ -187,9 +192,14 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     await notify_buyer(buyer_id, text)
     return {"ok": True, "routed": True, "buyer_id": buyer_id}
 
-@app.post(settings.webhook_secret_path)
+@app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
-    payload = await request.json()
-    update = Update.model_validate(payload)
-    await dp.feed_update(bot, update)
-    return JSONResponse({"ok": True})
+    try:
+        payload = await request.json()
+        update = Update.model_validate(payload)
+        await dp.feed_update(bot, update)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        # Never 500 to Telegram: log and ACK to avoid retries blocking updates
+        logger.exception(f"Webhook update handling failed: {e}")
+        return JSONResponse({"ok": True})
