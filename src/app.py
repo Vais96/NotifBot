@@ -70,33 +70,57 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
         if token != settings.postback_token:
             raise HTTPException(403, "Forbidden")
 
-    buyer_id = await db.find_user_for_postback(
+    # Try alias-based routing by campaign_name prefix
+    campaign_name = data.get("campaign_name") or data.get("campaign")
+    alias_key = None
+    if campaign_name:
+        alias_key = (campaign_name.split("_", 1)[0] or "").strip()
+    alias = await db.find_alias(alias_key)
+
+    buyer_id = alias.get("buyer_id") if alias else None
+    if not buyer_id:
+        buyer_id = await db.find_user_for_postback(
         offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
         country=data.get("country") or data.get("geo"),
         source=data.get("source") or data.get("traffic_source_name") or data.get("traffic_source") or data.get("affiliate")
-    )
+        )
     await db.log_event(data, buyer_id)
 
     if not buyer_id:
         # no route matched, silently accept
         return JSONResponse({"ok": True, "routed": False})
 
-    status = data.get("status") or data.get("action") or "conversion"
-    # Keitaro may use revenue/profit fields; accept them as payout fallback
-    payout = data.get("payout") or data.get("revenue") or data.get("conversion_revenue") or data.get("profit")
-    currency = data.get("currency")
-    offer = data.get("offer") or data.get("offer_name") or data.get("campaign_name")
-    country = data.get("country") or data.get("geo")
-    clickid = data.get("clickid") or data.get("click_id") or data.get("subid")
+    # Map status to lead/sale only
+    raw_status = (data.get("status") or data.get("action") or "").lower()
+    status = "sale" if raw_status in ("sale", "approved", "conversion", "confirmed") else "lead"
+    payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
+    currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
+    offer_id = data.get("offer_id")
+    offer_name = data.get("offer_name") or data.get("offer")
+    subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
+    sub_id_3 = data.get("sub_id_3") or data.get("subid3")
+    sale_time = data.get("conversion_sale_time") or data.get("conversion_time")
+    campaign_name = data.get("campaign_name")
+    buyer_alias = None
+    lead_alias = None
+    if alias:
+        buyer_alias = alias.get("buyer_id")
+        lead_alias = alias.get("lead_id")
 
     lines = [
-        f"<b>{status.upper()}</b>",
-        f"Offer: <code>{offer or '-'}\n</code>",
-        f"Geo: <code>{country or '-'}\n</code>",
-        f"ClickID: <code>{clickid or '-'}\n</code>",
+        f"<b>Status:</b> <code>{status}</code>",
+        f"<b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}\n</code>",
+        f"<b>SubID (user):</b> <code>{subid or '-'}\n</code>",
     ]
     if payout:
-        lines.append(f"Payout: <b>{payout} {currency or ''}</b>")
+        lines.append(f"<b>Profit:</b> <code>{payout} {currency or ''}</code>")
+    if sub_id_3:
+        lines.append(f"<b>Sub ID 3:</b> <code>{sub_id_3}</code>")
+    if sale_time:
+        lines.append(f"<b>Conversion sale time:</b> <code>{sale_time}</code>")
+    if campaign_name:
+        lines.append(f"<b>Campaign:</b> <code>{campaign_name}</code>")
+
     text = "\n".join(lines)
 
     await notify_buyer(buyer_id, text)
@@ -116,7 +140,14 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         if token != settings.postback_token:
             raise HTTPException(403, "Forbidden")
 
-    buyer_id = await db.find_user_for_postback(
+    campaign_name = data.get("campaign_name") or data.get("campaign")
+    alias_key = None
+    if campaign_name:
+        alias_key = (campaign_name.split("_", 1)[0] or "").strip()
+    alias = await db.find_alias(alias_key)
+    buyer_id = alias.get("buyer_id") if alias else None
+    if not buyer_id:
+        buyer_id = await db.find_user_for_postback(
         offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
         country=data.get("country") or data.get("geo"),
         source=data.get("source") or data.get("traffic_source_name") or data.get("traffic_source") or data.get("affiliate")
@@ -126,21 +157,31 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     if not buyer_id:
         return JSONResponse({"ok": True, "routed": False})
 
-    status = data.get("status") or data.get("action") or "conversion"
-    payout = data.get("payout") or data.get("revenue") or data.get("conversion_revenue") or data.get("profit")
-    currency = data.get("currency")
-    offer = data.get("offer") or data.get("offer_name") or data.get("campaign_name")
-    country = data.get("country") or data.get("geo")
-    clickid = data.get("clickid") or data.get("click_id") or data.get("subid")
+    raw_status = (data.get("status") or data.get("action") or "").lower()
+    status = "sale" if raw_status in ("sale", "approved", "conversion", "confirmed") else "lead"
+    payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
+    currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
+    offer_id = data.get("offer_id")
+    offer_name = data.get("offer_name") or data.get("offer")
+    subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
+    sub_id_3 = data.get("sub_id_3") or data.get("subid3")
+    sale_time = data.get("conversion_sale_time") or data.get("conversion_time")
+    campaign_name = data.get("campaign_name")
 
     lines = [
-        f"<b>{status.upper()}</b>",
-        f"Offer: <code>{offer or '-'}\n</code>",
-        f"Geo: <code>{country or '-'}\n</code>",
-        f"ClickID: <code>{clickid or '-'}\n</code>",
+        f"<b>Status:</b> <code>{status}</code>",
+        f"<b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}\n</code>",
+        f"<b>SubID (user):</b> <code>{subid or '-'}\n</code>",
     ]
     if payout:
-        lines.append(f"Payout: <b>{payout} {currency or ''}</b>")
+        lines.append(f"<b>Profit:</b> <code>{payout} {currency or ''}</code>")
+    if sub_id_3:
+        lines.append(f"<b>Sub ID 3:</b> <code>{sub_id_3}</code>")
+    if sale_time:
+        lines.append(f"<b>Conversion sale time:</b> <code>{sale_time}</code>")
+    if campaign_name:
+        lines.append(f"<b>Campaign:</b> <code>{campaign_name}</code>")
+
     text = "\n".join(lines)
 
     await notify_buyer(buyer_id, text)

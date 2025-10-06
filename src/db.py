@@ -79,6 +79,26 @@ SCHEMA_SQL = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # alias-based routing: alias -> buyer/lead
+    """
+    CREATE TABLE IF NOT EXISTS tg_aliases (
+        alias VARCHAR(255) PRIMARY KEY,
+        buyer_id BIGINT NULL,
+        lead_id BIGINT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_tg_alias_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL,
+        CONSTRAINT fk_tg_alias_lead FOREIGN KEY (lead_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # simple pending action storage per admin for inline flows
+    """
+    CREATE TABLE IF NOT EXISTS tg_pending_actions (
+        admin_id BIGINT PRIMARY KEY,
+        action VARCHAR(255) NOT NULL,
+        target_user_id BIGINT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 async def init_pool() -> aiomysql.Pool:
@@ -242,3 +262,69 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
                     payload["currency"], payload["clickid"], json.dumps(raw, ensure_ascii=False), routed_user_id
                 )
             )
+
+async def find_alias(alias: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not alias:
+        return None
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT alias, buyer_id, lead_id FROM tg_aliases WHERE alias=%s", (alias.lower(),))
+            return await cur.fetchone()
+
+async def set_alias(alias: str, buyer_id: Optional[int] = None, lead_id: Optional[int] = None) -> None:
+    pool = await init_pool()
+    a = alias.lower()
+    # Upsert logic: if row exists, update provided fields; else insert
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT buyer_id, lead_id FROM tg_aliases WHERE alias=%s", (a,))
+            row = await cur.fetchone()
+            if row:
+                new_buyer = buyer_id if buyer_id is not None else row.get("buyer_id")
+                new_lead = lead_id if lead_id is not None else row.get("lead_id")
+                await cur.execute("UPDATE tg_aliases SET buyer_id=%s, lead_id=%s WHERE alias=%s", (new_buyer, new_lead, a))
+            else:
+                await cur.execute("INSERT INTO tg_aliases(alias, buyer_id, lead_id) VALUES(%s, %s, %s)", (a, buyer_id, lead_id))
+
+async def list_aliases() -> List[Dict[str, Any]]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT alias, buyer_id, lead_id FROM tg_aliases ORDER BY alias ASC")
+            return await cur.fetchall()
+
+async def delete_alias(alias: str) -> None:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM tg_aliases WHERE alias=%s", (alias.lower(),))
+
+async def set_pending_action(admin_id: int, action: str, target_user_id: Optional[int]) -> None:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO tg_pending_actions(admin_id, action, target_user_id)
+                VALUES(%s, %s, %s)
+                ON DUPLICATE KEY UPDATE action=VALUES(action), target_user_id=VALUES(target_user_id), created_at=CURRENT_TIMESTAMP
+                """,
+                (admin_id, action, target_user_id)
+            )
+
+async def get_pending_action(admin_id: int) -> Optional[Tuple[str, Optional[int]]]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT action, target_user_id FROM tg_pending_actions WHERE admin_id=%s", (admin_id,))
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return row["action"], row["target_user_id"]
+
+async def clear_pending_action(admin_id: int) -> None:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM tg_pending_actions WHERE admin_id=%s", (admin_id,))

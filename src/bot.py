@@ -38,7 +38,8 @@ async def on_help(message: Message):
         "/setrole — назначить роль (admin)\n"
         "/createteam — создать команду (admin)\n"
         "/setteam — назначить пользователя в команду (admin/head)\n"
-        "/listteams — список команд"
+        "/listteams — список команд\n"
+        "/aliases — алиасы (admin): связать campaign_name с buyer/lead"
     )
 
 @dp.message(Command("whoami"))
@@ -103,6 +104,51 @@ async def on_manage(message: Message):
     for u in users[:25]:  # не спамим много
         text = f"<b>{u['full_name'] or '-'}</b> @{u['username'] or '-'}\nID: <code>{u['telegram_id']}</code>\nRole: <code>{u['role']}</code> | Team: <code>{u['team_id'] or '-'}</code> | Active: <code>{'yes' if u['is_active'] else 'no'}</code>"
         await message.answer(text, reply_markup=_user_row_controls(u))
+
+@dp.message(Command("aliases"))
+async def on_aliases(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("Только для админов")
+    rows = await db.list_aliases()
+    if not rows:
+        await message.answer("Алиасов нет. Ответьте командой:\n/setalias <alias> buyer=<id|-> lead=<id|->")
+    else:
+        lines = []
+        for r in rows[:50]:
+            lines.append(f"{r['alias']} → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}")
+        await message.answer("Алиасы:\n" + "\n".join(lines))
+    await message.answer("Чтобы задать: /setalias <alias> buyer=<id|-> lead=<id|->\nУдалить: /delalias <alias>")
+
+@dp.message(Command("setalias"))
+async def on_setalias(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("Только для админов")
+    # /setalias <alias> buyer=<id|-> lead=<id|->
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.answer("Использование: /setalias <alias> buyer=<id|-> lead=<id|->")
+    alias = parts[1]
+    buyer_id = None
+    lead_id = None
+    for p in parts[2:]:
+        if p.startswith("buyer="):
+            v = p.split("=",1)[1]
+            buyer_id = None if v == '-' else int(v)
+        if p.startswith("lead="):
+            v = p.split("=",1)[1]
+            lead_id = None if v == '-' else int(v)
+    await db.set_alias(alias, buyer_id, lead_id)
+    await message.answer("Алиас сохранён")
+
+@dp.message(Command("delalias"))
+async def on_delalias(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("Только для админов")
+    parts = message.text.split()
+    if len(parts) != 2:
+        return await message.answer("Использование: /delalias <alias>")
+    await db.delete_alias(parts[1])
+    await message.answer("Алиас удалён")
 
 @dp.callback_query(F.data.startswith("role:"))
 async def cb_set_role(call: CallbackQuery):
