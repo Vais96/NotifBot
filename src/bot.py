@@ -24,6 +24,82 @@ def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
         ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+# Helpers used by inline menu to avoid using call.message.from_user (which is the bot)
+async def _send_whoami(chat_id: int, user_id: int, username: str | None):
+    await bot.send_message(chat_id, f"Ваш Telegram ID: <code>{user_id}</code>\nUsername: @{username or '-'}")
+
+async def _send_list_users(chat_id: int, actor_id: int):
+    users = await db.list_users()
+    my = next((u for u in users if u["telegram_id"] == actor_id), None)
+    my_role = my["role"] if my else "buyer"
+    if actor_id in ADMIN_IDS:
+        my_role = "admin"
+    my_team = my.get("team_id") if my else None
+    visible = []
+    for u in users:
+        if my_role in ("admin", "head"):
+            visible.append(u)
+        elif my_role == "lead":
+            if u.get("team_id") == my_team:
+                visible.append(u)
+        else:
+            if u["telegram_id"] == actor_id:
+                visible.append(u)
+    if not visible:
+        return await bot.send_message(chat_id, "Нет данных для отображения")
+    lines = []
+    for u in visible:
+        display_role = u['role']
+        if u['telegram_id'] == actor_id and actor_id in ADMIN_IDS:
+            display_role = 'admin'
+        lines.append(f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} — {u['full_name'] or ''} | role={display_role} | team={u['team_id'] or '-'}")
+    await bot.send_message(chat_id, "Пользователи:\n" + "\n".join(lines))
+
+async def _send_list_routes(chat_id: int, actor_id: int):
+    users = await db.list_users()
+    my = next((u for u in users if u["telegram_id"] == actor_id), None)
+    my_role = (my or {}).get("role", "buyer")
+    if actor_id in ADMIN_IDS:
+        my_role = "admin"
+    my_team = (my or {}).get("team_id")
+    rows = await db.list_routes()
+    def visible(r: dict) -> bool:
+        if my_role in ("admin", "head"):
+            return True
+        if my_role == "lead":
+            ru = next((u for u in users if u["telegram_id"] == r["user_id"]), None)
+            return ru and ru.get("team_id") == my_team
+        return r["user_id"] == actor_id
+    vis = [r for r in rows if visible(r)]
+    if not vis:
+        return await bot.send_message(chat_id, "Правил нет или нет доступа")
+    def fmt(r):
+        return f"#{r['id']} -> <code>{r['user_id']}</code> (@{r['username'] or '-'}) | offer={r['offer'] or '*'} | geo={r['country'] or '*'} | src={r['source'] or '*'} | prio={r['priority']}"
+    await bot.send_message(chat_id, "Правила:\n" + "\n".join(fmt(r) for r in vis))
+
+async def _send_manage(chat_id: int, actor_id: int):
+    if actor_id not in ADMIN_IDS:
+        return await bot.send_message(chat_id, "Только для админов")
+    users = await db.list_users()
+    if not users:
+        return await bot.send_message(chat_id, "Пока нет пользователей, попросите нажать /start")
+    for u in users[:25]:
+        text = f"<b>{u['full_name'] or '-'}</b> @{u['username'] or '-'}\nID: <code>{u['telegram_id']}</code>\nRole: <code>{u['role']}</code> | Team: <code>{u['team_id'] or '-'}</code> | Active: <code>{'yes' if u['is_active'] else 'no'}</code>"
+        await bot.send_message(chat_id, text, reply_markup=_user_row_controls(u))
+
+async def _send_aliases(chat_id: int, actor_id: int):
+    if actor_id not in ADMIN_IDS:
+        return await bot.send_message(chat_id, "Только для админов")
+    rows = await db.list_aliases()
+    if not rows:
+        await bot.send_message(chat_id, "Алиасов пока нет.")
+    else:
+        for r in rows[:25]:
+            text = f"<b>{r['alias']}</b> → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}"
+            await bot.send_message(chat_id, text, reply_markup=alias_row_controls(r['alias'], r['buyer_id'], r['lead_id']))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Добавить алиас", callback_data="alias:new")]])
+    await bot.send_message(chat_id, "Управление алиасами:", reply_markup=kb)
+
 @dp.message(Command("menu"))
 async def on_menu(message: Message):
     is_admin = message.from_user.id in ADMIN_IDS
@@ -33,25 +109,19 @@ async def on_menu(message: Message):
 async def on_menu_click(call: CallbackQuery):
     key = call.data.split(":",1)[1]
     if key == "whoami":
-        await on_whoami(call.message)
+        await _send_whoami(call.message.chat.id, call.from_user.id, call.from_user.username)
         return await call.answer()
     if key == "listroutes":
-        await on_list_routes(call.message)
+        await _send_list_routes(call.message.chat.id, call.from_user.id)
         return await call.answer()
     if key == "listusers":
-        if call.from_user.id not in ADMIN_IDS:
-            return await call.answer("Нет прав", show_alert=True)
-        await on_list_users(call.message)
+        await _send_list_users(call.message.chat.id, call.from_user.id)
         return await call.answer()
     if key == "manage":
-        if call.from_user.id not in ADMIN_IDS:
-            return await call.answer("Нет прав", show_alert=True)
-        await on_manage(call.message)
+        await _send_manage(call.message.chat.id, call.from_user.id)
         return await call.answer()
     if key == "aliases":
-        if call.from_user.id not in ADMIN_IDS:
-            return await call.answer("Нет прав", show_alert=True)
-        await on_aliases(call.message)
+        await _send_aliases(call.message.chat.id, call.from_user.id)
         return await call.answer()
 
 @dp.message(CommandStart())
