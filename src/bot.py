@@ -128,7 +128,8 @@ def _user_row_controls(u: dict) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="lead", callback_data=f"role:{uid}:lead"),
          InlineKeyboardButton(text="head", callback_data=f"role:{uid}:head"),
          InlineKeyboardButton(text="admin", callback_data=f"role:{uid}:admin")],
-        [InlineKeyboardButton(text=("Deactivate" if is_active else "Activate"), callback_data=f"active:{uid}:{0 if is_active else 1}")]
+        [InlineKeyboardButton(text=("Deactivate" if is_active else "Activate"), callback_data=f"active:{uid}:{0 if is_active else 1}")],
+        [InlineKeyboardButton(text="Set team", callback_data=f"team:choose:{uid}")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -145,19 +146,29 @@ async def on_manage(message: Message):
         text = f"<b>{u['full_name'] or '-'}</b> @{u['username'] or '-'}\nID: <code>{u['telegram_id']}</code>\nRole: <code>{u['role']}</code> | Team: <code>{u['team_id'] or '-'}</code> | Active: <code>{'yes' if u['is_active'] else 'no'}</code>"
         await message.answer(text, reply_markup=_user_row_controls(u))
 
+def alias_row_controls(alias: str, buyer_id: int | None, lead_id: int | None) -> InlineKeyboardMarkup:
+    a = alias
+    buttons = [
+        [InlineKeyboardButton(text=f"Set buyer ({buyer_id or '-'})", callback_data=f"alias:setbuyer:{a}")],
+        [InlineKeyboardButton(text=f"Set lead ({lead_id or '-'})", callback_data=f"alias:setlead:{a}")],
+        [InlineKeyboardButton(text="Delete", callback_data=f"alias:delete:{a}")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 @dp.message(Command("aliases"))
 async def on_aliases(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return await message.answer("Только для админов")
     rows = await db.list_aliases()
     if not rows:
-        await message.answer("Алиасов нет. Ответьте командой:\n/setalias <alias> buyer=<id|-> lead=<id|->")
+        await message.answer("Алиасов пока нет.")
     else:
-        lines = []
-        for r in rows[:50]:
-            lines.append(f"{r['alias']} → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}")
-        await message.answer("Алиасы:\n" + "\n".join(lines))
-    await message.answer("Чтобы задать: /setalias <alias> buyer=<id|-> lead=<id|->\nУдалить: /delalias <alias>")
+        for r in rows[:25]:
+            text = f"<b>{r['alias']}</b> → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}"
+            await message.answer(text, reply_markup=alias_row_controls(r['alias'], r['buyer_id'], r['lead_id']))
+    # кнопка для создания нового алиаса
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Добавить алиас", callback_data="alias:new")]])
+    await message.answer("Управление алиасами:", reply_markup=kb)
 
 @dp.message(Command("setalias"))
 async def on_setalias(message: Message):
@@ -189,6 +200,94 @@ async def on_delalias(message: Message):
         return await message.answer("Использование: /delalias <alias>")
     await db.delete_alias(parts[1])
     await message.answer("Алиас удалён")
+
+@dp.callback_query(F.data == "alias:new")
+async def cb_alias_new(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    await db.set_pending_action(call.from_user.id, "alias:new", None)
+    await call.message.answer("Введите имя алиаса (префикс campaign_name до _):")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("alias:setbuyer:"))
+async def cb_alias_setbuyer(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    alias = call.data.split(":", 2)[2]
+    await db.set_pending_action(call.from_user.id, f"alias:setbuyer:{alias}", None)
+    await call.message.answer(f"Пришлите Telegram ID покупателя для алиаса {alias}, или '-' чтобы убрать")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("alias:setlead:"))
+async def cb_alias_setlead(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    alias = call.data.split(":", 2)[2]
+    await db.set_pending_action(call.from_user.id, f"alias:setlead:{alias}", None)
+    await call.message.answer(f"Пришлите Telegram ID лида для алиаса {alias}, или '-' чтобы убрать")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("alias:delete:"))
+async def cb_alias_delete(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    alias = call.data.split(":", 2)[2]
+    await db.delete_alias(alias)
+    await call.message.edit_text(f"Алиас {alias} удалён")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("team:choose:"))
+async def cb_team_choose(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    uid = int(call.data.split(":", 2)[2])
+    teams = await db.list_teams()
+    buttons = []
+    for t in teams[:50]:
+        buttons.append([InlineKeyboardButton(text=f"#{t['id']} {t['name']}", callback_data=f"team:set:{uid}:{t['id']}")])
+    buttons.append([InlineKeyboardButton(text="Удалить из команды", callback_data=f"team:set:{uid}:-")])
+    await call.message.answer("Выберите команду:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("team:set:"))
+async def cb_team_set(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    _, _, uid, team_raw = call.data.split(":", 3)
+    team_id = None if team_raw == '-' else int(team_raw)
+    await db.set_user_team(int(uid), team_id)
+    await call.answer("Команда обновлена")
+
+@dp.message()
+async def on_text_fallback(message: Message):
+    # обработка pending actions для алиасов и команд
+    pending = await db.get_pending_action(message.from_user.id)
+    if not pending:
+        return  # игнорируем обычные сообщения, чтобы не засорять чат
+    action, _ = pending
+    try:
+        if action == "alias:new":
+            alias = message.text.strip()
+            await db.set_alias(alias)
+            await db.clear_pending_action(message.from_user.id)
+            return await message.answer("Алиас создан. Откройте Алиасы в меню, чтобы назначить buyer/lead")
+        if action.startswith("alias:setbuyer:"):
+            alias = action.split(":", 2)[2]
+            v = message.text.strip()
+            buyer_id = None if v == '-' else int(v)
+            await db.set_alias(alias, buyer_id=buyer_id)
+            await db.clear_pending_action(message.from_user.id)
+            return await message.answer("Buyer назначен")
+        if action.startswith("alias:setlead:"):
+            alias = action.split(":", 2)[2]
+            v = message.text.strip()
+            lead_id = None if v == '-' else int(v)
+            await db.set_alias(alias, lead_id=lead_id)
+            await db.clear_pending_action(message.from_user.id)
+            return await message.answer("Lead назначен")
+    except Exception as e:
+        logger.exception(e)
+        return await message.answer("Ошибка обработки ввода")
 
 @dp.callback_query(F.data.startswith("role:"))
 async def cb_set_role(call: CallbackQuery):
