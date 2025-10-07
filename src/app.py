@@ -99,16 +99,16 @@ def _build_notification_text(data: dict) -> str:
 
     # Pretty emoji-rich layout
     lines: list[str] = []
-    lines.append(f"👤 <b>Байер:</b> <code>{alias_name or '-'}</code>")
-    lines.append(f"🎯 <b>Оффер:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
+    lines.append(f"👤 <b>БАЙЕР:</b> <code>{alias_name or '-'}</code>")
+    lines.append(f"🎯 <b>ОФФЕР:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
     if payout_fmt:
-        lines.append(f"💰 <b>Профит:</b> <code>{payout_fmt} {currency or ''}</code>")
+        lines.append(f"💰 <b>ПРОФИТ:</b> <code>{payout_fmt} {currency or ''}</code>")
     lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
-    lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
     if campaign_name:
-        lines.append(f"📣 <b>Кампания:</b> <code>{campaign_name}</code>")
+        lines.append(f"� <b>КАМПАНИЯ:</b> <code>{campaign_name}</code>")
+    lines.append(f"� <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
     if sale_time_fmt:
-        lines.append(f"🕒 <b>Конверсия:</b> <code>{sale_time_fmt}</code> (UTC +0)")
+        lines.append(f"🕒 <b>КОНВЕРСИЯ:</b> <code>{sale_time_fmt}</code> (UTC +0)")
 
     return "\n".join(lines)
 
