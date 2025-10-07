@@ -355,9 +355,11 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
             buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
             if buyer_user and buyer_user.get("team_id"):
                 team_id = buyer_user.get("team_id")
-                team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
-                for u in team_leads:
-                    recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+                # If buyer is NOT a mentor, notify team leads; mentors' own deposits are not visible to leads
+                if (buyer_user.get("role") != "mentor"):
+                    team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
+                    for u in team_leads:
+                        recipient_ids.add(int(u["telegram_id"]))  # type: ignore
                 # mentors subscribed to this team
                 try:
                     mentor_ids = await db.list_team_mentors(int(team_id))
@@ -539,9 +541,10 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
             buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
             if buyer_user and buyer_user.get("team_id"):
                 team_id = buyer_user.get("team_id")
-                team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
-                for u in team_leads:
-                    recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+                if (buyer_user.get("role") != "mentor"):
+                    team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
+                    for u in team_leads:
+                        recipient_ids.add(int(u["telegram_id"]))  # type: ignore
                 # mentors subscribed to this team
                 try:
                     mentor_ids = await db.list_team_mentors(int(team_id))
