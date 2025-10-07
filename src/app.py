@@ -105,8 +105,8 @@ def _build_notification_text(data: dict) -> str:
         lines.append(f"💰 <b>ПРОФИТ:</b> <code>{payout_fmt} {currency or ''}</code>")
     lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
     if campaign_name:
-        lines.append(f"� <b>КАМПАНИЯ:</b> <code>{campaign_name}</code>")
-    lines.append(f"� <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
+        lines.append(f"📣 <b>КАМПАНИЯ:</b> <code>{campaign_name}</code>")
+    lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
     if sale_time_fmt:
         lines.append(f"🕒 <b>КОНВЕРСИЯ:</b> <code>{sale_time_fmt}</code> (UTC +0)")
 
@@ -358,6 +358,13 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
                 team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
                 for u in team_leads:
                     recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+                # mentors subscribed to this team
+                try:
+                    mentor_ids = await db.list_team_mentors(int(team_id))
+                    for mid in mentor_ids:
+                        recipient_ids.add(int(mid))
+                except Exception as e:
+                    logger.warning(f"Failed to include mentors: {e}")
             heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
             for u in heads:
                 recipient_ids.add(int(u["telegram_id"]))  # type: ignore
@@ -535,6 +542,13 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
                 team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
                 for u in team_leads:
                     recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+                # mentors subscribed to this team
+                try:
+                    mentor_ids = await db.list_team_mentors(int(team_id))
+                    for mid in mentor_ids:
+                        recipient_ids.add(int(mid))
+                except Exception as e:
+                    logger.warning(f"Failed to include mentors: {e}")
             heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
             for u in heads:
                 recipient_ids.add(int(u["telegram_id"]))  # type: ignore

@@ -375,7 +375,10 @@ async def on_help(message: Message):
         "/createteam — создать команду (admin)\n"
         "/setteam — назначить пользователя в команду (admin/head)\n"
         "/listteams — список команд\n"
-        "/aliases — алиасы (admin): связать campaign_name с buyer/lead"
+        "/aliases — алиасы (admin): связать campaign_name с buyer/lead\n"
+        "/addmentor — назначить роль mentor (admin)\n"
+        "/mentor_follow — подписать ментора на команду (admin)\n"
+        "/mentor_unfollow — отписать ментора от команды (admin)"
     )
 
 @dp.message(Command("ping"))
@@ -770,10 +773,10 @@ async def on_add_rule(message: Message):
 async def on_set_role(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return await message.answer("Только для админов")
-    # /setrole <telegram_id> <buyer|lead|head|admin>
+    # /setrole <telegram_id> <buyer|lead|head|admin|mentor>
     parts = message.text.split()
     if len(parts) != 3:
-        return await message.answer("Использование: /setrole <telegram_id> <buyer|lead|head|admin>")
+        return await message.answer("Использование: /setrole <telegram_id> <buyer|lead|head|admin|mentor>")
     try:
         uid = await _resolve_user_id(parts[1])
         role = parts[2]
@@ -826,3 +829,54 @@ async def notify_buyer(buyer_id: int, text: str):
         await bot.send_message(chat_id=buyer_id, text=text)
     except Exception as e:
         logger.warning(f"Failed to notify buyer {buyer_id}: {e}")
+
+# --- Mentor management (admin) ---
+@dp.message(Command("addmentor"))
+async def on_add_mentor(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("Только для админов")
+    # /addmentor <telegram_id>
+    parts = message.text.split()
+    if len(parts) != 2:
+        return await message.answer("Использование: /addmentor <telegram_id>")
+    try:
+        uid = await _resolve_user_id(parts[1])
+        await db.set_user_role(uid, "mentor")
+        await message.answer("OK, назначен ментором")
+    except Exception as e:
+        logger.exception(e)
+        await message.answer("Ошибка назначения роли mentor")
+
+@dp.message(Command("mentor_follow"))
+async def on_mentor_follow(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("Только для админов")
+    # /mentor_follow <mentor_id> <team_id>
+    parts = message.text.split()
+    if len(parts) != 3:
+        return await message.answer("Использование: /mentor_follow <mentor_id> <team_id>")
+    try:
+        mid = await _resolve_user_id(parts[1])
+        team_id = int(parts[2])
+        await db.add_mentor_team(mid, team_id)
+        await message.answer("OK, подписан на команду")
+    except Exception as e:
+        logger.exception(e)
+        await message.answer("Ошибка подписки ментора на команду")
+
+@dp.message(Command("mentor_unfollow"))
+async def on_mentor_unfollow(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("Только для админов")
+    # /mentor_unfollow <mentor_id> <team_id>
+    parts = message.text.split()
+    if len(parts) != 3:
+        return await message.answer("Использование: /mentor_unfollow <mentor_id> <team_id>")
+    try:
+        mid = await _resolve_user_id(parts[1])
+        team_id = int(parts[2])
+        await db.remove_mentor_team(mid, team_id)
+        await message.answer("OK, отписан от команды")
+    except Exception as e:
+        logger.exception(e)
+        await message.answer("Ошибка отписки ментора от команды")

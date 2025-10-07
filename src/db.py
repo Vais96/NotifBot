@@ -36,7 +36,7 @@ SCHEMA_SQL = [
         telegram_id BIGINT PRIMARY KEY,
         username VARCHAR(255) NULL,
         full_name VARCHAR(255) NULL,
-        role ENUM('buyer','lead','head','admin') NOT NULL DEFAULT 'buyer',
+        role ENUM('buyer','lead','head','admin','mentor') NOT NULL DEFAULT 'buyer',
         team_id BIGINT NULL,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -99,6 +99,17 @@ SCHEMA_SQL = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # mentors following teams (many-to-many)
+    """
+    CREATE TABLE IF NOT EXISTS tg_mentor_teams (
+        mentor_id BIGINT NOT NULL,
+        team_id BIGINT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (mentor_id, team_id),
+        CONSTRAINT fk_tg_mentor_user FOREIGN KEY (mentor_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE,
+        CONSTRAINT fk_tg_mentor_team FOREIGN KEY (team_id) REFERENCES tg_teams (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 async def init_pool() -> aiomysql.Pool:
@@ -116,6 +127,19 @@ async def init_pool() -> aiomysql.Pool:
                     except Exception as e:
                         logger.error(f"Schema DDL failed at statement {i}: {stmt}\nError: {e}")
                         raise
+                # Ensure 'mentor' exists in role enum (migration for existing installations)
+                try:
+                    await cur.execute("SHOW COLUMNS FROM tg_users LIKE 'role'")
+                    col = await cur.fetchone()
+                    if col and isinstance(col, (list, tuple)):
+                        col_type = col[1] if len(col) > 1 else ''
+                    else:
+                        col_type = ''
+                    if 'enum(' in col_type.lower() and 'mentor' not in col_type:
+                        logger.info("Altering tg_users.role to include 'mentor'")
+                        await cur.execute("ALTER TABLE tg_users MODIFY role ENUM('buyer','lead','head','admin','mentor') NOT NULL DEFAULT 'buyer'")
+                except Exception as e:
+                    logger.warning(f"Failed to ensure mentor in role enum: {e}")
     return _pool
 
 async def close_pool() -> None:
@@ -157,7 +181,7 @@ async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
             return row
 
 async def set_user_role(telegram_id: int, role: str) -> None:
-    assert role in ("buyer", "lead", "head", "admin")
+    assert role in ("buyer", "lead", "head", "admin", "mentor")
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
@@ -328,3 +352,39 @@ async def clear_pending_action(admin_id: int) -> None:
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("DELETE FROM tg_pending_actions WHERE admin_id=%s", (admin_id,))
+
+# --- Mentor helpers ---
+async def add_mentor_team(mentor_id: int, team_id: int) -> None:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO tg_mentor_teams(mentor_id, team_id)
+                VALUES(%s, %s)
+                ON DUPLICATE KEY UPDATE created_at=CURRENT_TIMESTAMP
+                """,
+                (mentor_id, team_id)
+            )
+
+async def remove_mentor_team(mentor_id: int, team_id: int) -> None:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM tg_mentor_teams WHERE mentor_id=%s AND team_id=%s", (mentor_id, team_id))
+
+async def list_mentor_teams(mentor_id: int) -> List[int]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT team_id FROM tg_mentor_teams WHERE mentor_id=%s", (mentor_id,))
+            rows = await cur.fetchall()
+            return [int(r[0]) for r in rows]
+
+async def list_team_mentors(team_id: int) -> List[int]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT mentor_id FROM tg_mentor_teams WHERE team_id=%s", (team_id,))
+            rows = await cur.fetchall()
+            return [int(r[0]) for r in rows]
