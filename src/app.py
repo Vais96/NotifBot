@@ -216,7 +216,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
         extra = len(raw_json_esc) - MAX_RAW
         raw_json_esc = raw_json_esc[:MAX_RAW] + f"\n... (truncated {extra} chars)"
 
-    text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\"><code>{raw_json_esc}</code></span>"
+    text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\">{raw_json_esc}</span>"
 
     await notify_buyer(buyer_id, text)
     return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
@@ -332,7 +332,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         extra = len(raw_json_esc) - MAX_RAW
         raw_json_esc = raw_json_esc[:MAX_RAW] + f"\n... (truncated {extra} chars)"
 
-    text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\"><code>{raw_json_esc}</code></span>"
+    text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\">{raw_json_esc}</span>"
 
     await notify_buyer(buyer_id, text)
     return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
