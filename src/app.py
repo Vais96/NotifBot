@@ -131,8 +131,19 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
         return JSONResponse({"ok": True, "routed": False})
 
     # Map status to lead/sale only
-    raw_status = (data.get("status") or data.get("action") or "").lower()
-    status = "sale" if raw_status in ("sale", "approved", "conversion", "confirmed") else "lead"
+    # Consider only explicit approved-like statuses as "sale"; treat generic "conversion/new/hold" as lead
+    raw_status_value = (
+        data.get("status")
+        or data.get("conversion_status")
+        or data.get("conversion.status")
+        or data.get("status_name")
+        or data.get("state")
+        or data.get("action")
+        or ""
+    )
+    raw_status = str(raw_status_value).lower()
+    sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
+    status = "sale" if raw_status in sale_like else "lead"
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
     offer_id = data.get("offer_id") or data.get("offer.id")
@@ -163,7 +174,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
         lead_alias = alias.get("lead_id")
 
     lines = [
-        f"<b>Status:</b> <code>{status}</code>",
+        f"<b>Status:</b> <code>{status}</code> | tracker: <code>{raw_status or '-'}\n</code>",
         f"<b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}\n</code>",
         f"<b>SubID (user):</b> <code>{subid or '-'}\n</code>",
     ]
@@ -244,8 +255,18 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     if not buyer_id:
         return JSONResponse({"ok": True, "routed": False})
 
-    raw_status = (data.get("status") or data.get("action") or "").lower()
-    status = "sale" if raw_status in ("sale", "approved", "conversion", "confirmed") else "lead"
+    raw_status_value = (
+        data.get("status")
+        or data.get("conversion_status")
+        or data.get("conversion.status")
+        or data.get("status_name")
+        or data.get("state")
+        or data.get("action")
+        or ""
+    )
+    raw_status = str(raw_status_value).lower()
+    sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
+    status = "sale" if raw_status in sale_like else "lead"
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
     offer_id = data.get("offer_id") or data.get("offer.id")
@@ -270,7 +291,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     campaign_name = _clean(campaign_name)
 
     lines = [
-        f"<b>Status:</b> <code>{status}</code>",
+        f"<b>Status:</b> <code>{status}</code> | tracker: <code>{raw_status or '-'}\n</code>",
         f"<b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}\n</code>",
         f"<b>SubID (user):</b> <code>{subid or '-'}\n</code>",
     ]
