@@ -294,7 +294,13 @@ async def cb_team_members_manage(call: CallbackQuery):
 async def cb_team_add_member(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
         return await call.answer("Нет прав", show_alert=True)
-    _, team_id, uid = call.data.split(":", 2)
+    # callback format: team:add:<team_id>:<user_id>
+    _, _, team_id, uid = call.data.split(":", 3)
+    # ensure user exists in DB (stub if needed)
+    try:
+        await db.upsert_user(int(uid), None, None)
+    except Exception:
+        pass
     await db.set_user_team(int(uid), int(team_id))
     await call.answer("Добавлен")
 
@@ -302,7 +308,8 @@ async def cb_team_add_member(call: CallbackQuery):
 async def cb_team_remove_member(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
         return await call.answer("Нет прав", show_alert=True)
-    _, team_id, uid = call.data.split(":", 2)
+    # callback format: team:remove:<team_id>:<user_id>
+    _, _, team_id, uid = call.data.split(":", 3)
     await db.set_user_team(int(uid), None)
     await call.answer("Убран")
 
@@ -622,7 +629,11 @@ async def on_text_fallback(message: Message):
                 except Exception:
                     await db.clear_pending_action(message.from_user.id)
                     return await message.answer("Не удалось распознать пользователя. Пришлите numeric Telegram ID или @username. Если пользователь не писал боту, попросите его отправить /start.")
-            # set user's team and elevate role to lead
+            # ensure user exists, set user's team and elevate role to lead
+            try:
+                await db.upsert_user(uid, None, None)
+            except Exception:
+                pass
             await db.set_user_team(uid, team_id)
             await db.set_user_role(uid, "lead")
             await db.clear_pending_action(message.from_user.id)
@@ -656,7 +667,11 @@ async def on_text_fallback(message: Message):
                 except Exception:
                     await db.clear_pending_action(message.from_user.id)
                     return await message.answer("Не удалось распознать пользователя. Пришлите numeric ID или @username. Если пользователь не писал боту, попросите его отправить /start.")
-            # Ensure target exists (or will be created on first /start); we still can set team immediately
+            # Ensure target exists (create stub if not) before assigning team
+            try:
+                await db.upsert_user(uid, None, None)
+            except Exception:
+                pass
             await db.set_user_team(uid, team_id)
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("Пользователь добавлен в вашу команду")

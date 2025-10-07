@@ -2,7 +2,6 @@ from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from loguru import logger
 import json
-import html
 from .config import settings
 from .bot import dp, bot, notify_buyer
 from . import db
@@ -140,12 +139,9 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     except Exception as e:
         logger.warning(f"Failed to log event: {e}")
 
-    if not buyer_id:
-        # no route matched and no admin configured
-        return JSONResponse({"ok": True, "routed": False})
+    # do not return early: admins should still receive notifications even if not routed
 
-    # Map status to lead/sale only
-    # Consider only explicit approved-like statuses as "sale"; treat generic "conversion/new/hold" as lead
+    # Map status and accept only sale-like statuses
     raw_status_value = (
         data.get("status")
         or data.get("conversion_status")
@@ -157,8 +153,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     )
     raw_status = str(raw_status_value).lower()
     sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
-    status = "sale" if raw_status in sale_like else "lead"
-    status_emoji = "💰" if status == "sale" else "📝"
+    is_sale = raw_status in sale_like
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
     offer_id = data.get("offer_id") or data.get("offer.id")
@@ -182,65 +177,102 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     sub_id_3 = _clean(sub_id_3)
     sale_time = _clean(sale_time)
     campaign_name = _clean(campaign_name)
-    buyer_alias = None
-    lead_alias = None
-    if alias:
-        buyer_alias = alias.get("buyer_id")
-        lead_alias = alias.get("lead_id")
+    # Helpers: round profit to integer and format conversion time as yyyy-mm-dd / HH:MM
+    def _format_payout(p):
+        if p is None:
+            return None
+        try:
+            s = str(p).replace(",", ".").strip()
+            value = float(s)
+            return str(int(round(value)))
+        except Exception:
+            return str(p)
 
-    lines = [
-        f"{status_emoji} <b>Status:</b> <code>{status}</code> <i>(tracker: {raw_status or '-'})</i>",
-        f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>",
-        f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>",
-    ]
-    if payout:
-        lines.append(f"💵 <b>Profit:</b> <code>{payout} {currency or ''}</code>")
-    if sub_id_3:
-        lines.append(f"🔢 <b>Sub ID 3:</b> <code>{sub_id_3}</code>")
-    if sale_time:
-        lines.append(f"🕒 <b>Conversion sale time:</b> <code>{sale_time}</code>")
+    def _format_sale_time(v):
+        from datetime import datetime
+        if v is None:
+            return None
+        try:
+            if isinstance(v, (int, float)):
+                ts = float(v)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                dt = datetime.fromtimestamp(ts)
+                return dt.strftime("%Y-%m-%d / %H:%M")
+            s = str(v).strip()
+            if s.isdigit():
+                ts = float(s)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                dt = datetime.fromtimestamp(ts)
+                return dt.strftime("%Y-%m-%d / %H:%M")
+            s_norm = s.replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(s_norm)
+                if dt.tzinfo:
+                    dt = dt.astimezone()
+                return dt.strftime("%Y-%m-%d / %H:%M")
+            except Exception:
+                pass
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    return dt.strftime("%Y-%m-%d / %H:%M")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return str(v)
+
+    payout_fmt = _format_payout(payout)
+    sale_time_fmt = _format_sale_time(sale_time)
+
+    # Build message lines: SubID, SubID3, Offer, Campaign, Date (profit included, rounded)
+    lines = []
+    if payout_fmt:
+        lines.append(f"💵 <b>Profit:</b> <code>{payout_fmt} {currency or ''}</code>")
+    lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
+    lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
+    lines.append(f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
     if campaign_name:
         lines.append(f"📣 <b>Campaign:</b> <code>{campaign_name}</code>")
+    if sale_time_fmt:
+        lines.append(f"🕒 <b>Conversion:</b> <code>{sale_time_fmt}</code>")
 
-    # Append raw payload dump for debugging/verification
-    raw_for_dump = {k: v for k, v in data.items() if str(k).lower() not in ("token", "auth", "authorization")}
-    try:
-        raw_sorted = dict(sorted(raw_for_dump.items(), key=lambda kv: str(kv[0])))
-    except Exception:
-        raw_sorted = raw_for_dump
-    raw_json = json.dumps(raw_sorted, ensure_ascii=False, indent=2)
-    raw_json_esc = html.escape(raw_json)
-    # Keep total message under Telegram 4096 chars
-    MAX_RAW = 3500
-    if len(raw_json_esc) > MAX_RAW:
-        extra = len(raw_json_esc) - MAX_RAW
-        raw_json_esc = raw_json_esc[:MAX_RAW] + f"\n... (truncated {extra} chars)"
+    text = "\n".join(lines)
 
-    text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\">{raw_json_esc}</span>"
-
-    # Determine recipients: buyer, team lead(s)/alias lead, and all heads
+    # Determine recipients
     recipient_ids: set[int] = set()
-    if buyer_id:
-        recipient_ids.add(int(buyer_id))
     try:
         users = await db.list_users()
-        # alias lead has highest priority if defined
-        alias_lead_id = None
-        if alias:
-            alias_lead_id = alias.get("lead_id")
-            if alias_lead_id:
-                recipient_ids.add(int(alias_lead_id))
-        # resolve team lead(s) for buyer
-        buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
-        if buyer_user and buyer_user.get("team_id"):
-            team_id = buyer_user.get("team_id")
-            team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
-            for u in team_leads:
-                recipient_ids.add(int(u["telegram_id"]))  # type: ignore
-        # all heads receive all notifications
-        heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
-        for u in heads:
+        # admins always receive all notifications
+        admins_db = [u for u in users if u.get("role") == "admin" and u.get("is_active")]
+        for u in admins_db:
             recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+        # plus ADMINS from env, if provided
+        if settings.admins:
+            for aid in settings.admins:
+                try:
+                    recipient_ids.add(int(aid))
+                except Exception:
+                    pass
+        # for sale events, also notify buyer, team leads (or alias lead), and all heads
+        if is_sale:
+            if buyer_id:
+                recipient_ids.add(int(buyer_id))
+            if alias:
+                alias_lead_id = alias.get("lead_id")
+                if alias_lead_id:
+                    recipient_ids.add(int(alias_lead_id))
+            buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
+            if buyer_user and buyer_user.get("team_id"):
+                team_id = buyer_user.get("team_id")
+                team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
+                for u in team_leads:
+                    recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+            heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
+            for u in heads:
+                recipient_ids.add(int(u["telegram_id"]))  # type: ignore
     except Exception as e:
         logger.warning(f"Failed to expand recipients: {e}")
 
@@ -250,7 +282,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
             await notify_buyer(rid, text)
         except Exception as e:
             logger.warning(f"Notify failed for {rid}: {e}")
-    return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
+    return {"ok": True, "routed": bool(buyer_id), "buyer_id": buyer_id, "fallback": used_fallback, "sale": is_sale}
 
 # Some trackers send GET S2S callbacks; mirror POST handler for query params
 @app.get("/keitaro/postback")
@@ -298,8 +330,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
                 pass
     await db.log_event(data, buyer_id)
 
-    if not buyer_id:
-        return JSONResponse({"ok": True, "routed": False})
+    # do not return early: admins must still receive notifications
 
     raw_status_value = (
         data.get("status")
@@ -312,8 +343,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     )
     raw_status = str(raw_status_value).lower()
     sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
-    status = "sale" if raw_status in sale_like else "lead"
-    status_emoji = "💰" if status == "sale" else "📝"
+    is_sale = raw_status in sale_like
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
     offer_id = data.get("offer_id") or data.get("offer.id")
@@ -336,55 +366,100 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     sub_id_3 = _clean(sub_id_3)
     sale_time = _clean(sale_time)
     campaign_name = _clean(campaign_name)
+    # Helpers
+    def _format_payout(p):
+        if p is None:
+            return None
+        try:
+            s = str(p).replace(",", ".").strip()
+            value = float(s)
+            return str(int(round(value)))
+        except Exception:
+            return str(p)
 
-    lines = [
-        f"{status_emoji} <b>Status:</b> <code>{status}</code> <i>(tracker: {raw_status or '-'})</i>",
-        f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>",
-        f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>",
-    ]
-    if payout:
-        lines.append(f"💵 <b>Profit:</b> <code>{payout} {currency or ''}</code>")
-    if sub_id_3:
-        lines.append(f"🔢 <b>Sub ID 3:</b> <code>{sub_id_3}</code>")
-    if sale_time:
-        lines.append(f"🕒 <b>Conversion sale time:</b> <code>{sale_time}</code>")
+    def _format_sale_time(v):
+        from datetime import datetime
+        if v is None:
+            return None
+        try:
+            if isinstance(v, (int, float)):
+                ts = float(v)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                dt = datetime.fromtimestamp(ts)
+                return dt.strftime("%Y-%m-%d / %H:%M")
+            s = str(v).strip()
+            if s.isdigit():
+                ts = float(s)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                dt = datetime.fromtimestamp(ts)
+                return dt.strftime("%Y-%m-%d / %H:%M")
+            s_norm = s.replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(s_norm)
+                if dt.tzinfo:
+                    dt = dt.astimezone()
+                return dt.strftime("%Y-%m-%d / %H:%M")
+            except Exception:
+                pass
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    return dt.strftime("%Y-%m-%d / %H:%M")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return str(v)
+
+    payout_fmt = _format_payout(payout)
+    sale_time_fmt = _format_sale_time(sale_time)
+
+    lines = []
+    if payout_fmt:
+        lines.append(f"💵 <b>Profit:</b> <code>{payout_fmt} {currency or ''}</code>")
+    lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
+    lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
+    lines.append(f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
     if campaign_name:
         lines.append(f"📣 <b>Campaign:</b> <code>{campaign_name}</code>")
+    if sale_time_fmt:
+        lines.append(f"🕒 <b>Conversion:</b> <code>{sale_time_fmt}</code>")
 
-    raw_for_dump = {k: v for k, v in data.items() if str(k).lower() not in ("token", "auth", "authorization")}
-    try:
-        raw_sorted = dict(sorted(raw_for_dump.items(), key=lambda kv: str(kv[0])))
-    except Exception:
-        raw_sorted = raw_for_dump
-    raw_json = json.dumps(raw_sorted, ensure_ascii=False, indent=2)
-    raw_json_esc = html.escape(raw_json)
-    MAX_RAW = 3500
-    if len(raw_json_esc) > MAX_RAW:
-        extra = len(raw_json_esc) - MAX_RAW
-        raw_json_esc = raw_json_esc[:MAX_RAW] + f"\n... (truncated {extra} chars)"
+    text = "\n".join(lines)
 
-    text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\">{raw_json_esc}</span>"
-
-    # Determine recipients: buyer, team lead(s)/alias lead, and all heads
+    # Determine recipients
     recipient_ids: set[int] = set()
-    if buyer_id:
-        recipient_ids.add(int(buyer_id))
     try:
         users = await db.list_users()
-        alias_lead_id = None
-        if alias:
-            alias_lead_id = alias.get("lead_id")
-            if alias_lead_id:
-                recipient_ids.add(int(alias_lead_id))
-        buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
-        if buyer_user and buyer_user.get("team_id"):
-            team_id = buyer_user.get("team_id")
-            team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
-            for u in team_leads:
-                recipient_ids.add(int(u["telegram_id"]))  # type: ignore
-        heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
-        for u in heads:
+        # include admins always
+        admins_db = [u for u in users if u.get("role") == "admin" and u.get("is_active")]
+        for u in admins_db:
             recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+        if settings.admins:
+            for aid in settings.admins:
+                try:
+                    recipient_ids.add(int(aid))
+                except Exception:
+                    pass
+        # for sale events, include other recipients
+        if is_sale:
+            if buyer_id:
+                recipient_ids.add(int(buyer_id))
+            if alias:
+                alias_lead_id = alias.get("lead_id")
+                if alias_lead_id:
+                    recipient_ids.add(int(alias_lead_id))
+            buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
+            if buyer_user and buyer_user.get("team_id"):
+                team_id = buyer_user.get("team_id")
+                team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
+                for u in team_leads:
+                    recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+            heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
+            for u in heads:
+                recipient_ids.add(int(u["telegram_id"]))  # type: ignore
     except Exception as e:
         logger.warning(f"Failed to expand recipients: {e}")
 
@@ -393,7 +468,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
             await notify_buyer(rid, text)
         except Exception as e:
             logger.warning(f"Notify failed for {rid}: {e}")
-    return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
+    return {"ok": True, "routed": bool(buyer_id), "buyer_id": buyer_id, "fallback": used_fallback, "sale": is_sale}
 
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
