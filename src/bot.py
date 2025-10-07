@@ -13,6 +13,24 @@ bot = Bot(token=settings.telegram_bot_token, default=DefaultBotProperties(parse_
 dp = Dispatcher()
 
 ADMIN_IDS = set(settings.admins)
+
+# Helper: resolve user reference to Telegram ID (supports numeric ID, @username, tg://user?id=...)
+async def _resolve_user_id(identifier: str) -> int:
+    s = (identifier or "").strip()
+    # tg://user?id=123
+    if s.startswith("tg://user?id="):
+        value = s.split("=", 1)[1]
+        return int(value)
+    # @username
+    if s.startswith("@"):
+        uname = s[1:].strip().lower()
+        users = await db.list_users()
+        hit = next((u for u in users if (u.get("username") or "").lower() == uname), None)
+        if not hit:
+            raise ValueError("username_not_found")
+        return int(hit["telegram_id"])  # type: ignore
+    # numeric id
+    return int(s)
 def main_menu(is_admin: bool, role: str | None = None) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
@@ -490,7 +508,7 @@ async def cb_alias_setbuyer(call: CallbackQuery):
         return await call.answer("Нет прав", show_alert=True)
     alias = call.data.split(":", 2)[2]
     await db.set_pending_action(call.from_user.id, f"alias:setbuyer:{alias}", None)
-    await call.message.answer(f"Пришлите Telegram ID покупателя для алиаса {alias}, или '-' чтобы убрать")
+    await call.message.answer(f"Пришлите Telegram ID или @username покупателя для алиаса {alias}, или '-' чтобы убрать")
     await call.answer()
 
 @dp.callback_query(F.data.startswith("alias:setlead:"))
@@ -499,7 +517,7 @@ async def cb_alias_setlead(call: CallbackQuery):
         return await call.answer("Нет прав", show_alert=True)
     alias = call.data.split(":", 2)[2]
     await db.set_pending_action(call.from_user.id, f"alias:setlead:{alias}", None)
-    await call.message.answer(f"Пришлите Telegram ID лида для алиаса {alias}, или '-' чтобы убрать")
+    await call.message.answer(f"Пришлите Telegram ID или @username лида для алиаса {alias}, или '-' чтобы убрать")
     await call.answer()
 
 @dp.callback_query(F.data.startswith("alias:delete:"))
@@ -549,14 +567,28 @@ async def on_text_fallback(message: Message):
         if action.startswith("alias:setbuyer:"):
             alias = action.split(":", 2)[2]
             v = message.text.strip()
-            buyer_id = None if v == '-' else int(v)
+            if v == '-':
+                buyer_id = None
+            else:
+                try:
+                    buyer_id = await _resolve_user_id(v)
+                except ValueError:
+                    await db.clear_pending_action(message.from_user.id)
+                    return await message.answer("Не удалось распознать пользователя. Пришлите numeric ID или @username. Если пользователь не писал боту, попросите его отправить /start.")
             await db.set_alias(alias, buyer_id=buyer_id)
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("Buyer назначен")
         if action.startswith("alias:setlead:"):
             alias = action.split(":", 2)[2]
             v = message.text.strip()
-            lead_id = None if v == '-' else int(v)
+            if v == '-':
+                lead_id = None
+            else:
+                try:
+                    lead_id = await _resolve_user_id(v)
+                except ValueError:
+                    await db.clear_pending_action(message.from_user.id)
+                    return await message.answer("Не удалось распознать пользователя. Пришлите numeric ID или @username. Если пользователь не писал боту, попросите его отправить /start.")
             await db.set_alias(alias, lead_id=lead_id)
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("Lead назначен")
@@ -728,7 +760,7 @@ async def on_set_role(message: Message):
     if len(parts) != 3:
         return await message.answer("Использование: /setrole <telegram_id> <buyer|lead|head|admin>")
     try:
-        uid = int(parts[1])
+        uid = await _resolve_user_id(parts[1])
         role = parts[2]
         await db.set_user_role(uid, role)
         await message.answer("OK")
@@ -757,7 +789,10 @@ async def on_set_team(message: Message):
     parts = message.text.split()
     if len(parts) != 3:
         return await message.answer("Использование: /setteam <telegram_id> <team_id|->")
-    uid = int(parts[1])
+    try:
+        uid = await _resolve_user_id(parts[1])
+    except Exception:
+        return await message.answer("Не удалось распознать пользователя. Используйте numeric ID или @username")
     team_raw = parts[2]
     team_id = None if team_raw == '-' else int(team_raw)
     await db.set_user_team(uid, team_id)
