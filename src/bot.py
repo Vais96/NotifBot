@@ -235,7 +235,7 @@ async def cb_team_choose_for_lead(call: CallbackQuery):
         return await call.answer("Нет прав", show_alert=True)
     team_id = int(call.data.split(":", 2)[2])
     await db.set_pending_action(call.from_user.id, f"team:setlead:{team_id}", None)
-    await call.message.answer("Пришлите Telegram ID пользователя, которого назначить лидом этой команды")
+    await call.message.answer("Пришлите Telegram ID или @username пользователя, которого назначить лидом этой команды")
     await call.answer()
 
 @dp.callback_query(F.data == "teams:members")
@@ -569,7 +569,27 @@ async def on_text_fallback(message: Message):
             # format: team:setlead:<team_id>
             team_id = int(action.split(":", 2)[2])
             v = message.text.strip()
-            uid = int(v)
+            uid = None
+            # support tg://user?id=123
+            if v.startswith("tg://user?id="):
+                try:
+                    uid = int(v.split("=",1)[1])
+                except Exception:
+                    uid = None
+            # support @username
+            if uid is None and v.startswith("@"):
+                uname = v[1:].strip().lower()
+                users = await db.list_users()
+                hit = next((u for u in users if (u.get("username") or "").lower() == uname), None)
+                if hit:
+                    uid = int(hit["telegram_id"])  # type: ignore
+            # fallback to numeric ID
+            if uid is None:
+                try:
+                    uid = int(v)
+                except Exception:
+                    await db.clear_pending_action(message.from_user.id)
+                    return await message.answer("Не удалось распознать пользователя. Пришлите numeric Telegram ID или @username. Если пользователь не писал боту, попросите его отправить /start.")
             # set user's team and elevate role to lead
             await db.set_user_team(uid, team_id)
             await db.set_user_role(uid, "lead")
@@ -586,7 +606,24 @@ async def on_text_fallback(message: Message):
             if not team_id:
                 await db.clear_pending_action(message.from_user.id)
                 return await message.answer("У вас нет команды")
-            uid = int(message.text.strip())
+            v = message.text.strip()
+            uid = None
+            if v.startswith("tg://user?id="):
+                try:
+                    uid = int(v.split("=",1)[1])
+                except Exception:
+                    uid = None
+            if uid is None and v.startswith("@"):
+                uname = v[1:].strip().lower()
+                hit = next((u for u in users if (u.get("username") or "").lower() == uname), None)
+                if hit:
+                    uid = int(hit["telegram_id"])  # type: ignore
+            if uid is None:
+                try:
+                    uid = int(v)
+                except Exception:
+                    await db.clear_pending_action(message.from_user.id)
+                    return await message.answer("Не удалось распознать пользователя. Пришлите numeric ID или @username. Если пользователь не писал боту, попросите его отправить /start.")
             # Ensure target exists (or will be created on first /start); we still can set team immediately
             await db.set_user_team(uid, team_id)
             await db.clear_pending_action(message.from_user.id)
