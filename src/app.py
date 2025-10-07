@@ -218,7 +218,38 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
 
     text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\">{raw_json_esc}</span>"
 
-    await notify_buyer(buyer_id, text)
+    # Determine recipients: buyer, team lead(s)/alias lead, and all heads
+    recipient_ids: set[int] = set()
+    if buyer_id:
+        recipient_ids.add(int(buyer_id))
+    try:
+        users = await db.list_users()
+        # alias lead has highest priority if defined
+        alias_lead_id = None
+        if alias:
+            alias_lead_id = alias.get("lead_id")
+            if alias_lead_id:
+                recipient_ids.add(int(alias_lead_id))
+        # resolve team lead(s) for buyer
+        buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
+        if buyer_user and buyer_user.get("team_id"):
+            team_id = buyer_user.get("team_id")
+            team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
+            for u in team_leads:
+                recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+        # all heads receive all notifications
+        heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
+        for u in heads:
+            recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+    except Exception as e:
+        logger.warning(f"Failed to expand recipients: {e}")
+
+    # Send message to all recipients (deduped)
+    for rid in recipient_ids:
+        try:
+            await notify_buyer(rid, text)
+        except Exception as e:
+            logger.warning(f"Notify failed for {rid}: {e}")
     return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
 
 # Some trackers send GET S2S callbacks; mirror POST handler for query params
@@ -334,7 +365,34 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
 
     text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\">{raw_json_esc}</span>"
 
-    await notify_buyer(buyer_id, text)
+    # Determine recipients: buyer, team lead(s)/alias lead, and all heads
+    recipient_ids: set[int] = set()
+    if buyer_id:
+        recipient_ids.add(int(buyer_id))
+    try:
+        users = await db.list_users()
+        alias_lead_id = None
+        if alias:
+            alias_lead_id = alias.get("lead_id")
+            if alias_lead_id:
+                recipient_ids.add(int(alias_lead_id))
+        buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
+        if buyer_user and buyer_user.get("team_id"):
+            team_id = buyer_user.get("team_id")
+            team_leads = [u for u in users if u.get("team_id") == team_id and u.get("role") == "lead" and u.get("is_active")]
+            for u in team_leads:
+                recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+        heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
+        for u in heads:
+            recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+    except Exception as e:
+        logger.warning(f"Failed to expand recipients: {e}")
+
+    for rid in recipient_ids:
+        try:
+            await notify_buyer(rid, text)
+        except Exception as e:
+            logger.warning(f"Notify failed for {rid}: {e}")
     return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
 
 @app.post(WEBHOOK_PATH)
