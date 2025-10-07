@@ -14,6 +14,104 @@ if not WEBHOOK_PATH.startswith("/"):
 
 app = FastAPI(title="Keitaro Telegram Notifier")
 
+# Unified message formatter used by both POST and GET handlers
+def _build_notification_text(data: dict) -> str:
+    # Extract fields
+    payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
+    currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
+    offer_id = data.get("offer_id") or data.get("offer.id")
+    offer_name = data.get("offer_name") or data.get("offer.name") or data.get("offer")
+    subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
+    sub_id_3 = data.get("sub_id_3") or data.get("subid3")
+    sale_time = data.get("conversion_sale_time") or data.get("conversion.sale_time") or data.get("conversion_time")
+    campaign_name = data.get("campaign_name") or data.get("campaign.name") or data.get("campaign")
+
+    # Clean unexpanded placeholders like "{conversion.sale_time}"
+    def _clean(v):
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("{") and s.endswith("}"):
+                return None
+        return v
+
+    payout = _clean(payout)
+    currency = _clean(currency)
+    offer_id = _clean(offer_id)
+    offer_name = _clean(offer_name)
+    subid = _clean(subid)
+    sub_id_3 = _clean(sub_id_3)
+    sale_time = _clean(sale_time)
+    campaign_name = _clean(campaign_name)
+
+    # Helpers: round profit to integer and format conversion time as yyyy-mm-dd / HH:MM in UTC
+    def _format_payout(p):
+        if p is None:
+            return None
+        try:
+            s = str(p).replace(",", ".").strip()
+            value = float(s)
+            return str(int(round(value)))
+        except Exception:
+            return str(p)
+
+    def _format_sale_time(v):
+        from datetime import datetime, timezone
+        if v is None:
+            return None
+        try:
+            if isinstance(v, (int, float)):
+                ts = float(v)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                return dt.strftime("%Y-%m-%d / %H:%M")
+            s = str(v).strip()
+            if s.isdigit():
+                ts = float(s)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                return dt.strftime("%Y-%m-%d / %H:%M")
+            s_norm = s.replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(s_norm)
+                if dt.tzinfo:
+                    dt = dt.astimezone(timezone.utc)
+                return dt.strftime("%Y-%m-%d / %H:%M")
+            except Exception:
+                pass
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    return dt.strftime("%Y-%m-%d / %H:%M")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return str(v)
+
+    payout_fmt = _format_payout(payout)
+    sale_time_fmt = _format_sale_time(sale_time)
+
+    alias_name = None
+    if campaign_name:
+        alias_name = (str(campaign_name).split("_", 1)[0] or "").strip() or None
+
+    # Pretty emoji-rich layout
+    lines: list[str] = []
+    lines.append(f"👤 <b>Байер:</b> <code>{alias_name or '-'}</code>")
+    lines.append(f"🎯 <b>Оффер:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
+    if payout_fmt:
+        lines.append(f"💰 <b>Профит:</b> <code>{payout_fmt} {currency or ''}</code>")
+    lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
+    lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
+    if campaign_name:
+        lines.append(f"📣 <b>Кампания:</b> <code>{campaign_name}</code>")
+    if sale_time_fmt:
+        lines.append(f"🕒 <b>Конверсия:</b> <code>{sale_time_fmt}</code> (UTC +0)")
+
+    return "\n".join(lines)
+
 @app.on_event("startup")
 async def on_startup():
     try:
@@ -228,23 +326,8 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     payout_fmt = _format_payout(payout)
     sale_time_fmt = _format_sale_time(sale_time)
 
-    # Build message lines in requested order: Buyer(alias prefix), Offer, Profit, SubID, SubID3, Campaign, Conversion (UTC)
-    alias_name = None
-    if campaign_name:
-        alias_name = (str(campaign_name).split("_", 1)[0] or "").strip() or None
-    lines = []
-    lines.append(f"Байер: <code>{alias_name or '-'}</code>")
-    lines.append(f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
-    if payout_fmt:
-        lines.append(f"💵 <b>Profit:</b> <code>{payout_fmt} {currency or ''}</code>")
-    lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
-    lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
-    if campaign_name:
-        lines.append(f"📣 <b>Campaign:</b> <code>{campaign_name}</code>")
-    if sale_time_fmt:
-        lines.append(f"🕒 <b>Conversion:</b> <code>{sale_time_fmt}</code> (UTC +0)")
-
-    text = "\n".join(lines)
+    # Build text via unified formatter
+    text = _build_notification_text(data)
 
     # Determine recipients
     recipient_ids: set[int] = set()
@@ -421,22 +504,8 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     payout_fmt = _format_payout(payout)
     sale_time_fmt = _format_sale_time(sale_time)
 
-    alias_name = None
-    if campaign_name:
-        alias_name = (str(campaign_name).split("_", 1)[0] or "").strip() or None
-    lines = []
-    lines.append(f"Байер: <code>{alias_name or '-'}</code>")
-    lines.append(f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
-    if payout_fmt:
-        lines.append(f"💵 <b>Profit:</b> <code>{payout_fmt} {currency or ''}</code>")
-    lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
-    lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
-    if campaign_name:
-        lines.append(f"📣 <b>Campaign:</b> <code>{campaign_name}</code>")
-    if sale_time_fmt:
-        lines.append(f"🕒 <b>Conversion:</b> <code>{sale_time_fmt}</code> (UTC +0)")
-
-    text = "\n".join(lines)
+    # Build text via unified formatter
+    text = _build_notification_text(data)
 
     # Determine recipients
     recipient_ids: set[int] = set()
