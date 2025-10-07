@@ -13,7 +13,7 @@ bot = Bot(token=settings.telegram_bot_token, default=DefaultBotProperties(parse_
 dp = Dispatcher()
 
 ADMIN_IDS = set(settings.admins)
-def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
+def main_menu(is_admin: bool, role: str | None = None) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
     ]
@@ -22,6 +22,10 @@ def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Пользователи", callback_data="menu:listusers"), InlineKeyboardButton(text="Управление", callback_data="menu:manage")],
             [InlineKeyboardButton(text="Команды", callback_data="menu:teams"), InlineKeyboardButton(text="Алиасы", callback_data="menu:aliases")],
         ]
+    else:
+        # For lead/head expose 'Моя команда'
+        if role in ("lead", "head"):
+            buttons += [[InlineKeyboardButton(text="Моя команда", callback_data="menu:myteam")]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # Helpers used by inline menu to avoid using call.message.from_user (which is the bot)
@@ -100,6 +104,85 @@ async def _send_aliases(chat_id: int, actor_id: int):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Добавить алиас", callback_data="alias:new")]])
     await bot.send_message(chat_id, "Управление алиасами:", reply_markup=kb)
 
+# --- Lead/Head: My team management ---
+def _myteam_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Состав команды", callback_data="myteam:list")],
+        [InlineKeyboardButton(text="Добавить по ID", callback_data="myteam:add")],
+        [InlineKeyboardButton(text="Убрать участника", callback_data="myteam:remove")],
+    ])
+
+async def _send_myteam(chat_id: int, actor_id: int):
+    users = await db.list_users()
+    me = next((u for u in users if u["telegram_id"] == actor_id), None)
+    role = (me or {}).get("role")
+    if (actor_id not in ADMIN_IDS) and (role not in ("lead", "head")):
+        return await bot.send_message(chat_id, "Недостаточно прав")
+    if not me or not me.get("team_id"):
+        return await bot.send_message(chat_id, "Вы не состоите в команде")
+    await bot.send_message(chat_id, "Моя команда — управление", reply_markup=_myteam_menu())
+
+@dp.callback_query(F.data == "myteam:list")
+async def cb_myteam_list(call: CallbackQuery):
+    users = await db.list_users()
+    me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
+    if not me or (me["role"] not in ("lead", "head") and call.from_user.id not in ADMIN_IDS):
+        return await call.answer("Нет прав", show_alert=True)
+    team_id = me.get("team_id")
+    if not team_id:
+        await call.message.answer("У вас нет команды")
+        return await call.answer()
+    members = [u for u in users if u.get("team_id") == team_id]
+    if not members:
+        await call.message.answer("Состав пуст")
+    else:
+        lines = [f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} ({u['role']})" for u in members]
+        await call.message.answer("Состав команды:\n" + "\n".join(lines))
+    await call.answer()
+
+@dp.callback_query(F.data == "myteam:add")
+async def cb_myteam_add(call: CallbackQuery):
+    users = await db.list_users()
+    me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
+    if not me or (me["role"] not in ("lead", "head") and call.from_user.id not in ADMIN_IDS):
+        return await call.answer("Нет прав", show_alert=True)
+    if not me.get("team_id"):
+        return await call.answer("Нет команды", show_alert=True)
+    await db.set_pending_action(call.from_user.id, "myteam:add", None)
+    await call.message.answer("Пришлите Telegram ID пользователя для добавления в вашу команду")
+    await call.answer()
+
+@dp.callback_query(F.data == "myteam:remove")
+async def cb_myteam_remove(call: CallbackQuery):
+    users = await db.list_users()
+    me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
+    if not me or (me["role"] not in ("lead", "head") and call.from_user.id not in ADMIN_IDS):
+        return await call.answer("Нет прав", show_alert=True)
+    team_id = me.get("team_id")
+    if not team_id:
+        return await call.answer("Нет команды", show_alert=True)
+    members = [u for u in users if u.get("team_id") == team_id]
+    if not members:
+        await call.message.answer("Состав пуст")
+        return await call.answer()
+    buttons = [[InlineKeyboardButton(text=f"Убрать @{u['username'] or u['telegram_id']}", callback_data=f"myteam:remove:{u['telegram_id']}")] for u in members[:25]]
+    await call.message.answer("Кого убрать?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("myteam:remove:"))
+async def cb_myteam_remove_user(call: CallbackQuery):
+    users = await db.list_users()
+    me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
+    if not me or (me["role"] not in ("lead", "head") and call.from_user.id not in ADMIN_IDS):
+        return await call.answer("Нет прав", show_alert=True)
+    team_id = me.get("team_id")
+    uid = int(call.data.split(":", 2)[2])
+    # ensure target is in same team
+    target = next((u for u in users if u["telegram_id"] == uid), None)
+    if not target or target.get("team_id") != team_id:
+        return await call.answer("Можно убирать только из своей команды", show_alert=True)
+    await db.set_user_team(uid, None)
+    await call.answer("Убран из команды")
 # --- Teams management (admin) ---
 def _teams_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -208,7 +291,13 @@ async def cb_team_remove_member(call: CallbackQuery):
 @dp.message(Command("menu"))
 async def on_menu(message: Message):
     is_admin = message.from_user.id in ADMIN_IDS
-    await message.answer("Меню:", reply_markup=main_menu(is_admin))
+    # get role to expose lead/head specific menu
+    users = await db.list_users()
+    me = next((u for u in users if u["telegram_id"] == message.from_user.id), None)
+    role = (me or {}).get("role")
+    if is_admin:
+        role = "admin"
+    await message.answer("Меню:", reply_markup=main_menu(is_admin, role))
 
 @dp.callback_query(F.data.startswith("menu:"))
 async def on_menu_click(call: CallbackQuery):
@@ -230,6 +319,9 @@ async def on_menu_click(call: CallbackQuery):
         return await call.answer()
     if key == "aliases":
         await _send_aliases(call.message.chat.id, call.from_user.id)
+        return await call.answer()
+    if key == "myteam":
+        await _send_myteam(call.message.chat.id, call.from_user.id)
         return await call.answer()
 
 @dp.message(CommandStart())
@@ -483,6 +575,22 @@ async def on_text_fallback(message: Message):
             await db.set_user_role(uid, "lead")
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("Лид назначен")
+        if action == "myteam:add":
+            # leads can add only to their own team
+            users = await db.list_users()
+            me = next((u for u in users if u["telegram_id"] == message.from_user.id), None)
+            if not me or me.get("role") not in ("lead", "head"):
+                await db.clear_pending_action(message.from_user.id)
+                return await message.answer("Нет прав")
+            team_id = me.get("team_id")
+            if not team_id:
+                await db.clear_pending_action(message.from_user.id)
+                return await message.answer("У вас нет команды")
+            uid = int(message.text.strip())
+            # Ensure target exists (or will be created on first /start); we still can set team immediately
+            await db.set_user_team(uid, team_id)
+            await db.clear_pending_action(message.from_user.id)
+            return await message.answer("Пользователь добавлен в вашу команду")
     except Exception as e:
         logger.exception(e)
         return await message.answer("Ошибка обработки ввода")
