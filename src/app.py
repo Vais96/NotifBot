@@ -177,7 +177,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     sub_id_3 = _clean(sub_id_3)
     sale_time = _clean(sale_time)
     campaign_name = _clean(campaign_name)
-    # Helpers: round profit to integer and format conversion time as yyyy-mm-dd / HH:MM
+    # Helpers: round profit to integer and format conversion time as yyyy-mm-dd / HH:MM in UTC
     def _format_payout(p):
         if p is None:
             return None
@@ -189,7 +189,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
             return str(p)
 
     def _format_sale_time(v):
-        from datetime import datetime
+        from datetime import datetime, timezone
         if v is None:
             return None
         try:
@@ -197,20 +197,21 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
                 ts = float(v)
                 if ts > 1e12:
                     ts = ts / 1000.0
-                dt = datetime.fromtimestamp(ts)
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 return dt.strftime("%Y-%m-%d / %H:%M")
             s = str(v).strip()
             if s.isdigit():
                 ts = float(s)
                 if ts > 1e12:
                     ts = ts / 1000.0
-                dt = datetime.fromtimestamp(ts)
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 return dt.strftime("%Y-%m-%d / %H:%M")
             s_norm = s.replace("Z", "+00:00")
             try:
                 dt = datetime.fromisoformat(s_norm)
+                # Convert to UTC; assume naive timestamps are UTC already
                 if dt.tzinfo:
-                    dt = dt.astimezone()
+                    dt = dt.astimezone(timezone.utc)
                 return dt.strftime("%Y-%m-%d / %H:%M")
             except Exception:
                 pass
@@ -227,17 +228,21 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     payout_fmt = _format_payout(payout)
     sale_time_fmt = _format_sale_time(sale_time)
 
-    # Build message lines: SubID, SubID3, Offer, Campaign, Date (profit included, rounded)
+    # Build message lines in requested order: Buyer(alias prefix), Offer, Profit, SubID, SubID3, Campaign, Conversion (UTC)
+    alias_name = None
+    if campaign_name:
+        alias_name = (str(campaign_name).split("_", 1)[0] or "").strip() or None
     lines = []
+    lines.append(f"Байер: <code>{alias_name or '-'}</code>")
+    lines.append(f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
     if payout_fmt:
         lines.append(f"💵 <b>Profit:</b> <code>{payout_fmt} {currency or ''}</code>")
     lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
     lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
-    lines.append(f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
     if campaign_name:
         lines.append(f"📣 <b>Campaign:</b> <code>{campaign_name}</code>")
     if sale_time_fmt:
-        lines.append(f"🕒 <b>Conversion:</b> <code>{sale_time_fmt}</code>")
+        lines.append(f"🕒 <b>Conversion:</b> <code>{sale_time_fmt}</code> (UTC +0)")
 
     text = "\n".join(lines)
 
@@ -366,7 +371,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     sub_id_3 = _clean(sub_id_3)
     sale_time = _clean(sale_time)
     campaign_name = _clean(campaign_name)
-    # Helpers
+    # Helpers (UTC formatting)
     def _format_payout(p):
         if p is None:
             return None
@@ -378,7 +383,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
             return str(p)
 
     def _format_sale_time(v):
-        from datetime import datetime
+        from datetime import datetime, timezone
         if v is None:
             return None
         try:
@@ -386,20 +391,20 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
                 ts = float(v)
                 if ts > 1e12:
                     ts = ts / 1000.0
-                dt = datetime.fromtimestamp(ts)
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 return dt.strftime("%Y-%m-%d / %H:%M")
             s = str(v).strip()
             if s.isdigit():
                 ts = float(s)
                 if ts > 1e12:
                     ts = ts / 1000.0
-                dt = datetime.fromtimestamp(ts)
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 return dt.strftime("%Y-%m-%d / %H:%M")
             s_norm = s.replace("Z", "+00:00")
             try:
                 dt = datetime.fromisoformat(s_norm)
                 if dt.tzinfo:
-                    dt = dt.astimezone()
+                    dt = dt.astimezone(timezone.utc)
                 return dt.strftime("%Y-%m-%d / %H:%M")
             except Exception:
                 pass
@@ -416,16 +421,20 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     payout_fmt = _format_payout(payout)
     sale_time_fmt = _format_sale_time(sale_time)
 
+    alias_name = None
+    if campaign_name:
+        alias_name = (str(campaign_name).split("_", 1)[0] or "").strip() or None
     lines = []
+    lines.append(f"Байер: <code>{alias_name or '-'}</code>")
+    lines.append(f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
     if payout_fmt:
         lines.append(f"💵 <b>Profit:</b> <code>{payout_fmt} {currency or ''}</code>")
     lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
     lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
-    lines.append(f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
     if campaign_name:
         lines.append(f"📣 <b>Campaign:</b> <code>{campaign_name}</code>")
     if sale_time_fmt:
-        lines.append(f"🕒 <b>Conversion:</b> <code>{sale_time_fmt}</code>")
+        lines.append(f"🕒 <b>Conversion:</b> <code>{sale_time_fmt}</code> (UTC +0)")
 
     text = "\n".join(lines)
 
