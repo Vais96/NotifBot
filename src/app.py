@@ -144,6 +144,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     raw_status = str(raw_status_value).lower()
     sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
     status = "sale" if raw_status in sale_like else "lead"
+    status_emoji = "💰" if status == "sale" else "📝"
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
     offer_id = data.get("offer_id") or data.get("offer.id")
@@ -174,18 +175,18 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
         lead_alias = alias.get("lead_id")
 
     lines = [
-        f"<b>Status:</b> <code>{status}</code> | tracker: <code>{raw_status or '-'}\n</code>",
-        f"<b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}\n</code>",
-        f"<b>SubID (user):</b> <code>{subid or '-'}\n</code>",
+        f"{status_emoji} <b>Status:</b> <code>{status}</code> <i>(tracker: {raw_status or '-'})</i>",
+        f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>",
+        f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>",
     ]
     if payout:
-        lines.append(f"<b>Profit:</b> <code>{payout} {currency or ''}</code>")
+        lines.append(f"💵 <b>Profit:</b> <code>{payout} {currency or ''}</code>")
     if sub_id_3:
-        lines.append(f"<b>Sub ID 3:</b> <code>{sub_id_3}</code>")
+        lines.append(f"🔢 <b>Sub ID 3:</b> <code>{sub_id_3}</code>")
     if sale_time:
-        lines.append(f"<b>Conversion sale time:</b> <code>{sale_time}</code>")
+        lines.append(f"🕒 <b>Conversion sale time:</b> <code>{sale_time}</code>")
     if campaign_name:
-        lines.append(f"<b>Campaign:</b> <code>{campaign_name}</code>")
+        lines.append(f"📣 <b>Campaign:</b> <code>{campaign_name}</code>")
 
     # Append raw payload dump for debugging/verification
     raw_for_dump = {k: v for k, v in data.items() if str(k).lower() not in ("token", "auth", "authorization")}
@@ -201,7 +202,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
         extra = len(raw_json_esc) - MAX_RAW
         raw_json_esc = raw_json_esc[:MAX_RAW] + f"\n... (truncated {extra} chars)"
 
-    text = "\n".join(lines) + "\n\n<b>Все поля (как пришли):</b>\n<pre><code>" + raw_json_esc + "</code></pre>"
+    text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\"><code>{raw_json_esc}</code></span>"
 
     await notify_buyer(buyer_id, text)
     return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
@@ -267,6 +268,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     raw_status = str(raw_status_value).lower()
     sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
     status = "sale" if raw_status in sale_like else "lead"
+    status_emoji = "💰" if status == "sale" else "📝"
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
     offer_id = data.get("offer_id") or data.get("offer.id")
@@ -291,18 +293,18 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     campaign_name = _clean(campaign_name)
 
     lines = [
-        f"<b>Status:</b> <code>{status}</code> | tracker: <code>{raw_status or '-'}\n</code>",
-        f"<b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}\n</code>",
-        f"<b>SubID (user):</b> <code>{subid or '-'}\n</code>",
+        f"{status_emoji} <b>Status:</b> <code>{status}</code> <i>(tracker: {raw_status or '-'})</i>",
+        f"🎯 <b>Offer:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>",
+        f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>",
     ]
     if payout:
-        lines.append(f"<b>Profit:</b> <code>{payout} {currency or ''}</code>")
+        lines.append(f"💵 <b>Profit:</b> <code>{payout} {currency or ''}</code>")
     if sub_id_3:
-        lines.append(f"<b>Sub ID 3:</b> <code>{sub_id_3}</code>")
+        lines.append(f"🔢 <b>Sub ID 3:</b> <code>{sub_id_3}</code>")
     if sale_time:
-        lines.append(f"<b>Conversion sale time:</b> <code>{sale_time}</code>")
+        lines.append(f"🕒 <b>Conversion sale time:</b> <code>{sale_time}</code>")
     if campaign_name:
-        lines.append(f"<b>Campaign:</b> <code>{campaign_name}</code>")
+        lines.append(f"📣 <b>Campaign:</b> <code>{campaign_name}</code>")
 
     raw_for_dump = {k: v for k, v in data.items() if str(k).lower() not in ("token", "auth", "authorization")}
     try:
@@ -316,7 +318,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         extra = len(raw_json_esc) - MAX_RAW
         raw_json_esc = raw_json_esc[:MAX_RAW] + f"\n... (truncated {extra} chars)"
 
-    text = "\n".join(lines) + "\n\n<b>Все поля (как пришли):</b>\n<pre><code>" + raw_json_esc + "</code></pre>"
+    text = "\n".join(lines) + "\n\n<b>Все поля (скрыто):</b>\n" + f"<span class=\"tg-spoiler\"><code>{raw_json_esc}</code></span>"
 
     await notify_buyer(buyer_id, text)
     return {"ok": True, "routed": True, "buyer_id": buyer_id, "fallback": used_fallback}
