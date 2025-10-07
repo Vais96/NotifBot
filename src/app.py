@@ -6,7 +6,7 @@ import html
 from .config import settings
 from .bot import dp, bot, notify_buyer
 from . import db
-from aiogram.types import Update
+from aiogram.types import Update, BotCommand
 
 # Sanitize webhook path for route decorator
 WEBHOOK_PATH = settings.webhook_secret_path.strip()
@@ -33,6 +33,20 @@ async def on_startup():
         logger.info(f"Webhook set to {url}")
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
+    # Set command menu for the bot (helps users discover commands)
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="menu", description="Открыть меню"),
+            BotCommand(command="help", description="Помощь"),
+            BotCommand(command="ping", description="Проверка связи"),
+            BotCommand(command="whoami", description="Ваш Telegram ID"),
+            BotCommand(command="listroutes", description="Список правил"),
+            BotCommand(command="listusers", description="Список пользователей"),
+            BotCommand(command="manage", description="Управление (admin)"),
+            BotCommand(command="aliases", description="Алиасы (admin)"),
+        ])
+    except Exception as e:
+        logger.warning(f"Failed to set bot commands: {e}")
 
 @app.on_event("shutdown")
 async def on_shutdown():

@@ -141,6 +141,7 @@ async def on_help(message: Message):
         "Доступные команды:\n"
         "/start — регистрация\n"
         "/help — помощь\n"
+        "/ping — проверка связи (pong)\n"
         "/whoami — показать свой Telegram ID\n"
         "/addrule — добавить правило (админ/хэд)\n"
         "/listusers — список пользователей (зависит от роли)\n"
@@ -151,6 +152,10 @@ async def on_help(message: Message):
         "/listteams — список команд\n"
         "/aliases — алиасы (admin): связать campaign_name с buyer/lead"
     )
+
+@dp.message(Command("ping"))
+async def on_ping(message: Message):
+    await message.answer("pong")
 
 @dp.message(Command("whoami"))
 async def on_whoami(message: Message):
