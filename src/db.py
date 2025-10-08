@@ -495,6 +495,18 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             ORDER BY COUNT(*) DESC
             LIMIT 10
     """
+    # buyer distribution (counts per routed_user_id)
+    buyer_sql = f"""
+            SELECT routed_user_id AS uid, COUNT(*) AS cnt
+            FROM tg_events
+            WHERE created_at >= %s AND created_at < %s
+                AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                AND routed_user_id IN ({placeholders_users})
+                {offer_filter_sql}
+                {creative_filter_sql}
+            GROUP BY uid
+            ORDER BY cnt DESC
+    """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             # total first
@@ -514,8 +526,12 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             geo_dist = {str(r[0]): int(r[1]) for r in geo_rows if (r[0] is not None and str(r[0]).strip() not in ('', '-'))}
             await cur.execute(creative_sql, params)
             cr_rows = await cur.fetchall()
-        creative_dist = {str(r[0]): int(r[1]) for r in cr_rows if r[0] is not None and str(r[0]).strip() != ''}
-    return {"count": count, "profit": profit, "top_offer": top_offer, "top_offer_count": top_offer_count, "geo_dist": geo_dist, "creative_dist": creative_dist, "total": total}
+            creative_dist = {str(r[0]): int(r[1]) for r in cr_rows if r[0] is not None and str(r[0]).strip() != ''}
+            # buyer distribution
+            await cur.execute(buyer_sql, params)
+            by_rows = await cur.fetchall()
+            buyer_dist = {int(r[0]): int(r[1]) for r in by_rows if r and r[0] is not None}
+    return {"count": count, "profit": profit, "top_offer": top_offer, "top_offer_count": top_offer_count, "geo_dist": geo_dist, "creative_dist": creative_dist, "buyer_dist": buyer_dist, "total": total}
 
 async def trend_daily_sales(user_ids: List[int], days: int = 7) -> List[Tuple[str, int]]:
     """Return list of (YYYY-MM-DD, count) for last N days (UTC)."""

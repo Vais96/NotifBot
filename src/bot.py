@@ -1129,6 +1129,30 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
             filter_user_ids = [uid for uid in team_ids if uid in allowed_ids]
     agg = await db.aggregate_sales(user_ids, start, end, offer=filt.get('offer'), creative=filt.get('creative'), filter_user_ids=filter_user_ids)
     text = _report_text(title, agg)
+    # Append buyer breakdown if available
+    buyer_dist = agg.get('buyer_dist') or {}
+    if buyer_dist:
+        # If team filter set, limit to that team (already limited in query by filter_user_ids, but double-check)
+        team_filter = filt.get('team_id')
+        buyers_map: dict[int, dict] = {int(u['telegram_id']): u for u in users}
+        # Order by count desc
+        items = sorted(buyer_dist.items(), key=lambda kv: kv[1], reverse=True)
+        lines = []
+        for uid, cnt in items:
+            u = buyers_map.get(int(uid))
+            if team_filter:
+                try:
+                    if not (u and u.get('team_id') and int(u.get('team_id')) == int(team_filter)):
+                        continue
+                except Exception:
+                    continue
+            if not u:
+                label = f"<code>{uid}</code>"
+            else:
+                label = f"@{u['username']}" if u.get('username') else (u.get('full_name') or f"<code>{uid}</code>")
+            lines.append(f"{label}: <b>{cnt}</b>")
+        if lines:
+            text += "\n\n" + "\n".join(lines)
     if days == 7 and not yesterday:
         trend = await db.trend_daily_sales(user_ids, days=7)
         if trend:
