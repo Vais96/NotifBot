@@ -162,6 +162,19 @@ async def init_pool() -> aiomysql.Pool:
                         await cur.execute("ALTER TABLE tg_users MODIFY role ENUM('buyer','lead','head','admin','mentor') NOT NULL DEFAULT 'buyer'")
                 except Exception as e:
                     logger.warning(f"Failed to ensure mentor in role enum: {e}")
+                # Ensure tg_report_filters has buyer_id and team_id columns (migration for existing installations)
+                try:
+                    await cur.execute("SHOW COLUMNS FROM tg_report_filters")
+                    cols = await cur.fetchall()
+                    col_names = {str(c[0]) for c in cols} if cols else set()
+                    if 'buyer_id' not in col_names:
+                        logger.info("Altering tg_report_filters to add buyer_id")
+                        await cur.execute("ALTER TABLE tg_report_filters ADD COLUMN buyer_id BIGINT NULL AFTER creative")
+                    if 'team_id' not in col_names:
+                        logger.info("Altering tg_report_filters to add team_id")
+                        await cur.execute("ALTER TABLE tg_report_filters ADD COLUMN team_id BIGINT NULL AFTER buyer_id")
+                except Exception as e:
+                    logger.warning(f"Failed to ensure columns in tg_report_filters: {e}")
     return _pool
 
 async def close_pool() -> None:

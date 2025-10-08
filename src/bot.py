@@ -1254,100 +1254,106 @@ async def cb_report_pick_team(call: CallbackQuery):
 async def cb_report_pick_buyer(call: CallbackQuery):
     try:
         await call.message.answer("Открываю список байеров…")
-    except Exception:
-        pass
-    users = await db.list_users()
-    me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
-    role = (me or {}).get("role", "buyer")
-    if call.from_user.id in ADMIN_IDS:
-        role = "admin"
-    scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
-    buyers = [u for u in users if int(u['telegram_id']) in scope_ids]
-    # Respect currently selected team filter if present
-    cur = await db.get_report_filter(call.from_user.id)
-    if cur and cur.get('team_id'):
+        users = await db.list_users()
+        me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
+        role = (me or {}).get("role", "buyer")
+        if call.from_user.id in ADMIN_IDS:
+            role = "admin"
+        scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
+        buyers = [u for u in users if int(u['telegram_id']) in scope_ids]
+        # Respect currently selected team filter if present
+        cur = await db.get_report_filter(call.from_user.id)
+        if cur and cur.get('team_id'):
+            try:
+                team_id_filter = int(cur['team_id'])
+                buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
+            except Exception:
+                pass
+        if not buyers:
+            await call.message.answer("Нет доступных байеров")
+        else:
+            await call.message.answer("Выберите байера:", reply_markup=_buyers_picker_kb(buyers))
+    except Exception as e:
+        logger.exception(e)
+        await call.message.answer(f"Ошибка списка байеров: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+    finally:
         try:
-            team_id_filter = int(cur['team_id'])
-            buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
+            await call.answer()
         except Exception:
             pass
-    if not buyers:
-        await call.message.answer("Нет доступных байеров")
-    else:
-        await call.message.answer("Выберите байера:", reply_markup=_buyers_picker_kb(buyers))
-    try:
-        await call.answer()
-    except Exception:
-        pass
 
 @dp.callback_query(F.data == "report:pick:offer")
 async def cb_report_pick_offer(call: CallbackQuery):
     try:
         await call.message.answer("Открываю офферы…")
-    except Exception:
-        pass
-    users = await db.list_users()
-    # scope by role
-    scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
-    # apply buyer/team filters if set
-    cur = await db.get_report_filter(call.from_user.id)
-    buyers = [u for u in users if int(u['telegram_id']) in scope_ids]
-    if cur and cur.get('team_id'):
+        users = await db.list_users()
+        # scope by role
+        scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
+        # apply buyer/team filters if set
+        cur = await db.get_report_filter(call.from_user.id)
+        buyers = [u for u in users if int(u['telegram_id']) in scope_ids]
+        if cur and cur.get('team_id'):
+            try:
+                team_id_filter = int(cur['team_id'])
+                buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
+            except Exception:
+                pass
+        if cur and cur.get('buyer_id'):
+            try:
+                buyer_id_filter = int(cur['buyer_id'])
+                buyers = [u for u in buyers if int(u['telegram_id']) == buyer_id_filter]
+            except Exception:
+                pass
+        user_ids = [int(u['telegram_id']) for u in buyers]
+        offers = await db.list_offers_for_users(user_ids)
+        if not offers:
+            await call.message.answer("Нет доступных офферов")
+        else:
+            await call.message.answer("Выберите оффер:", reply_markup=_offers_picker_kb(offers))
+    except Exception as e:
+        logger.exception(e)
+        await call.message.answer(f"Ошибка списка офферов: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+    finally:
         try:
-            team_id_filter = int(cur['team_id'])
-            buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
+            await call.answer()
         except Exception:
             pass
-    if cur and cur.get('buyer_id'):
-        try:
-            buyer_id_filter = int(cur['buyer_id'])
-            buyers = [u for u in buyers if int(u['telegram_id']) == buyer_id_filter]
-        except Exception:
-            pass
-    user_ids = [int(u['telegram_id']) for u in buyers]
-    offers = await db.list_offers_for_users(user_ids)
-    if not offers:
-        await call.message.answer("Нет доступных офферов")
-    else:
-        await call.message.answer("Выберите оффер:", reply_markup=_offers_picker_kb(offers))
-    try:
-        await call.answer()
-    except Exception:
-        pass
 
 @dp.callback_query(F.data == "report:pick:creative")
 async def cb_report_pick_creative(call: CallbackQuery):
     try:
         await call.message.answer("Открываю креативы…")
-    except Exception:
-        pass
-    users = await db.list_users()
-    scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
-    cur = await db.get_report_filter(call.from_user.id)
-    buyers = [u for u in users if int(u['telegram_id']) in scope_ids]
-    if cur and cur.get('team_id'):
+        users = await db.list_users()
+        scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
+        cur = await db.get_report_filter(call.from_user.id)
+        buyers = [u for u in users if int(u['telegram_id']) in scope_ids]
+        if cur and cur.get('team_id'):
+            try:
+                team_id_filter = int(cur['team_id'])
+                buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
+            except Exception:
+                pass
+        if cur and cur.get('buyer_id'):
+            try:
+                buyer_id_filter = int(cur['buyer_id'])
+                buyers = [u for u in buyers if int(u['telegram_id']) == buyer_id_filter]
+            except Exception:
+                pass
+        user_ids = [int(u['telegram_id']) for u in buyers]
+        offer_filter = cur.get('offer') if cur else None
+        creatives = await db.list_creatives_for_users(user_ids, offer_filter)
+        if not creatives:
+            await call.message.answer("Нет доступных креативов")
+        else:
+            await call.message.answer("Выберите крео:", reply_markup=_creatives_picker_kb(creatives))
+    except Exception as e:
+        logger.exception(e)
+        await call.message.answer(f"Ошибка списка крео: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+    finally:
         try:
-            team_id_filter = int(cur['team_id'])
-            buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
+            await call.answer()
         except Exception:
             pass
-    if cur and cur.get('buyer_id'):
-        try:
-            buyer_id_filter = int(cur['buyer_id'])
-            buyers = [u for u in buyers if int(u['telegram_id']) == buyer_id_filter]
-        except Exception:
-            pass
-    user_ids = [int(u['telegram_id']) for u in buyers]
-    offer_filter = cur.get('offer') if cur else None
-    creatives = await db.list_creatives_for_users(user_ids, offer_filter)
-    if not creatives:
-        await call.message.answer("Нет доступных креативов")
-    else:
-        await call.message.answer("Выберите крео:", reply_markup=_creatives_picker_kb(creatives))
-    try:
-        await call.answer()
-    except Exception:
-        pass
 
 @dp.callback_query(F.data.startswith("report:set:"))
 async def cb_report_set_filter_quick(call: CallbackQuery):
