@@ -1100,7 +1100,7 @@ async def cb_report_today(call: CallbackQuery):
         await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня", None, False)
     except Exception as e:
         logger.exception(e)
-        await call.message.answer("Не удалось построить отчёт")
+        await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
     finally:
         try:
             await call.answer()
@@ -1117,7 +1117,7 @@ async def cb_report_yesterday(call: CallbackQuery):
         await _send_period_report(call.message.chat.id, call.from_user.id, "Вчера", None, True)
     except Exception as e:
         logger.exception(e)
-        await call.message.answer("Не удалось построить отчёт")
+        await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
     finally:
         try:
             await call.answer()
@@ -1134,7 +1134,7 @@ async def cb_report_week(call: CallbackQuery):
         await _send_period_report(call.message.chat.id, call.from_user.id, "Последние 7 дней", 7, False)
     except Exception as e:
         logger.exception(e)
-        await call.message.answer("Не удалось построить отчёт")
+        await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
     finally:
         try:
             await call.answer()
@@ -1151,7 +1151,7 @@ async def on_today(message: Message):
         await _send_period_report(message.chat.id, message.from_user.id, "Сегодня")
     except Exception as e:
         logger.exception(e)
-        await message.answer("Не удалось построить отчёт")
+        await message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("yesterday"))
 async def on_yesterday(message: Message):
@@ -1163,7 +1163,7 @@ async def on_yesterday(message: Message):
         await _send_period_report(message.chat.id, message.from_user.id, "Вчера", None, True)
     except Exception as e:
         logger.exception(e)
-        await message.answer("Не удалось построить отчёт")
+        await message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("week"))
 async def on_week(message: Message):
@@ -1175,7 +1175,7 @@ async def on_week(message: Message):
         await _send_period_report(message.chat.id, message.from_user.id, "Последние 7 дней", 7)
     except Exception as e:
         logger.exception(e)
-        await message.answer("Не удалось построить отчёт")
+        await message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
 
 @dp.callback_query(F.data.startswith("report:f:"))
 async def cb_report_filter(call: CallbackQuery):
