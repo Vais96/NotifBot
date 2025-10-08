@@ -676,7 +676,10 @@ async def cb_team_set(call: CallbackQuery):
 
 @dp.message()
 async def on_text_fallback(message: Message):
-    # обработка pending actions для алиасов и команд
+    # Игнорируем текст-команды
+    if message.text and message.text.startswith('/'):
+        return
+    # обработка pending actions для алиасов/команд/менторов
     pending = await db.get_pending_action(message.from_user.id)
     if not pending:
         return  # игнорируем обычные сообщения, чтобы не засорять чат
@@ -827,40 +830,7 @@ async def on_text_fallback(message: Message):
             await db.set_kpi(message.from_user.id, daily_goal=daily, weekly_goal=weekly)
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("KPI обновлен")
-        if action.startswith("report:filter:"):
-            which = action.split(":", 2)[2]
-            val = message.text.strip()
-            cur = await db.get_report_filter(message.from_user.id)
-            offer = cur.get('offer')
-            creative = cur.get('creative')
-            buyer_id = cur.get('buyer_id')
-            team_id = cur.get('team_id')
-            if which == 'offer':
-                offer = None if val == '-' else val
-            elif which == 'creative':
-                creative = None if val == '-' else val
-            elif which == 'buyer':
-                if val == '-':
-                    buyer_id = None
-                else:
-                    try:
-                        uid = await _resolve_user_id(val)
-                        buyer_id = uid
-                    except Exception:
-                        await db.clear_pending_action(message.from_user.id)
-                        return await message.answer("Не удалось распознать пользователя. Пришлите numeric ID или @username.")
-            elif which == 'team':
-                if val == '-':
-                    team_id = None
-                else:
-                    try:
-                        team_id = int(val)
-                    except Exception:
-                        await db.clear_pending_action(message.from_user.id)
-                        return await message.answer("Неверный формат. Нужен ID команды.")
-            await db.set_report_filter(message.from_user.id, offer, creative, buyer_id=buyer_id, team_id=team_id)
-            await db.clear_pending_action(message.from_user.id)
-            return await message.answer("Фильтр сохранен")
+        # report:filter:* больше не используем — вся фильтрация через picker-кнопки
     except Exception as e:
         logger.exception(e)
         return await message.answer("Ошибка обработки ввода")
@@ -1173,15 +1143,39 @@ async def cb_report_week(call: CallbackQuery):
 
 @dp.message(Command("today"))
 async def on_today(message: Message):
-    await _send_period_report(message.chat.id, message.from_user.id, "Сегодня")
+    try:
+        await message.answer("Готовлю отчёт…")
+    except Exception:
+        pass
+    try:
+        await _send_period_report(message.chat.id, message.from_user.id, "Сегодня")
+    except Exception as e:
+        logger.exception(e)
+        await message.answer("Не удалось построить отчёт")
 
 @dp.message(Command("yesterday"))
 async def on_yesterday(message: Message):
-    await _send_period_report(message.chat.id, message.from_user.id, "Вчера", None, True)
+    try:
+        await message.answer("Готовлю отчёт…")
+    except Exception:
+        pass
+    try:
+        await _send_period_report(message.chat.id, message.from_user.id, "Вчера", None, True)
+    except Exception as e:
+        logger.exception(e)
+        await message.answer("Не удалось построить отчёт")
 
 @dp.message(Command("week"))
 async def on_week(message: Message):
-    await _send_period_report(message.chat.id, message.from_user.id, "Последние 7 дней", 7)
+    try:
+        await message.answer("Готовлю отчёт…")
+    except Exception:
+        pass
+    try:
+        await _send_period_report(message.chat.id, message.from_user.id, "Последние 7 дней", 7)
+    except Exception as e:
+        logger.exception(e)
+        await message.answer("Не удалось построить отчёт")
 
 @dp.callback_query(F.data.startswith("report:f:"))
 async def cb_report_filter(call: CallbackQuery):
