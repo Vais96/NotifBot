@@ -132,6 +132,19 @@ SCHEMA_SQL = [
         CONSTRAINT fk_tg_filters_user FOREIGN KEY (user_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # UI cache for short callback data mapping (e.g., offers/creatives lists)
+    """
+    CREATE TABLE IF NOT EXISTS tg_ui_cache (
+        user_id BIGINT NOT NULL,
+        kind VARCHAR(32) NOT NULL,
+        idx INT NOT NULL,
+        value TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, kind, idx),
+        INDEX idx_ui_cache_user_kind (user_id, kind),
+        CONSTRAINT fk_tg_ui_cache_user FOREIGN KEY (user_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 async def init_pool() -> aiomysql.Pool:
@@ -482,7 +495,13 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             SELECT COALESCE(
                              NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative')), ''),
                              NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.banner')), ''),
-                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')), '')
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')), ''),
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.adset_name')), ''),
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad')), ''),
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative_name')), ''),
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id_2')), ''),
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub2')), ''),
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.utm_content')), '')
                          ) AS k,
                          COUNT(*)
             FROM tg_events
@@ -654,7 +673,13 @@ async def list_creatives_for_users(user_ids: List[int], offer: Optional[str] = N
                 SELECT DISTINCT COALESCE(
                         NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative')), ''),
                         NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.banner')), ''),
-                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')), '')
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')), ''),
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.adset_name')), ''),
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad')), ''),
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative_name')), ''),
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id_2')), ''),
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub2')), ''),
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.utm_content')), '')
                     ) AS cr
                 FROM tg_events
                 WHERE routed_user_id IN ({placeholders})
@@ -664,6 +689,30 @@ async def list_creatives_for_users(user_ids: List[int], offer: Optional[str] = N
             await cur.execute(query, (*params,))
             rows = await cur.fetchall()
             return [str(r[0]) for r in rows if r and r[0]]
+
+async def set_ui_cache_list(user_id: int, kind: str, values: List[str]) -> None:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            # clear old
+            await cur.execute("DELETE FROM tg_ui_cache WHERE user_id=%s AND kind=%s", (user_id, kind))
+            # insert new
+            for i, val in enumerate(values):
+                await cur.execute(
+                    "INSERT INTO tg_ui_cache(user_id, kind, idx, value) VALUES(%s, %s, %s, %s)",
+                    (user_id, kind, i, val)
+                )
+
+async def get_ui_cache_value(user_id: int, kind: str, idx: int) -> Optional[str]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT value FROM tg_ui_cache WHERE user_id=%s AND kind=%s AND idx=%s",
+                (user_id, kind, idx)
+            )
+            row = await cur.fetchone()
+            return str(row[0]) if row and row[0] is not None else None
 
 async def delete_alias(alias: str) -> None:
     pool = await init_pool()

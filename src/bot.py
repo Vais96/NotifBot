@@ -1318,17 +1318,21 @@ def _buyers_picker_kb(users: list[dict]) -> InlineKeyboardMarkup:
 
 def _offers_picker_kb(offers: list[str]) -> InlineKeyboardMarkup:
     rows = []
-    for o in offers[:50]:
-        cap = o[:60] if o else "(пусто)"
-        rows.append([InlineKeyboardButton(text=cap, callback_data=f"report:set:offer:{o}")])
+    for i, o in enumerate(offers[:50]):
+        cap = (o or "(пусто)")
+        if len(cap) > 60:
+            cap = cap[:59] + "…"
+        rows.append([InlineKeyboardButton(text=cap, callback_data=f"report:set:offer_idx:{i}")])
     rows.append([InlineKeyboardButton(text="Очистить", callback_data="report:set:offer:-")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _creatives_picker_kb(creatives: list[str]) -> InlineKeyboardMarkup:
     rows = []
-    for c in creatives[:50]:
-        cap = c[:60] if c else "(пусто)"
-        rows.append([InlineKeyboardButton(text=cap, callback_data=f"report:set:creative:{c}")])
+    for i, c in enumerate(creatives[:50]):
+        cap = (c or "(пусто)")
+        if len(cap) > 60:
+            cap = cap[:59] + "…"
+        rows.append([InlineKeyboardButton(text=cap, callback_data=f"report:set:creative_idx:{i}")])
     rows.append([InlineKeyboardButton(text="Очистить", callback_data="report:set:creative:-")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1420,6 +1424,8 @@ async def cb_report_pick_offer(call: CallbackQuery):
                 pass
         user_ids = [int(u['telegram_id']) for u in buyers]
         offers = await db.list_offers_for_users(user_ids)
+        # Cache offers for this user to map short callback index -> value
+        await db.set_ui_cache_list(call.from_user.id, "offers", offers)
         if not offers:
             await call.message.answer("Нет доступных офферов")
         else:
@@ -1456,6 +1462,7 @@ async def cb_report_pick_creative(call: CallbackQuery):
         user_ids = [int(u['telegram_id']) for u in buyers]
         offer_filter = cur.get('offer') if cur else None
         creatives = await db.list_creatives_for_users(user_ids, offer_filter)
+        await db.set_ui_cache_list(call.from_user.id, "creatives", creatives)
         if not creatives:
             await call.message.answer("Нет доступных креативов")
         else:
@@ -1472,6 +1479,25 @@ async def cb_report_pick_creative(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("report:set:"))
 async def cb_report_set_filter_quick(call: CallbackQuery):
     _, _, which, value = call.data.split(":", 3)
+    # Resolve index-based selections from UI cache
+    if which == 'offer_idx':
+        try:
+            idx = int(value)
+            resolved = await db.get_ui_cache_value(call.from_user.id, 'offers', idx)
+            if resolved is None:
+                return await call.answer("Просрочен список, откройте заново", show_alert=True)
+            which, value = 'offer', resolved
+        except Exception:
+            return await call.answer("Некорректный выбор оффера", show_alert=True)
+    elif which == 'creative_idx':
+        try:
+            idx = int(value)
+            resolved = await db.get_ui_cache_value(call.from_user.id, 'creatives', idx)
+            if resolved is None:
+                return await call.answer("Просрочен список, откройте заново", show_alert=True)
+            which, value = 'creative', resolved
+        except Exception:
+            return await call.answer("Некорректный выбор крео", show_alert=True)
     cur = await db.get_report_filter(call.from_user.id)
     offer = cur.get('offer')
     creative = cur.get('creative')
