@@ -426,8 +426,9 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
         total_params += [offer, offer, offer]
     if creative:
         total_params += [creative, creative, creative]
-        # totals
-        totals_sql = f"""
+
+    # totals for sales
+    totals_sql = f"""
         SELECT COUNT(*), COALESCE(SUM(payout),0)
         FROM tg_events
         WHERE created_at >= %s AND created_at < %s
@@ -436,51 +437,51 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
           {offer_filter_sql}
           {creative_filter_sql}
     """
-        # top offer by offer_name if present, else fall back to stored offer
-        top_offer_sql = f"""
-                SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')), offer) AS offer_name, COUNT(*) AS cnt
-                FROM tg_events
-                WHERE created_at >= %s AND created_at < %s
-                    AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
-                    AND routed_user_id IN ({placeholders_users})
-                    {offer_filter_sql}
-                    {creative_filter_sql}
-                GROUP BY offer_name
-                ORDER BY cnt DESC
-                LIMIT 1
-        """
-        # geo distribution (exclude empty/null)
-        geo_sql = f"""
-                SELECT country AS k, COUNT(*)
-                FROM tg_events
-                WHERE created_at >= %s AND created_at < %s
-                    AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
-                    AND routed_user_id IN ({placeholders_users})
-                    {offer_filter_sql}
-                    {creative_filter_sql}
-                    AND country IS NOT NULL AND country <> ''
-                GROUP BY k
-                ORDER BY COUNT(*) DESC
-                LIMIT 10
-        """
-        # creative distribution (use common fields in raw JSON; exclude empty)
-        creative_sql = f"""
-                SELECT COALESCE(
-                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative')), ''),
-                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.banner')), ''),
-                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')), '')
-                             ) AS k,
-                             COUNT(*)
-                FROM tg_events
-                WHERE created_at >= %s AND created_at < %s
-                    AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
-                    AND routed_user_id IN ({placeholders_users})
-                    {offer_filter_sql}
-                    {creative_filter_sql}
-                GROUP BY k
-                ORDER BY COUNT(*) DESC
-                LIMIT 10
-        """
+    # top offer by offer_name if present, else fall back to stored offer
+    top_offer_sql = f"""
+            SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')), offer) AS offer_name, COUNT(*) AS cnt
+            FROM tg_events
+            WHERE created_at >= %s AND created_at < %s
+                AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                AND routed_user_id IN ({placeholders_users})
+                {offer_filter_sql}
+                {creative_filter_sql}
+            GROUP BY offer_name
+            ORDER BY cnt DESC
+            LIMIT 1
+    """
+    # geo distribution (exclude empty/null)
+    geo_sql = f"""
+            SELECT country AS k, COUNT(*)
+            FROM tg_events
+            WHERE created_at >= %s AND created_at < %s
+                AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                AND routed_user_id IN ({placeholders_users})
+                {offer_filter_sql}
+                {creative_filter_sql}
+                AND country IS NOT NULL AND country <> ''
+            GROUP BY k
+            ORDER BY COUNT(*) DESC
+            LIMIT 10
+    """
+    # creative distribution (use common fields in raw JSON; exclude empty)
+    creative_sql = f"""
+            SELECT COALESCE(
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative')), ''),
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.banner')), ''),
+                             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')), '')
+                         ) AS k,
+                         COUNT(*)
+            FROM tg_events
+            WHERE created_at >= %s AND created_at < %s
+                AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                AND routed_user_id IN ({placeholders_users})
+                {offer_filter_sql}
+                {creative_filter_sql}
+            GROUP BY k
+            ORDER BY COUNT(*) DESC
+            LIMIT 10
+    """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             # total first
@@ -595,10 +596,12 @@ async def list_aliases() -> List[Dict[str, Any]]:
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     query = f"""
-                        SELECT DISTINCT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')), offer) AS off
-                        FROM tg_events
-                        WHERE routed_user_id IN ({placeholders})
-                          AND off IS NOT NULL AND off <> ''
+                        SELECT DISTINCT off FROM (
+                            SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')), offer) AS off
+                            FROM tg_events
+                            WHERE routed_user_id IN ({placeholders})
+                        ) t
+                        WHERE off IS NOT NULL AND off <> ''
                         ORDER BY off ASC
                     """
                     await cur.execute(query, (*user_ids,))
