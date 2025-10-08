@@ -1059,11 +1059,17 @@ def _report_text(title: str, agg: dict) -> str:
     if agg.get('top_offer'):
         lines.append(f"🏆 Топ-оффер: <code>{agg['top_offer']}</code>")
     if agg.get('geo_dist'):
-        geos = ", ".join(f"{k}:{v}" for k, v in list(agg['geo_dist'].items())[:5])
-        lines.append(f"🌍 Гео: {geos}")
-    if agg.get('source_dist'):
-        srcs = ", ".join(f"{k}:{v}" for k, v in list(agg['source_dist'].items())[:5])
-        lines.append(f"🚦 Источники: {srcs}")
+        # filter out unknown entries
+        geo_items = [(k, v) for k, v in agg['geo_dist'].items() if k and k != '-' ]
+        if geo_items:
+            geos = ", ".join(f"{k}:{v}" for k, v in geo_items[:5])
+            lines.append(f"🌍 Гео: {geos}")
+    # replace sources with top creatives
+    if agg.get('creative_dist'):
+        cr_items = [(k, v) for k, v in agg['creative_dist'].items() if k and str(k).strip()]
+        if cr_items:
+            crs = ", ".join(f"{k}:{v}" for k, v in cr_items[:5])
+            lines.append(f"🎬 Креативы: {crs}")
     return "\n".join(lines)
 
 async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int | None = None, yesterday: bool = False):

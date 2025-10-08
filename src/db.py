@@ -436,45 +436,51 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
           {offer_filter_sql}
           {creative_filter_sql}
     """
-    # top offer
-    top_offer_sql = f"""
-        SELECT offer, COUNT(*) AS cnt
-        FROM tg_events
-        WHERE created_at >= %s AND created_at < %s
-          AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
-          AND routed_user_id IN ({placeholders_users})
-          {offer_filter_sql}
-          {creative_filter_sql}
-        GROUP BY offer
-        ORDER BY cnt DESC
-        LIMIT 1
-    """
-    # geo distribution
-    geo_sql = f"""
-        SELECT COALESCE(country,'-') AS k, COUNT(*)
-        FROM tg_events
-        WHERE created_at >= %s AND created_at < %s
-          AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
-          AND routed_user_id IN ({placeholders_users})
-          {offer_filter_sql}
-          {creative_filter_sql}
-        GROUP BY k
-        ORDER BY COUNT(*) DESC
-        LIMIT 10
-    """
-    # source distribution
-    source_sql = f"""
-        SELECT COALESCE(source,'-') AS k, COUNT(*)
-        FROM tg_events
-        WHERE created_at >= %s AND created_at < %s
-          AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
-          AND routed_user_id IN ({placeholders_users})
-          {offer_filter_sql}
-          {creative_filter_sql}
-        GROUP BY k
-        ORDER BY COUNT(*) DESC
-        LIMIT 10
-    """
+        # top offer by offer_name if present, else fall back to stored offer
+        top_offer_sql = f"""
+                SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')), offer) AS offer_name, COUNT(*) AS cnt
+                FROM tg_events
+                WHERE created_at >= %s AND created_at < %s
+                    AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                    AND routed_user_id IN ({placeholders_users})
+                    {offer_filter_sql}
+                    {creative_filter_sql}
+                GROUP BY offer_name
+                ORDER BY cnt DESC
+                LIMIT 1
+        """
+        # geo distribution (exclude empty/null)
+        geo_sql = f"""
+                SELECT country AS k, COUNT(*)
+                FROM tg_events
+                WHERE created_at >= %s AND created_at < %s
+                    AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                    AND routed_user_id IN ({placeholders_users})
+                    {offer_filter_sql}
+                    {creative_filter_sql}
+                    AND country IS NOT NULL AND country <> ''
+                GROUP BY k
+                ORDER BY COUNT(*) DESC
+                LIMIT 10
+        """
+        # creative distribution (use common fields in raw JSON; exclude empty)
+        creative_sql = f"""
+                SELECT COALESCE(
+                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative')), ''),
+                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.banner')), ''),
+                                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')), '')
+                             ) AS k,
+                             COUNT(*)
+                FROM tg_events
+                WHERE created_at >= %s AND created_at < %s
+                    AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                    AND routed_user_id IN ({placeholders_users})
+                    {offer_filter_sql}
+                    {creative_filter_sql}
+                GROUP BY k
+                ORDER BY COUNT(*) DESC
+                LIMIT 10
+        """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             # total first
@@ -490,11 +496,11 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             top_offer = row[0] if row else None
             await cur.execute(geo_sql, params)
             geo_rows = await cur.fetchall()
-            geo_dist = {str(r[0]): int(r[1]) for r in geo_rows}
-            await cur.execute(source_sql, params)
-            src_rows = await cur.fetchall()
-            source_dist = {str(r[0]): int(r[1]) for r in src_rows}
-    return {"count": count, "profit": profit, "top_offer": top_offer, "geo_dist": geo_dist, "source_dist": source_dist, "total": total}
+            geo_dist = {str(r[0]): int(r[1]) for r in geo_rows if (r[0] is not None and str(r[0]).strip() not in ('', '-'))}
+            await cur.execute(creative_sql, params)
+            cr_rows = await cur.fetchall()
+            creative_dist = {str(r[0]): int(r[1]) for r in cr_rows if r[0] is not None and str(r[0]).strip() != ''}
+    return {"count": count, "profit": profit, "top_offer": top_offer, "geo_dist": geo_dist, "creative_dist": creative_dist, "total": total}
 
 async def trend_daily_sales(user_ids: List[int], days: int = 7) -> List[Tuple[str, int]]:
     """Return list of (YYYY-MM-DD, count) for last N days (UTC)."""
