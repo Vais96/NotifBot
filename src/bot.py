@@ -1018,8 +1018,7 @@ def _reports_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Сегодня", callback_data="report:today"), InlineKeyboardButton(text="Вчера", callback_data="report:yesterday")],
         [InlineKeyboardButton(text="Неделя", callback_data="report:week")],
-        [InlineKeyboardButton(text="Фильтр оффера", callback_data="report:f:offer"), InlineKeyboardButton(text="Фильтр крео", callback_data="report:f:creative")],
-        [InlineKeyboardButton(text="Фильтр по байеру", callback_data="report:f:buyer"), InlineKeyboardButton(text="Фильтр по команде", callback_data="report:f:team")],
+        [InlineKeyboardButton(text="Выбрать оффер", callback_data="report:pick:offer"), InlineKeyboardButton(text="Выбрать крео", callback_data="report:pick:creative")],
         [InlineKeyboardButton(text="Выбрать байера", callback_data="report:pick:buyer"), InlineKeyboardButton(text="Выбрать команду", callback_data="report:pick:team")],
         [InlineKeyboardButton(text="Сбросить фильтры", callback_data="report:f:clear")],
     ])
@@ -1156,13 +1155,6 @@ async def cb_report_filter(call: CallbackQuery):
         await call.message.answer("Фильтры сброшены")
         await call.answer()
         return
-    await db.set_pending_action(call.from_user.id, f"report:filter:{key}", None)
-    if key in ("offer","creative"):
-        await call.message.answer("Пришлите значение фильтра (точное совпадение), либо '-' чтобы очистить только этот фильтр")
-    elif key == "buyer":
-        await call.message.answer("Пришлите Telegram ID или @username байера, либо '-' чтобы очистить")
-    elif key == "team":
-        await call.message.answer("Пришлите ID команды, либо '-' чтобы очистить")
     await call.answer()
 
 def _teams_picker_kb(teams: list[dict]) -> InlineKeyboardMarkup:
@@ -1178,6 +1170,22 @@ def _buyers_picker_kb(users: list[dict]) -> InlineKeyboardMarkup:
         cap = f"@{u['username'] or u['telegram_id']} ({u['full_name'] or ''})"
         rows.append([InlineKeyboardButton(text=cap, callback_data=f"report:set:buyer:{u['telegram_id']}")])
     rows.append([InlineKeyboardButton(text="Очистить", callback_data="report:set:buyer:-")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def _offers_picker_kb(offers: list[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for o in offers[:50]:
+        cap = o[:60] if o else "(пусто)"
+        rows.append([InlineKeyboardButton(text=cap, callback_data=f"report:set:offer:{o}")])
+    rows.append([InlineKeyboardButton(text="Очистить", callback_data="report:set:offer:-")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def _creatives_picker_kb(creatives: list[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for c in creatives[:50]:
+        cap = c[:60] if c else "(пусто)"
+        rows.append([InlineKeyboardButton(text=cap, callback_data=f"report:set:creative:{c}")])
+    rows.append([InlineKeyboardButton(text="Очистить", callback_data="report:set:creative:-")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 @dp.callback_query(F.data == "report:pick:team")
@@ -1228,6 +1236,61 @@ async def cb_report_pick_buyer(call: CallbackQuery):
         await call.message.answer("Выберите байера:", reply_markup=_buyers_picker_kb(buyers))
     await call.answer()
 
+@dp.callback_query(F.data == "report:pick:offer")
+async def cb_report_pick_offer(call: CallbackQuery):
+    users = await db.list_users()
+    # scope by role
+    scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
+    # apply buyer/team filters if set
+    cur = await db.get_report_filter(call.from_user.id)
+    buyers = [u for u in users if int(u['telegram_id']) in scope_ids]
+    if cur and cur.get('team_id'):
+        try:
+            team_id_filter = int(cur['team_id'])
+            buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
+        except Exception:
+            pass
+    if cur and cur.get('buyer_id'):
+        try:
+            buyer_id_filter = int(cur['buyer_id'])
+            buyers = [u for u in buyers if int(u['telegram_id']) == buyer_id_filter]
+        except Exception:
+            pass
+    user_ids = [int(u['telegram_id']) for u in buyers]
+    offers = await db.list_offers_for_users(user_ids)
+    if not offers:
+        await call.message.answer("Нет доступных офферов")
+    else:
+        await call.message.answer("Выберите оффер:", reply_markup=_offers_picker_kb(offers))
+    await call.answer()
+
+@dp.callback_query(F.data == "report:pick:creative")
+async def cb_report_pick_creative(call: CallbackQuery):
+    users = await db.list_users()
+    scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
+    cur = await db.get_report_filter(call.from_user.id)
+    buyers = [u for u in users if int(u['telegram_id']) in scope_ids]
+    if cur and cur.get('team_id'):
+        try:
+            team_id_filter = int(cur['team_id'])
+            buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
+        except Exception:
+            pass
+    if cur and cur.get('buyer_id'):
+        try:
+            buyer_id_filter = int(cur['buyer_id'])
+            buyers = [u for u in buyers if int(u['telegram_id']) == buyer_id_filter]
+        except Exception:
+            pass
+    user_ids = [int(u['telegram_id']) for u in buyers]
+    offer_filter = cur.get('offer') if cur else None
+    creatives = await db.list_creatives_for_users(user_ids, offer_filter)
+    if not creatives:
+        await call.message.answer("Нет доступных креативов")
+    else:
+        await call.message.answer("Выберите крео:", reply_markup=_creatives_picker_kb(creatives))
+    await call.answer()
+
 @dp.callback_query(F.data.startswith("report:set:"))
 async def cb_report_set_filter_quick(call: CallbackQuery):
     _, _, which, value = call.data.split(":", 3)
@@ -1240,6 +1303,10 @@ async def cb_report_set_filter_quick(call: CallbackQuery):
         team_id = None if value == '-' else int(value)
     elif which == 'buyer':
         buyer_id = None if value == '-' else int(value)
+    elif which == 'offer':
+        offer = None if value == '-' else value
+    elif which == 'creative':
+        creative = None if value == '-' else value
     await db.set_report_filter(call.from_user.id, offer, creative, buyer_id=buyer_id, team_id=team_id)
     await call.answer("Фильтр обновлён")
 
