@@ -984,14 +984,16 @@ async def notify_buyer(buyer_id: int, text: str):
         logger.warning(f"Failed to notify buyer {buyer_id}: {e}")
 
 # ===== Reports =====
-def _reports_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def _reports_menu(actor_id: int) -> InlineKeyboardMarkup:
+    # Build dynamic keyboard; chips will be appended in _send_reports_menu where we have async context
+    rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="Сегодня", callback_data="report:today"), InlineKeyboardButton(text="Вчера", callback_data="report:yesterday")],
         [InlineKeyboardButton(text="Неделя", callback_data="report:week")],
         [InlineKeyboardButton(text="Выбрать оффер", callback_data="report:pick:offer"), InlineKeyboardButton(text="Выбрать крео", callback_data="report:pick:creative")],
         [InlineKeyboardButton(text="Выбрать байера", callback_data="report:pick:buyer"), InlineKeyboardButton(text="Выбрать команду", callback_data="report:pick:team")],
-        [InlineKeyboardButton(text="Сбросить фильтры", callback_data="report:f:clear")],
-    ])
+    ]
+    rows.append([InlineKeyboardButton(text="Сбросить фильтры", callback_data="report:f:clear")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def _send_reports_menu(chat_id: int, actor_id: int):
     # Build active filters line
@@ -1018,7 +1020,36 @@ async def _send_reports_menu(chat_id: int, actor_id: int):
             tn = next((t['name'] for t in teams if int(t['id']) == tid), str(tid))
             fparts.append(f"team=<code>{tn}</code>")
         text += "\n🔎 Фильтры: " + ", ".join(fparts)
-    await bot.send_message(chat_id, text, reply_markup=_reports_menu())
+    # Build keyboard with chips
+    kb = _reports_menu(actor_id)
+    chips_rows: list[list[InlineKeyboardButton]] = []
+    def trunc(s: str, n: int = 24) -> str:
+        s = str(s)
+        return s if len(s) <= n else (s[:n-1] + "…")
+    chip_row: list[InlineKeyboardButton] = []
+    if filt.get('offer'):
+        chip_row.append(InlineKeyboardButton(text=f"❌ offer:{trunc(filt['offer'])}", callback_data="report:clear:offer"))
+    if filt.get('creative'):
+        chip_row.append(InlineKeyboardButton(text=f"❌ cr:{trunc(filt['creative'])}", callback_data="report:clear:creative"))
+    if chip_row:
+        chips_rows.append(chip_row)
+    chip_row2: list[InlineKeyboardButton] = []
+    if filt.get('buyer_id'):
+        users = await db.list_users()
+        bid = int(filt['buyer_id'])
+        bu = next((u for u in users if int(u['telegram_id']) == bid), None)
+        bcap = f"@{bu['username']}" if bu and bu.get('username') else (bu.get('full_name') if bu and bu.get('full_name') else str(bid))
+        chip_row2.append(InlineKeyboardButton(text=f"❌ buyer:{trunc(bcap)}", callback_data="report:clear:buyer"))
+    if filt.get('team_id'):
+        teams = await db.list_teams()
+        tid = int(filt['team_id'])
+        tname = next((t['name'] for t in teams if int(t['id']) == tid), str(tid))
+        chip_row2.append(InlineKeyboardButton(text=f"❌ team:{trunc(tname)}", callback_data="report:clear:team"))
+    if chip_row2:
+        chips_rows.append(chip_row2)
+    # Append chips rows before the final reset row
+    kb.inline_keyboard = kb.inline_keyboard[:-1] + chips_rows + kb.inline_keyboard[-1:]
+    await bot.send_message(chat_id, text, reply_markup=kb)
 
 async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     users = await db.list_users()
@@ -1121,7 +1152,7 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
             tn = next((t['name'] for t in teams if int(t['id']) == tid), str(tid))
             fparts.append(f"team=<code>{tn}</code>")
         text += "\n🔎 Фильтры: " + ", ".join(fparts)
-    await bot.send_message(chat_id, text, reply_markup=_reports_menu())
+    await bot.send_message(chat_id, text, reply_markup=_reports_menu(actor_id))
 
 @dp.callback_query(F.data == "report:today")
 async def cb_report_today(call: CallbackQuery):
@@ -1219,6 +1250,42 @@ async def cb_report_filter(call: CallbackQuery):
         await call.answer()
         return
     await call.answer()
+
+@dp.callback_query(F.data.startswith("report:clear:"))
+async def cb_report_clear_chip(call: CallbackQuery):
+    _, _, which = call.data.split(":", 2)
+    cur = await db.get_report_filter(call.from_user.id)
+    offer = cur.get('offer')
+    creative = cur.get('creative')
+    buyer_id = cur.get('buyer_id')
+    team_id = cur.get('team_id')
+    if which == 'offer':
+        offer = None
+    elif which == 'creative':
+        creative = None
+    elif which == 'buyer':
+        buyer_id = None
+    elif which == 'team':
+        team_id = None
+    await db.set_report_filter(call.from_user.id, offer, creative, buyer_id=buyer_id, team_id=team_id)
+    try:
+        await call.message.answer("Фильтр снят")
+    except Exception:
+        pass
+    # Reopen menu and send today's report with remaining filters
+    await _send_reports_menu(call.message.chat.id, call.from_user.id)
+    try:
+        await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня")
+    except Exception as e:
+        logger.exception(e)
+        try:
+            await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+    try:
+        await call.answer()
+    except Exception:
+        pass
 
 def _teams_picker_kb(teams: list[dict]) -> InlineKeyboardMarkup:
     rows = []
