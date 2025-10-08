@@ -126,6 +126,8 @@ SCHEMA_SQL = [
         user_id BIGINT PRIMARY KEY,
         offer VARCHAR(255) NULL,
         creative VARCHAR(255) NULL,
+        buyer_id BIGINT NULL,
+        team_id BIGINT NULL,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT fk_tg_filters_user FOREIGN KEY (user_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -379,7 +381,7 @@ async def set_kpi(user_id: int, daily_goal: Optional[int] = None, weekly_goal: O
                 (user_id, daily_goal, weekly_goal)
             )
 
-async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] = None, creative: Optional[str] = None) -> Dict[str, Any]:
+async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] = None, creative: Optional[str] = None, filter_user_ids: Optional[List[int]] = None) -> Dict[str, Any]:
     """
     Return dict with keys: count, profit, unique_clicks (if available), top_offer, geo_dist, source_dist.
     Filters: offer (by raw->'offer' or stored offer), creative (by raw JSON keys: creative/name/banner), time window [start, end).
@@ -391,7 +393,11 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
         "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
     )
     placeholders_status = ",".join(["%s"] * len(sale_like))
-    placeholders_users = ",".join(["%s"] * len(user_ids))
+    # If filter_user_ids provided, intersect with user_ids
+    if filter_user_ids is not None:
+        base_set = set(user_ids)
+        user_ids = [uid for uid in filter_user_ids if uid in base_set]
+    placeholders_users = ",".join(["%s"] * len(user_ids)) if user_ids else "NULL"
     offer_filter_sql = ""
     creative_filter_sql = ""
     params: list[Any] = [start, end, *sale_like, *user_ids]
@@ -413,7 +419,9 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
           {offer_filter_sql}
           {creative_filter_sql}
     """
-    total_params: list[Any] = [start, end, *user_ids]
+    total_params: list[Any] = [start, end]
+    if user_ids:
+        total_params += [*user_ids]
     if offer:
         total_params += [offer, offer, offer]
     if creative:
@@ -519,21 +527,21 @@ async def get_report_filter(user_id: int) -> Dict[str, Any]:
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute("SELECT offer, creative FROM tg_report_filters WHERE user_id=%s", (user_id,))
+            await cur.execute("SELECT offer, creative, buyer_id, team_id FROM tg_report_filters WHERE user_id=%s", (user_id,))
             row = await cur.fetchone()
-            return row or {"offer": None, "creative": None}
+            return row or {"offer": None, "creative": None, "buyer_id": None, "team_id": None}
 
-async def set_report_filter(user_id: int, offer: Optional[str], creative: Optional[str]) -> None:
+async def set_report_filter(user_id: int, offer: Optional[str], creative: Optional[str], buyer_id: Optional[int] = None, team_id: Optional[int] = None) -> None:
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO tg_report_filters(user_id, offer, creative)
-                VALUES(%s, %s, %s)
-                ON DUPLICATE KEY UPDATE offer=VALUES(offer), creative=VALUES(creative)
+                INSERT INTO tg_report_filters(user_id, offer, creative, buyer_id, team_id)
+                VALUES(%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE offer=VALUES(offer), creative=VALUES(creative), buyer_id=VALUES(buyer_id), team_id=VALUES(team_id)
                 """,
-                (user_id, offer, creative)
+                (user_id, offer, creative, buyer_id, team_id)
             )
 
 async def clear_report_filter(user_id: int) -> None:

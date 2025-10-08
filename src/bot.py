@@ -833,11 +833,32 @@ async def on_text_fallback(message: Message):
             cur = await db.get_report_filter(message.from_user.id)
             offer = cur.get('offer')
             creative = cur.get('creative')
+            buyer_id = cur.get('buyer_id')
+            team_id = cur.get('team_id')
             if which == 'offer':
                 offer = None if val == '-' else val
             elif which == 'creative':
                 creative = None if val == '-' else val
-            await db.set_report_filter(message.from_user.id, offer, creative)
+            elif which == 'buyer':
+                if val == '-':
+                    buyer_id = None
+                else:
+                    try:
+                        uid = await _resolve_user_id(val)
+                        buyer_id = uid
+                    except Exception:
+                        await db.clear_pending_action(message.from_user.id)
+                        return await message.answer("Не удалось распознать пользователя. Пришлите numeric ID или @username.")
+            elif which == 'team':
+                if val == '-':
+                    team_id = None
+                else:
+                    try:
+                        team_id = int(val)
+                    except Exception:
+                        await db.clear_pending_action(message.from_user.id)
+                        return await message.answer("Неверный формат. Нужен ID команды.")
+            await db.set_report_filter(message.from_user.id, offer, creative, buyer_id=buyer_id, team_id=team_id)
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("Фильтр сохранен")
     except Exception as e:
@@ -998,6 +1019,7 @@ def _reports_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Сегодня", callback_data="report:today"), InlineKeyboardButton(text="Вчера", callback_data="report:yesterday")],
         [InlineKeyboardButton(text="Неделя", callback_data="report:week")],
         [InlineKeyboardButton(text="Фильтр оффера", callback_data="report:f:offer"), InlineKeyboardButton(text="Фильтр крео", callback_data="report:f:creative")],
+        [InlineKeyboardButton(text="Фильтр по байеру", callback_data="report:f:buyer"), InlineKeyboardButton(text="Фильтр по команде", callback_data="report:f:team")],
         [InlineKeyboardButton(text="Сбросить фильтры", callback_data="report:f:clear")],
     ])
 
@@ -1015,6 +1037,14 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     if my_role == "lead":
         team_id = me.get("team_id") if me else None
         return [int(u["telegram_id"]) for u in users if u.get("team_id") == team_id and u.get("is_active")]
+    if my_role == "mentor":
+        # aggregate all users from teams the mentor follows
+        team_ids = set(await db.list_mentor_teams(actor_id))
+        ids = [int(u["telegram_id"]) for u in users if (u.get("team_id") in team_ids) and u.get("is_active")]
+        # include own id as well
+        if actor_id not in ids:
+            ids.append(actor_id)
+        return ids
     return [actor_id]
 
 def _report_text(title: str, agg: dict) -> str:
@@ -1038,6 +1068,7 @@ def _report_text(title: str, agg: dict) -> str:
 
 async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int | None = None, yesterday: bool = False):
     from datetime import datetime, timezone, timedelta
+    users = await db.list_users()
     user_ids = await _resolve_scope_user_ids(actor_id)
     now = datetime.now(timezone.utc)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1049,19 +1080,37 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
         start = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days-1))
         end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     filt = await db.get_report_filter(actor_id)
-    agg = await db.aggregate_sales(user_ids, start, end, offer=filt.get('offer'), creative=filt.get('creative'))
+    filter_user_ids: list[int] | None = None
+    if filt.get('buyer_id') or filt.get('team_id'):
+        me = next((u for u in users if u["telegram_id"] == actor_id), None)
+        role = (me or {}).get("role", "buyer")
+        if actor_id in ADMIN_IDS:
+            role = "admin"
+        allowed_ids = set(user_ids)
+        if filt.get('buyer_id'):
+            bid = int(filt['buyer_id'])
+            filter_user_ids = [bid] if bid in allowed_ids else []
+        elif filt.get('team_id'):
+            tid = int(filt['team_id'])
+            team_ids = [int(u['telegram_id']) for u in users if u.get('team_id') == tid and u.get('is_active')]
+            filter_user_ids = [uid for uid in team_ids if uid in allowed_ids]
+    agg = await db.aggregate_sales(user_ids, start, end, offer=filt.get('offer'), creative=filt.get('creative'), filter_user_ids=filter_user_ids)
     text = _report_text(title, agg)
     if days == 7 and not yesterday:
         trend = await db.trend_daily_sales(user_ids, days=7)
         if trend:
             tline = ", ".join(f"{d.split('-')[-1]}:{c}" for d, c in trend)
             text += f"\n📅 Тренд (7д): {tline}"
-    if filt.get('offer') or filt.get('creative'):
+    if filt.get('offer') or filt.get('creative') or filt.get('buyer_id') or filt.get('team_id'):
         fparts = []
         if filt.get('offer'):
             fparts.append(f"offer=<code>{filt['offer']}</code>")
         if filt.get('creative'):
             fparts.append(f"creative=<code>{filt['creative']}</code>")
+        if filt.get('buyer_id'):
+            fparts.append(f"buyer=<code>{filt['buyer_id']}</code>")
+        if filt.get('team_id'):
+            fparts.append(f"team=<code>{filt['team_id']}</code>")
         text += "\n🔎 Фильтры: " + ", ".join(fparts)
     await bot.send_message(chat_id, text, reply_markup=_reports_menu())
 
@@ -1101,7 +1150,12 @@ async def cb_report_filter(call: CallbackQuery):
         await call.answer()
         return
     await db.set_pending_action(call.from_user.id, f"report:filter:{key}", None)
-    await call.message.answer("Пришлите значение фильтра (точное совпадение), либо '-' чтобы очистить только этот фильтр")
+    if key in ("offer","creative"):
+        await call.message.answer("Пришлите значение фильтра (точное совпадение), либо '-' чтобы очистить только этот фильтр")
+    elif key == "buyer":
+        await call.message.answer("Пришлите Telegram ID или @username байера, либо '-' чтобы очистить")
+    elif key == "team":
+        await call.message.answer("Пришлите ID команды, либо '-' чтобы очистить")
     await call.answer()
 
 # ===== KPI =====
