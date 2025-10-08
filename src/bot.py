@@ -994,7 +994,31 @@ def _reports_menu() -> InlineKeyboardMarkup:
     ])
 
 async def _send_reports_menu(chat_id: int, actor_id: int):
-    await bot.send_message(chat_id, "Отчеты — выберите период:", reply_markup=_reports_menu())
+    # Build active filters line
+    filt = await db.get_report_filter(actor_id)
+    text = "Отчеты — выберите период:"
+    if filt.get('offer') or filt.get('creative') or filt.get('buyer_id') or filt.get('team_id'):
+        users = await db.list_users()
+        teams = await db.list_teams()
+        fparts: list[str] = []
+        if filt.get('offer'):
+            fparts.append(f"offer=<code>{filt['offer']}</code>")
+        if filt.get('creative'):
+            fparts.append(f"creative=<code>{filt['creative']}</code>")
+        if filt.get('buyer_id'):
+            bid = int(filt['buyer_id'])
+            bu = next((u for u in users if int(u['telegram_id']) == bid), None)
+            if bu and (bu.get('username') or bu.get('full_name')):
+                cap = f"@{bu['username']}" if bu.get('username') else (bu.get('full_name') or str(bid))
+            else:
+                cap = str(bid)
+            fparts.append(f"buyer=<code>{cap}</code>")
+        if filt.get('team_id'):
+            tid = int(filt['team_id'])
+            tn = next((t['name'] for t in teams if int(t['id']) == tid), str(tid))
+            fparts.append(f"team=<code>{tn}</code>")
+        text += "\n🔎 Фильтры: " + ", ".join(fparts)
+    await bot.send_message(chat_id, text, reply_markup=_reports_menu())
 
 async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     users = await db.list_users()
@@ -1078,15 +1102,24 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
             tline = ", ".join(f"{d.split('-')[-1]}:{c}" for d, c in trend)
             text += f"\n📅 Тренд (7д): {tline}"
     if filt.get('offer') or filt.get('creative') or filt.get('buyer_id') or filt.get('team_id'):
-        fparts = []
+        teams = await db.list_teams()
+        fparts: list[str] = []
         if filt.get('offer'):
             fparts.append(f"offer=<code>{filt['offer']}</code>")
         if filt.get('creative'):
             fparts.append(f"creative=<code>{filt['creative']}</code>")
         if filt.get('buyer_id'):
-            fparts.append(f"buyer=<code>{filt['buyer_id']}</code>")
+            bid = int(filt['buyer_id'])
+            bu = next((u for u in users if int(u['telegram_id']) == bid), None)
+            if bu and (bu.get('username') or bu.get('full_name')):
+                cap = f"@{bu['username']}" if bu.get('username') else (bu.get('full_name') or str(bid))
+            else:
+                cap = str(bid)
+            fparts.append(f"buyer=<code>{cap}</code>")
         if filt.get('team_id'):
-            fparts.append(f"team=<code>{filt['team_id']}</code>")
+            tid = int(filt['team_id'])
+            tn = next((t['name'] for t in teams if int(t['id']) == tid), str(tid))
+            fparts.append(f"team=<code>{tn}</code>")
         text += "\n🔎 Фильтры: " + ", ".join(fparts)
     await bot.send_message(chat_id, text, reply_markup=_reports_menu())
 
@@ -1372,7 +1405,45 @@ async def cb_report_set_filter_quick(call: CallbackQuery):
     elif which == 'creative':
         creative = None if value == '-' else value
     await db.set_report_filter(call.from_user.id, offer, creative, buyer_id=buyer_id, team_id=team_id)
-    await call.answer("Фильтр обновлён")
+    # Show a short summary and re-open Reports menu with filters displayed
+    users = await db.list_users()
+    teams = await db.list_teams()
+    parts: list[str] = []
+    if offer:
+        parts.append(f"offer=<code>{offer}</code>")
+    if creative:
+        parts.append(f"creative=<code>{creative}</code>")
+    if buyer_id:
+        bid = int(buyer_id)
+        bu = next((u for u in users if int(u['telegram_id']) == bid), None)
+        bcap = f"@{bu['username']}" if bu and bu.get('username') else (bu.get('full_name') if bu and bu.get('full_name') else str(bid))
+        parts.append(f"buyer=<code>{bcap}</code>")
+    if team_id:
+        tid = int(team_id)
+        tname = next((t['name'] for t in teams if int(t['id']) == tid), str(tid))
+        parts.append(f"team=<code>{tname}</code>")
+    if parts:
+        try:
+            await call.message.answer("Фильтр обновлён: " + ", ".join(parts), parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+    # Re-open reports menu with visible filters and send today's report immediately
+    try:
+        await _send_reports_menu(call.message.chat.id, call.from_user.id)
+    except Exception:
+        pass
+    try:
+        await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня")
+    except Exception as e:
+        logger.exception(e)
+        try:
+            await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+    try:
+        await call.answer()
+    except Exception:
+        pass
 
 # ===== KPI =====
 def _kpi_menu() -> InlineKeyboardMarkup:
