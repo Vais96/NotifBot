@@ -1,18 +1,11 @@
-from aiogram import Bot, Dispatcher, F
+from aiogram import F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums.parse_mode import ParseMode
-from aiogram.client.default import DefaultBotProperties
 from loguru import logger
 from .config import settings
 from . import db
-
-bot = Bot(token=settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-
-# Single dispatcher shared with FastAPI webhook
-dp = Dispatcher()
-
-ADMIN_IDS = set(settings.admins)
+from .dispatcher import bot, dp, ADMIN_IDS
 
 # Helper: resolve user reference to Telegram ID (supports numeric ID, @username, tg://user?id=...)
 async def _resolve_user_id(identifier: str) -> int:
@@ -977,11 +970,7 @@ async def on_list_teams(message: Message):
     lines = [f"#{t['id']} — {t['name']}" for t in teams]
     await message.answer("Команды:\n" + "\n".join(lines))
 
-async def notify_buyer(buyer_id: int, text: str):
-    try:
-        await bot.send_message(chat_id=buyer_id, text=text)
-    except Exception as e:
-        logger.warning(f"Failed to notify buyer {buyer_id}: {e}")
+# notify_buyer moved to dispatcher
 
 # ===== Reports =====
 def _reports_menu(actor_id: int) -> InlineKeyboardMarkup:

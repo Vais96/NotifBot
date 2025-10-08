@@ -3,7 +3,8 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 import json
 from .config import settings
-from .bot import dp, bot, notify_buyer
+from .dispatcher import dp, bot, notify_buyer
+from . import handlers  # noqa: F401 ensure handlers are registered
 from . import db
 from aiogram.types import Update, BotCommand
 
