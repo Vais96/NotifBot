@@ -1082,7 +1082,9 @@ def _report_text(title: str, agg: dict) -> str:
         cr = (agg.get('count',0) / total) * 100.0
         lines.append(f"🎯 CR: <b>{cr:.1f}%</b> (из {total})")
     if agg.get('top_offer'):
-        lines.append(f"🏆 Топ-оффер: <code>{agg['top_offer']}</code>")
+        toc = agg.get('top_offer_count') or 0
+        suffix = f" — {toc}" if toc else ""
+        lines.append(f"🏆 Топ-оффер: <code>{agg['top_offer']}</code>{suffix}")
     if agg.get('geo_dist'):
         # filter out unknown entries
         geo_items = [(k, v) for k, v in agg['geo_dist'].items() if k and k != '-' ]
@@ -1247,6 +1249,11 @@ async def cb_report_filter(call: CallbackQuery):
     if key == "clear":
         await db.clear_report_filter(call.from_user.id)
         await call.message.answer("Фильтры сброшены")
+        # Reopen reports menu after full clear (do not auto-send any report)
+        try:
+            await _send_reports_menu(call.message.chat.id, call.from_user.id)
+        except Exception:
+            pass
         await call.answer()
         return
     await call.answer()
@@ -1272,16 +1279,8 @@ async def cb_report_clear_chip(call: CallbackQuery):
         await call.message.answer("Фильтр снят")
     except Exception:
         pass
-    # Reopen menu and send today's report with remaining filters
+    # Reopen menu only (do not auto-send any report)
     await _send_reports_menu(call.message.chat.id, call.from_user.id)
-    try:
-        await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня")
-    except Exception as e:
-        logger.exception(e)
-        try:
-            await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
     try:
         await call.answer()
     except Exception:
@@ -1494,19 +1493,11 @@ async def cb_report_set_filter_quick(call: CallbackQuery):
             await call.message.answer("Фильтр обновлён: " + ", ".join(parts), parse_mode=ParseMode.HTML)
         except Exception:
             pass
-    # Re-open reports menu with visible filters and send today's report immediately
+    # Re-open reports menu with visible filters (do not auto-send any report)
     try:
         await _send_reports_menu(call.message.chat.id, call.from_user.id)
     except Exception:
         pass
-    try:
-        await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня")
-    except Exception as e:
-        logger.exception(e)
-        try:
-            await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
     try:
         await call.answer()
     except Exception:

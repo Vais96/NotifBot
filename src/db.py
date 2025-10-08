@@ -508,13 +508,14 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             await cur.execute(top_offer_sql, params)
             row = await cur.fetchone()
             top_offer = row[0] if row else None
+            top_offer_count = int(row[1] or 0) if row else 0
             await cur.execute(geo_sql, params)
             geo_rows = await cur.fetchall()
             geo_dist = {str(r[0]): int(r[1]) for r in geo_rows if (r[0] is not None and str(r[0]).strip() not in ('', '-'))}
             await cur.execute(creative_sql, params)
             cr_rows = await cur.fetchall()
-            creative_dist = {str(r[0]): int(r[1]) for r in cr_rows if r[0] is not None and str(r[0]).strip() != ''}
-    return {"count": count, "profit": profit, "top_offer": top_offer, "geo_dist": geo_dist, "creative_dist": creative_dist, "total": total}
+        creative_dist = {str(r[0]): int(r[1]) for r in cr_rows if r[0] is not None and str(r[0]).strip() != ''}
+    return {"count": count, "profit": profit, "top_offer": top_offer, "top_offer_count": top_offer_count, "geo_dist": geo_dist, "creative_dist": creative_dist, "total": total}
 
 async def trend_daily_sales(user_ids: List[int], days: int = 7) -> List[Tuple[str, int]]:
     """Return list of (YYYY-MM-DD, count) for last N days (UTC)."""
