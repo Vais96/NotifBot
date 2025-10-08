@@ -15,7 +15,7 @@ if not WEBHOOK_PATH.startswith("/"):
 app = FastAPI(title="Keitaro Telegram Notifier")
 
 # Unified message formatter used by both POST and GET handlers
-def _build_notification_text(data: dict) -> str:
+def _build_notification_text(data: dict, daily_count: int | None = None) -> str:
     # Extract fields
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
@@ -107,6 +107,8 @@ def _build_notification_text(data: dict) -> str:
     if campaign_name:
         lines.append(f"📣 <b>КАМПАНИЯ:</b> <code>{campaign_name}</code>")
     lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
+    if daily_count is not None:
+        lines.append(f"📈 <b>ДЕПОЗИТОВ ЗА ДЕНЬ:</b> <code>{daily_count}</code>")
     if sale_time_fmt:
         lines.append(f"🕒 <b>КОНВЕРСИЯ:</b> <code>{sale_time_fmt}</code> (UTC +0)")
 
@@ -326,8 +328,14 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     payout_fmt = _format_payout(payout)
     sale_time_fmt = _format_sale_time(sale_time)
 
-    # Build text via unified formatter
-    text = _build_notification_text(data)
+    # Build text via unified formatter (with optional daily deposits count)
+    daily_count: int | None = None
+    if is_sale and buyer_id:
+        try:
+            daily_count = await db.count_today_user_sales(int(buyer_id))
+        except Exception as e:
+            logger.warning(f"Failed to get daily count: {e}")
+    text = _build_notification_text(data, daily_count=daily_count)
 
     # Determine recipients
     recipient_ids: set[int] = set()
@@ -513,8 +521,14 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
     payout_fmt = _format_payout(payout)
     sale_time_fmt = _format_sale_time(sale_time)
 
-    # Build text via unified formatter
-    text = _build_notification_text(data)
+    # Build text via unified formatter (with optional daily deposits count)
+    daily_count: int | None = None
+    if is_sale and buyer_id:
+        try:
+            daily_count = await db.count_today_user_sales(int(buyer_id))
+        except Exception as e:
+            logger.warning(f"Failed to get daily count: {e}")
+    text = _build_notification_text(data, daily_count=daily_count)
 
     # Determine recipients
     recipient_ids: set[int] = set()

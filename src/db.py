@@ -287,6 +287,30 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
                 )
             )
 
+async def count_today_user_sales(user_id: int) -> int:
+    """Return number of sale-like events for the user since UTC midnight (inclusive)."""
+    from datetime import datetime, timezone, timedelta
+    pool = await init_pool()
+    now_utc = datetime.now(timezone.utc)
+    start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    sale_like = (
+        "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
+    )
+    placeholders = ",".join(["%s"] * len(sale_like))
+    query = f"""
+        SELECT COUNT(*)
+        FROM tg_events
+        WHERE routed_user_id=%s
+          AND created_at >= %s AND created_at < %s
+          AND LOWER(COALESCE(status, '')) IN ({placeholders})
+    """
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, (user_id, start, end, *sale_like))
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
 async def find_alias(alias: Optional[str]) -> Optional[Dict[str, Any]]:
     if not alias:
         return None
