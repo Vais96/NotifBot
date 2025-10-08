@@ -240,7 +240,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
                     used_fallback = True
             except Exception:
                 pass
-    # Log event with final routed user id only if it's a real buyer (avoid counting admins/leads/mentors and fallback cases)
+    # Log event with final routed user id only if it's a real performer (buyer/lead/mentor); avoid fallback and admin/head
     try:
         routed_id = buyer_id
         if used_fallback and routed_id:
@@ -249,7 +249,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
             try:
                 users = await db.list_users()
                 ru = next((u for u in users if u["telegram_id"] == routed_id), None)
-                if ru and ru.get("role") != "buyer":
+                if ru and (ru.get("role") not in {"buyer", "lead", "mentor"}):
                     routed_id = None
             except Exception:
                 pass
@@ -457,7 +457,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
                     used_fallback = True
             except Exception:
                 pass
-    # Same logic for GET: do not attribute to non-buyer/fallback
+    # Same logic for GET: attribute only for buyer/lead/mentor; avoid fallback/admin/head
     routed_id = buyer_id
     if used_fallback and routed_id:
         routed_id = None
@@ -465,7 +465,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         try:
             users = await db.list_users()
             ru = next((u for u in users if u["telegram_id"] == routed_id), None)
-            if ru and ru.get("role") != "buyer":
+            if ru and (ru.get("role") not in {"buyer", "lead", "mentor"}):
                 routed_id = None
         except Exception:
             pass

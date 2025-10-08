@@ -1046,16 +1046,20 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     my_role = (me or {}).get("role", "buyer")
     if actor_id in ADMIN_IDS:
         my_role = "admin"
+    allowed_roles = {"buyer", "lead", "mentor"}
     if my_role in ("admin", "head"):
-        # Only buyers are included in report scope to avoid counting admins/leads/mentors
-        return [int(u["telegram_id"]) for u in users if u.get("is_active") and u.get("role") == "buyer"]
+        # Include buyers, leads, mentors; exclude admins/heads
+        return [int(u["telegram_id"]) for u in users if u.get("is_active") and (u.get("role") in allowed_roles)]
     if my_role == "lead":
         team_id = me.get("team_id") if me else None
-        return [int(u["telegram_id"]) for u in users if u.get("team_id") == team_id and u.get("is_active") and u.get("role") == "buyer"]
+        return [int(u["telegram_id"]) for u in users if u.get("team_id") == team_id and u.get("is_active") and (u.get("role") in allowed_roles)]
     if my_role == "mentor":
         # aggregate all users from teams the mentor follows
         team_ids = set(await db.list_mentor_teams(actor_id))
-        ids = [int(u["telegram_id"]) for u in users if (u.get("team_id") in team_ids) and u.get("is_active") and u.get("role") == "buyer"]
+        ids = [int(u["telegram_id"]) for u in users if (u.get("team_id") in team_ids) and u.get("is_active") and (u.get("role") in allowed_roles)]
+        # include own id as well (ментор тоже может лить)
+        if actor_id not in ids:
+            ids.append(actor_id)
         return ids
     return [actor_id]
 
@@ -1364,13 +1368,13 @@ async def cb_report_pick_team(call: CallbackQuery):
 async def cb_report_pick_buyer(call: CallbackQuery):
     try:
         await call.message.answer("Открываю список байеров…")
+    except Exception:
+        pass
+    try:
         users = await db.list_users()
-        me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
-        role = (me or {}).get("role", "buyer")
-        if call.from_user.id in ADMIN_IDS:
-            role = "admin"
         scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
-        buyers = [u for u in users if int(u['telegram_id']) in scope_ids and u.get('role') == 'buyer']
+        allowed_roles = {"buyer", "lead", "mentor"}
+        buyers = [u for u in users if int(u['telegram_id']) in scope_ids and (u.get('role') in allowed_roles)]
         # Respect currently selected team filter if present
         cur = await db.get_report_filter(call.from_user.id)
         if cur and cur.get('team_id'):
