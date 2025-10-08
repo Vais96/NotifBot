@@ -601,52 +601,52 @@ async def list_aliases() -> List[Dict[str, Any]]:
             await cur.execute("SELECT alias, buyer_id, lead_id FROM tg_aliases ORDER BY alias ASC")
             return await cur.fetchall()
 
-        async def list_offers_for_users(user_ids: List[int]) -> List[str]:
-            if not user_ids:
-                return []
-            pool = await init_pool()
-            placeholders = ",".join(["%s"] * len(user_ids))
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    query = f"""
-                        SELECT DISTINCT off FROM (
-                            SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')), offer) AS off
-                            FROM tg_events
-                            WHERE routed_user_id IN ({placeholders})
-                        ) t
-                        WHERE off IS NOT NULL AND off <> ''
-                        ORDER BY off ASC
-                    """
-                    await cur.execute(query, (*user_ids,))
-                    rows = await cur.fetchall()
-                    return [str(r[0]) for r in rows if r and r[0]]
+async def list_offers_for_users(user_ids: List[int]) -> List[str]:
+    if not user_ids:
+        return []
+    pool = await init_pool()
+    placeholders = ",".join(["%s"] * len(user_ids))
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            query = f"""
+                SELECT DISTINCT off FROM (
+                    SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')), offer) AS off
+                    FROM tg_events
+                    WHERE routed_user_id IN ({placeholders})
+                ) t
+                WHERE off IS NOT NULL AND off <> ''
+                ORDER BY off ASC
+            """
+            await cur.execute(query, (*user_ids,))
+            rows = await cur.fetchall()
+            return [str(r[0]) for r in rows if r and r[0]]
 
-        async def list_creatives_for_users(user_ids: List[int], offer: Optional[str] = None) -> List[str]:
-            if not user_ids:
-                return []
-            pool = await init_pool()
-            placeholders = ",".join(["%s"] * len(user_ids))
-            offer_sql = ""
-            params: List[Any] = [*user_ids]
-            if offer:
-                offer_sql = " AND (offer = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')) = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer')) = %s)"
-                params += [offer, offer, offer]
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    query = f"""
-                        SELECT DISTINCT COALESCE(
-                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative')), ''),
-                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.banner')), ''),
-                                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')), '')
-                            ) AS cr
-                        FROM tg_events
-                        WHERE routed_user_id IN ({placeholders})
-                        {offer_sql}
-                        ORDER BY cr ASC
-                    """
-                    await cur.execute(query, (*params,))
-                    rows = await cur.fetchall()
-                    return [str(r[0]) for r in rows if r and r[0]]
+async def list_creatives_for_users(user_ids: List[int], offer: Optional[str] = None) -> List[str]:
+    if not user_ids:
+        return []
+    pool = await init_pool()
+    placeholders = ",".join(["%s"] * len(user_ids))
+    offer_sql = ""
+    params: List[Any] = [*user_ids]
+    if offer:
+        offer_sql = " AND (offer = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')) = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer')) = %s)"
+        params += [offer, offer, offer]
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            query = f"""
+                SELECT DISTINCT COALESCE(
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative')), ''),
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.banner')), ''),
+                        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')), '')
+                    ) AS cr
+                FROM tg_events
+                WHERE routed_user_id IN ({placeholders})
+                {offer_sql}
+                ORDER BY cr ASC
+            """
+            await cur.execute(query, (*params,))
+            rows = await cur.fetchall()
+            return [str(r[0]) for r in rows if r and r[0]]
 
 async def delete_alias(alias: str) -> None:
     pool = await init_pool()
