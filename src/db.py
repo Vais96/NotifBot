@@ -426,8 +426,8 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
         total_params += [offer, offer, offer]
     if creative:
         total_params += [creative, creative, creative]
-    # totals
-    totals_sql = f"""
+        # totals
+        totals_sql = f"""
         SELECT COUNT(*), COALESCE(SUM(payout),0)
         FROM tg_events
         WHERE created_at >= %s AND created_at < %s

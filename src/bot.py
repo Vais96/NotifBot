@@ -1020,6 +1020,7 @@ def _reports_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Неделя", callback_data="report:week")],
         [InlineKeyboardButton(text="Фильтр оффера", callback_data="report:f:offer"), InlineKeyboardButton(text="Фильтр крео", callback_data="report:f:creative")],
         [InlineKeyboardButton(text="Фильтр по байеру", callback_data="report:f:buyer"), InlineKeyboardButton(text="Фильтр по команде", callback_data="report:f:team")],
+        [InlineKeyboardButton(text="Выбрать байера", callback_data="report:pick:buyer"), InlineKeyboardButton(text="Выбрать команду", callback_data="report:pick:team")],
         [InlineKeyboardButton(text="Сбросить фильтры", callback_data="report:f:clear")],
     ])
 
@@ -1163,6 +1164,84 @@ async def cb_report_filter(call: CallbackQuery):
     elif key == "team":
         await call.message.answer("Пришлите ID команды, либо '-' чтобы очистить")
     await call.answer()
+
+def _teams_picker_kb(teams: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for t in teams[:50]:
+        rows.append([InlineKeyboardButton(text=f"#{t['id']} {t['name']}", callback_data=f"report:set:team:{t['id']}")])
+    rows.append([InlineKeyboardButton(text="Очистить", callback_data="report:set:team:-")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def _buyers_picker_kb(users: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for u in users[:50]:
+        cap = f"@{u['username'] or u['telegram_id']} ({u['full_name'] or ''})"
+        rows.append([InlineKeyboardButton(text=cap, callback_data=f"report:set:buyer:{u['telegram_id']}")])
+    rows.append([InlineKeyboardButton(text="Очистить", callback_data="report:set:buyer:-")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+@dp.callback_query(F.data == "report:pick:team")
+async def cb_report_pick_team(call: CallbackQuery):
+    users = await db.list_users()
+    me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
+    role = (me or {}).get("role", "buyer")
+    if call.from_user.id in ADMIN_IDS:
+        role = "admin"
+    teams = await db.list_teams()
+    allowed_team_ids: set[int] = set()
+    if role == "admin" or role == "head":
+        allowed_team_ids = {int(t['id']) for t in teams}
+    elif role == "lead":
+        if me and me.get('team_id'):
+            allowed_team_ids = {int(me.get('team_id'))}
+    elif role == "mentor":
+        allowed_team_ids = set(await db.list_mentor_teams(call.from_user.id))
+    else:
+        allowed_team_ids = set()
+    teams_vis = [t for t in teams if int(t['id']) in allowed_team_ids]
+    if not teams_vis:
+        await call.message.answer("Нет доступных команд")
+    else:
+        await call.message.answer("Выберите команду:", reply_markup=_teams_picker_kb(teams_vis))
+    await call.answer()
+
+@dp.callback_query(F.data == "report:pick:buyer")
+async def cb_report_pick_buyer(call: CallbackQuery):
+    users = await db.list_users()
+    me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
+    role = (me or {}).get("role", "buyer")
+    if call.from_user.id in ADMIN_IDS:
+        role = "admin"
+    scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
+    buyers = [u for u in users if int(u['telegram_id']) in scope_ids]
+    # Respect currently selected team filter if present
+    cur = await db.get_report_filter(call.from_user.id)
+    if cur and cur.get('team_id'):
+        try:
+            team_id_filter = int(cur['team_id'])
+            buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
+        except Exception:
+            pass
+    if not buyers:
+        await call.message.answer("Нет доступных байеров")
+    else:
+        await call.message.answer("Выберите байера:", reply_markup=_buyers_picker_kb(buyers))
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("report:set:"))
+async def cb_report_set_filter_quick(call: CallbackQuery):
+    _, _, which, value = call.data.split(":", 3)
+    cur = await db.get_report_filter(call.from_user.id)
+    offer = cur.get('offer')
+    creative = cur.get('creative')
+    buyer_id = cur.get('buyer_id')
+    team_id = cur.get('team_id')
+    if which == 'team':
+        team_id = None if value == '-' else int(value)
+    elif which == 'buyer':
+        buyer_id = None if value == '-' else int(value)
+    await db.set_report_filter(call.from_user.id, offer, creative, buyer_id=buyer_id, team_id=team_id)
+    await call.answer("Фильтр обновлён")
 
 # ===== KPI =====
 def _kpi_menu() -> InlineKeyboardMarkup:
