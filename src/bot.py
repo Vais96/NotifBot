@@ -1046,7 +1046,7 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     my_role = (me or {}).get("role", "buyer")
     if actor_id in ADMIN_IDS:
         my_role = "admin"
-    allowed_roles = {"buyer", "lead", "mentor"}
+    allowed_roles = {"buyer", "lead", "mentor", "head"}
     if my_role in ("admin", "head"):
         # Include buyers, leads, mentors; exclude admins/heads
         return [int(u["telegram_id"]) for u in users if u.get("is_active") and (u.get("role") in allowed_roles)]
@@ -1373,7 +1373,7 @@ async def cb_report_pick_buyer(call: CallbackQuery):
     try:
         users = await db.list_users()
         scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
-        allowed_roles = {"buyer", "lead", "mentor"}
+        allowed_roles = {"buyer", "lead", "mentor", "head"}
         buyers = [u for u in users if int(u['telegram_id']) in scope_ids and (u.get('role') in allowed_roles)]
         # Respect currently selected team filter if present
         cur = await db.get_report_filter(call.from_user.id)

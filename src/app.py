@@ -249,7 +249,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
             try:
                 users = await db.list_users()
                 ru = next((u for u in users if u["telegram_id"] == routed_id), None)
-                if ru and (ru.get("role") not in {"buyer", "lead", "mentor"}):
+                if ru and (ru.get("role") not in {"buyer", "lead", "mentor", "head"}):
                     routed_id = None
             except Exception:
                 pass
@@ -465,7 +465,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         try:
             users = await db.list_users()
             ru = next((u for u in users if u["telegram_id"] == routed_id), None)
-            if ru and (ru.get("role") not in {"buyer", "lead", "mentor"}):
+            if ru and (ru.get("role") not in {"buyer", "lead", "mentor", "head"}):
                 routed_id = None
         except Exception:
             pass
