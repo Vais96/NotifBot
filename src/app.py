@@ -15,7 +15,7 @@ if not WEBHOOK_PATH.startswith("/"):
 app = FastAPI(title="Keitaro Telegram Notifier")
 
 # Unified message formatter used by both POST and GET handlers
-def _build_notification_text(data: dict, daily_count: int | None = None) -> str:
+def _build_notification_text(data: dict, daily_count: int | None = None, kpi_daily_goal: int | None = None) -> str:
     # Extract fields
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
@@ -109,6 +109,9 @@ def _build_notification_text(data: dict, daily_count: int | None = None) -> str:
     lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
     if daily_count is not None:
         lines.append(f"📈 <b>ДЕПОЗИТОВ ЗА ДЕНЬ:</b> <code>{daily_count}</code>")
+    # KPI progress if available
+    if (daily_count is not None) and (kpi_daily_goal is not None):
+        lines.append(f"🎯 <b>Сегодня:</b> <code>{daily_count}/{kpi_daily_goal}</code> депозитов к цели")
     if sale_time_fmt:
         lines.append(f"🕒 <b>КОНВЕРСИЯ:</b> <code>{sale_time_fmt}</code> (UTC +0)")
 
@@ -143,6 +146,9 @@ async def on_startup():
             BotCommand(command="listusers", description="Список пользователей"),
             BotCommand(command="manage", description="Управление (admin)"),
             BotCommand(command="aliases", description="Алиасы (admin)"),
+            BotCommand(command="today", description="Отчет за сегодня"),
+            BotCommand(command="yesterday", description="Отчет за вчера"),
+            BotCommand(command="week", description="Отчет за 7 дней"),
         ])
     except Exception as e:
         logger.warning(f"Failed to set bot commands: {e}")
@@ -330,12 +336,18 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
 
     # Build text via unified formatter (with optional daily deposits count)
     daily_count: int | None = None
+    kpi_daily_goal: int | None = None
     if is_sale and buyer_id:
         try:
             daily_count = await db.count_today_user_sales(int(buyer_id))
         except Exception as e:
             logger.warning(f"Failed to get daily count: {e}")
-    text = _build_notification_text(data, daily_count=daily_count)
+        try:
+            kpi = await db.get_kpi(int(buyer_id))
+            kpi_daily_goal = kpi.get("daily_goal")
+        except Exception as e:
+            logger.warning(f"Failed to get KPI: {e}")
+    text = _build_notification_text(data, daily_count=daily_count, kpi_daily_goal=kpi_daily_goal)
 
     # Determine recipients
     recipient_ids: set[int] = set()
@@ -523,12 +535,18 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
 
     # Build text via unified formatter (with optional daily deposits count)
     daily_count: int | None = None
+    kpi_daily_goal: int | None = None
     if is_sale and buyer_id:
         try:
             daily_count = await db.count_today_user_sales(int(buyer_id))
         except Exception as e:
             logger.warning(f"Failed to get daily count: {e}")
-    text = _build_notification_text(data, daily_count=daily_count)
+        try:
+            kpi = await db.get_kpi(int(buyer_id))
+            kpi_daily_goal = kpi.get("daily_goal")
+        except Exception as e:
+            logger.warning(f"Failed to get KPI: {e}")
+    text = _build_notification_text(data, daily_count=daily_count, kpi_daily_goal=kpi_daily_goal)
 
     # Determine recipients
     recipient_ids: set[int] = set()

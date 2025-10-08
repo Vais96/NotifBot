@@ -34,6 +34,7 @@ async def _resolve_user_id(identifier: str) -> int:
 def main_menu(is_admin: bool, role: str | None = None) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
+        [InlineKeyboardButton(text="Отчеты", callback_data="menu:reports"), InlineKeyboardButton(text="KPI", callback_data="menu:kpi")],
     ]
     if is_admin:
         buttons += [
@@ -351,6 +352,12 @@ async def on_menu_click(call: CallbackQuery):
         return await call.answer()
     if key == "myteam":
         await _send_myteam(call.message.chat.id, call.from_user.id)
+        return await call.answer()
+    if key == "reports":
+        await _send_reports_menu(call.message.chat.id, call.from_user.id)
+        return await call.answer()
+    if key == "kpi":
+        await _send_kpi_menu(call.message.chat.id, call.from_user.id)
         return await call.answer()
 
 @dp.message(CommandStart())
@@ -798,6 +805,41 @@ async def on_text_fallback(message: Message):
             await db.set_user_team(uid, team_id)
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("Пользователь добавлен в вашу команду")
+        if action.startswith("kpi:set:"):
+            which = action.split(":", 2)[2]
+            v = message.text.strip()
+            goal_val = None
+            if v != '-':
+                try:
+                    goal_val = int(v)
+                    if goal_val < 0:
+                        goal_val = 0
+                except Exception:
+                    await db.clear_pending_action(message.from_user.id)
+                    return await message.answer("Нужно целое число или '-' для очистки")
+            current = await db.get_kpi(message.from_user.id)
+            daily = current.get('daily_goal')
+            weekly = current.get('weekly_goal')
+            if which == 'daily':
+                daily = goal_val
+            else:
+                weekly = goal_val
+            await db.set_kpi(message.from_user.id, daily_goal=daily, weekly_goal=weekly)
+            await db.clear_pending_action(message.from_user.id)
+            return await message.answer("KPI обновлен")
+        if action.startswith("report:filter:"):
+            which = action.split(":", 2)[2]
+            val = message.text.strip()
+            cur = await db.get_report_filter(message.from_user.id)
+            offer = cur.get('offer')
+            creative = cur.get('creative')
+            if which == 'offer':
+                offer = None if val == '-' else val
+            elif which == 'creative':
+                creative = None if val == '-' else val
+            await db.set_report_filter(message.from_user.id, offer, creative)
+            await db.clear_pending_action(message.from_user.id)
+            return await message.answer("Фильтр сохранен")
     except Exception as e:
         logger.exception(e)
         return await message.answer("Ошибка обработки ввода")
@@ -949,6 +991,144 @@ async def notify_buyer(buyer_id: int, text: str):
         await bot.send_message(chat_id=buyer_id, text=text)
     except Exception as e:
         logger.warning(f"Failed to notify buyer {buyer_id}: {e}")
+
+# ===== Reports =====
+def _reports_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Сегодня", callback_data="report:today"), InlineKeyboardButton(text="Вчера", callback_data="report:yesterday")],
+        [InlineKeyboardButton(text="Неделя", callback_data="report:week")],
+        [InlineKeyboardButton(text="Фильтр оффера", callback_data="report:f:offer"), InlineKeyboardButton(text="Фильтр крео", callback_data="report:f:creative")],
+        [InlineKeyboardButton(text="Сбросить фильтры", callback_data="report:f:clear")],
+    ])
+
+async def _send_reports_menu(chat_id: int, actor_id: int):
+    await bot.send_message(chat_id, "Отчеты — выберите период:", reply_markup=_reports_menu())
+
+async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
+    users = await db.list_users()
+    me = next((u for u in users if u["telegram_id"] == actor_id), None)
+    my_role = (me or {}).get("role", "buyer")
+    if actor_id in ADMIN_IDS:
+        my_role = "admin"
+    if my_role in ("admin", "head"):
+        return [int(u["telegram_id"]) for u in users if u.get("is_active")]
+    if my_role == "lead":
+        team_id = me.get("team_id") if me else None
+        return [int(u["telegram_id"]) for u in users if u.get("team_id") == team_id and u.get("is_active")]
+    return [actor_id]
+
+def _report_text(title: str, agg: dict) -> str:
+    lines = [f"📊 <b>{title}</b>"]
+    lines.append(f"📈 Депозитов: <b>{agg.get('count',0)}</b>")
+    profit = agg.get('profit', 0.0)
+    lines.append(f"💰 Профит: <b>{int(round(profit))}</b>")
+    total = agg.get('total', 0)
+    if total:
+        cr = (agg.get('count',0) / total) * 100.0
+        lines.append(f"🎯 CR: <b>{cr:.1f}%</b> (из {total})")
+    if agg.get('top_offer'):
+        lines.append(f"🏆 Топ-оффер: <code>{agg['top_offer']}</code>")
+    if agg.get('geo_dist'):
+        geos = ", ".join(f"{k}:{v}" for k, v in list(agg['geo_dist'].items())[:5])
+        lines.append(f"🌍 Гео: {geos}")
+    if agg.get('source_dist'):
+        srcs = ", ".join(f"{k}:{v}" for k, v in list(agg['source_dist'].items())[:5])
+        lines.append(f"🚦 Источники: {srcs}")
+    return "\n".join(lines)
+
+async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int | None = None, yesterday: bool = False):
+    from datetime import datetime, timezone, timedelta
+    user_ids = await _resolve_scope_user_ids(actor_id)
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    if yesterday:
+        end = start
+        start = end - timedelta(days=1)
+    if days is not None:
+        start = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days-1))
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    filt = await db.get_report_filter(actor_id)
+    agg = await db.aggregate_sales(user_ids, start, end, offer=filt.get('offer'), creative=filt.get('creative'))
+    text = _report_text(title, agg)
+    if days == 7 and not yesterday:
+        trend = await db.trend_daily_sales(user_ids, days=7)
+        if trend:
+            tline = ", ".join(f"{d.split('-')[-1]}:{c}" for d, c in trend)
+            text += f"\n📅 Тренд (7д): {tline}"
+    if filt.get('offer') or filt.get('creative'):
+        fparts = []
+        if filt.get('offer'):
+            fparts.append(f"offer=<code>{filt['offer']}</code>")
+        if filt.get('creative'):
+            fparts.append(f"creative=<code>{filt['creative']}</code>")
+        text += "\n🔎 Фильтры: " + ", ".join(fparts)
+    await bot.send_message(chat_id, text, reply_markup=_reports_menu())
+
+@dp.callback_query(F.data == "report:today")
+async def cb_report_today(call: CallbackQuery):
+    await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня", None, False)
+    await call.answer()
+
+@dp.callback_query(F.data == "report:yesterday")
+async def cb_report_yesterday(call: CallbackQuery):
+    await _send_period_report(call.message.chat.id, call.from_user.id, "Вчера", None, True)
+    await call.answer()
+
+@dp.callback_query(F.data == "report:week")
+async def cb_report_week(call: CallbackQuery):
+    await _send_period_report(call.message.chat.id, call.from_user.id, "Последние 7 дней", 7, False)
+    await call.answer()
+
+@dp.message(Command("today"))
+async def on_today(message: Message):
+    await _send_period_report(message.chat.id, message.from_user.id, "Сегодня")
+
+@dp.message(Command("yesterday"))
+async def on_yesterday(message: Message):
+    await _send_period_report(message.chat.id, message.from_user.id, "Вчера", None, True)
+
+@dp.message(Command("week"))
+async def on_week(message: Message):
+    await _send_period_report(message.chat.id, message.from_user.id, "Последние 7 дней", 7)
+
+@dp.callback_query(F.data.startswith("report:f:"))
+async def cb_report_filter(call: CallbackQuery):
+    _, _, key = call.data.split(":", 2)
+    if key == "clear":
+        await db.clear_report_filter(call.from_user.id)
+        await call.message.answer("Фильтры сброшены")
+        await call.answer()
+        return
+    await db.set_pending_action(call.from_user.id, f"report:filter:{key}", None)
+    await call.message.answer("Пришлите значение фильтра (точное совпадение), либо '-' чтобы очистить только этот фильтр")
+    await call.answer()
+
+# ===== KPI =====
+def _kpi_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Мои KPI", callback_data="kpi:mine")],
+        [InlineKeyboardButton(text="Изменить дневной", callback_data="kpi:set:daily"), InlineKeyboardButton(text="Изменить недельный", callback_data="kpi:set:weekly")],
+    ])
+
+async def _send_kpi_menu(chat_id: int, actor_id: int):
+    kpi = await db.get_kpi(actor_id)
+    lines = ["KPI:"]
+    lines.append(f"Дневной: <b>{kpi.get('daily_goal') or '-'}</b>")
+    lines.append(f"Недельный: <b>{kpi.get('weekly_goal') or '-'}</b>")
+    await bot.send_message(chat_id, "\n".join(lines), reply_markup=_kpi_menu())
+
+@dp.callback_query(F.data == "kpi:mine")
+async def cb_kpi_mine(call: CallbackQuery):
+    await _send_kpi_menu(call.message.chat.id, call.from_user.id)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("kpi:set:"))
+async def cb_kpi_set(call: CallbackQuery):
+    _, _, which = call.data.split(":", 2)
+    await db.set_pending_action(call.from_user.id, f"kpi:set:{which}", None)
+    await call.message.answer("Пришлите целевое число депозитов (целое), либо '-' чтобы очистить")
+    await call.answer()
 
 # --- Mentor management (admin) ---
 @dp.message(Command("addmentor"))

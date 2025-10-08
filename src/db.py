@@ -110,6 +110,26 @@ SCHEMA_SQL = [
         CONSTRAINT fk_tg_mentor_team FOREIGN KEY (team_id) REFERENCES tg_teams (id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # KPI goals per user (daily/weekly deposits target)
+    """
+    CREATE TABLE IF NOT EXISTS tg_kpi (
+        user_id BIGINT PRIMARY KEY,
+        daily_goal INT NULL,
+        weekly_goal INT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_tg_kpi_user FOREIGN KEY (user_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Report filters per user
+    """
+    CREATE TABLE IF NOT EXISTS tg_report_filters (
+        user_id BIGINT PRIMARY KEY,
+        offer VARCHAR(255) NULL,
+        creative VARCHAR(255) NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_tg_filters_user FOREIGN KEY (user_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 async def init_pool() -> aiomysql.Pool:
@@ -310,6 +330,217 @@ async def count_today_user_sales(user_id: int) -> int:
             await cur.execute(query, (user_id, start, end, *sale_like))
             row = await cur.fetchone()
             return int(row[0]) if row else 0
+
+async def sum_today_user_profit(user_id: int) -> float:
+    """Sum payout for sale-like events for the user since UTC midnight (inclusive)."""
+    from datetime import datetime, timezone, timedelta
+    pool = await init_pool()
+    now_utc = datetime.now(timezone.utc)
+    start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    sale_like = (
+        "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
+    )
+    placeholders = ",".join(["%s"] * len(sale_like))
+    query = f"""
+        SELECT COALESCE(SUM(payout), 0)
+        FROM tg_events
+        WHERE routed_user_id=%s
+          AND created_at >= %s AND created_at < %s
+          AND LOWER(COALESCE(status, '')) IN ({placeholders})
+    """
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, (user_id, start, end, *sale_like))
+            row = await cur.fetchone()
+            return float(row[0] or 0)
+
+async def get_kpi(user_id: int) -> Dict[str, Any]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT user_id, daily_goal, weekly_goal FROM tg_kpi WHERE user_id=%s", (user_id,))
+            row = await cur.fetchone()
+            return row or {"user_id": user_id, "daily_goal": None, "weekly_goal": None}
+
+async def set_kpi(user_id: int, daily_goal: Optional[int] = None, weekly_goal: Optional[int] = None) -> None:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            # Upsert
+            await cur.execute(
+                """
+                INSERT INTO tg_kpi(user_id, daily_goal, weekly_goal)
+                VALUES(%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    daily_goal=VALUES(daily_goal),
+                    weekly_goal=VALUES(weekly_goal)
+                """,
+                (user_id, daily_goal, weekly_goal)
+            )
+
+async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] = None, creative: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Return dict with keys: count, profit, unique_clicks (if available), top_offer, geo_dist, source_dist.
+    Filters: offer (by raw->'offer' or stored offer), creative (by raw JSON keys: creative/name/banner), time window [start, end).
+    """
+    if not user_ids:
+        return {"count": 0, "profit": 0.0, "top_offer": None, "geo_dist": {}, "source_dist": {}, "total": 0}
+    pool = await init_pool()
+    sale_like = (
+        "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
+    )
+    placeholders_status = ",".join(["%s"] * len(sale_like))
+    placeholders_users = ",".join(["%s"] * len(user_ids))
+    offer_filter_sql = ""
+    creative_filter_sql = ""
+    params: list[Any] = [start, end, *sale_like, *user_ids]
+    if offer:
+        offer_filter_sql = " AND (offer = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')) = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer')) = %s)"
+        params += [offer, offer, offer]
+    if creative:
+        # try common fields
+        creative_filter_sql = (
+            " AND (JSON_UNQUOTE(JSON_EXTRACT(raw, '$.creative')) = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.banner')) = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.ad_name')) = %s)"
+        )
+        params += [creative, creative, creative]
+    # total events (any status)
+    total_sql = f"""
+        SELECT COUNT(*)
+        FROM tg_events
+        WHERE created_at >= %s AND created_at < %s
+          AND routed_user_id IN ({placeholders_users})
+          {offer_filter_sql}
+          {creative_filter_sql}
+    """
+    total_params: list[Any] = [start, end, *user_ids]
+    if offer:
+        total_params += [offer, offer, offer]
+    if creative:
+        total_params += [creative, creative, creative]
+    # totals
+    totals_sql = f"""
+        SELECT COUNT(*), COALESCE(SUM(payout),0)
+        FROM tg_events
+        WHERE created_at >= %s AND created_at < %s
+          AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+          AND routed_user_id IN ({placeholders_users})
+          {offer_filter_sql}
+          {creative_filter_sql}
+    """
+    # top offer
+    top_offer_sql = f"""
+        SELECT offer, COUNT(*) AS cnt
+        FROM tg_events
+        WHERE created_at >= %s AND created_at < %s
+          AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+          AND routed_user_id IN ({placeholders_users})
+          {offer_filter_sql}
+          {creative_filter_sql}
+        GROUP BY offer
+        ORDER BY cnt DESC
+        LIMIT 1
+    """
+    # geo distribution
+    geo_sql = f"""
+        SELECT COALESCE(country,'-') AS k, COUNT(*)
+        FROM tg_events
+        WHERE created_at >= %s AND created_at < %s
+          AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+          AND routed_user_id IN ({placeholders_users})
+          {offer_filter_sql}
+          {creative_filter_sql}
+        GROUP BY k
+        ORDER BY COUNT(*) DESC
+        LIMIT 10
+    """
+    # source distribution
+    source_sql = f"""
+        SELECT COALESCE(source,'-') AS k, COUNT(*)
+        FROM tg_events
+        WHERE created_at >= %s AND created_at < %s
+          AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+          AND routed_user_id IN ({placeholders_users})
+          {offer_filter_sql}
+          {creative_filter_sql}
+        GROUP BY k
+        ORDER BY COUNT(*) DESC
+        LIMIT 10
+    """
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            # total first
+            await cur.execute(total_sql, total_params)
+            row = await cur.fetchone()
+            total = int(row[0] or 0)
+            await cur.execute(totals_sql, params)
+            row = await cur.fetchone()
+            count = int(row[0] or 0)
+            profit = float(row[1] or 0)
+            await cur.execute(top_offer_sql, params)
+            row = await cur.fetchone()
+            top_offer = row[0] if row else None
+            await cur.execute(geo_sql, params)
+            geo_rows = await cur.fetchall()
+            geo_dist = {str(r[0]): int(r[1]) for r in geo_rows}
+            await cur.execute(source_sql, params)
+            src_rows = await cur.fetchall()
+            source_dist = {str(r[0]): int(r[1]) for r in src_rows}
+    return {"count": count, "profit": profit, "top_offer": top_offer, "geo_dist": geo_dist, "source_dist": source_dist, "total": total}
+
+async def trend_daily_sales(user_ids: List[int], days: int = 7) -> List[Tuple[str, int]]:
+    """Return list of (YYYY-MM-DD, count) for last N days (UTC)."""
+    from datetime import datetime, timezone, timedelta
+    pool = await init_pool()
+    sale_like = (
+        "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
+    )
+    placeholders_status = ",".join(["%s"] * len(sale_like))
+    placeholders_users = ",".join(["%s"] * len(user_ids)) if user_ids else "NULL"
+    now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = now - timedelta(days=days-1)
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            query = f"""
+                SELECT DATE(CONVERT_TZ(created_at, '+00:00', '+00:00')) AS d, COUNT(*)
+                FROM tg_events
+                WHERE created_at >= %s AND created_at < %s + INTERVAL 1 DAY
+                  AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                  AND routed_user_id IN ({placeholders_users})
+                GROUP BY d
+                ORDER BY d ASC
+            """
+            params = [start, now, *sale_like, *user_ids] if user_ids else [start, now, *sale_like]
+            await cur.execute(query, params)
+            rows = await cur.fetchall()
+            return [(str(r[0]), int(r[1])) for r in rows]
+
+async def get_report_filter(user_id: int) -> Dict[str, Any]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT offer, creative FROM tg_report_filters WHERE user_id=%s", (user_id,))
+            row = await cur.fetchone()
+            return row or {"offer": None, "creative": None}
+
+async def set_report_filter(user_id: int, offer: Optional[str], creative: Optional[str]) -> None:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO tg_report_filters(user_id, offer, creative)
+                VALUES(%s, %s, %s)
+                ON DUPLICATE KEY UPDATE offer=VALUES(offer), creative=VALUES(creative)
+                """,
+                (user_id, offer, creative)
+            )
+
+async def clear_report_filter(user_id: int) -> None:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM tg_report_filters WHERE user_id=%s", (user_id,))
 
 async def find_alias(alias: Optional[str]) -> Optional[Dict[str, Any]]:
     if not alias:
