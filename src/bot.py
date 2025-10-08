@@ -1122,18 +1122,54 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
 
 @dp.callback_query(F.data == "report:today")
 async def cb_report_today(call: CallbackQuery):
-    await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня", None, False)
-    await call.answer()
+    try:
+        await call.message.answer("Готовлю отчёт…")
+    except Exception:
+        pass
+    try:
+        await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня", None, False)
+    except Exception as e:
+        logger.exception(e)
+        await call.message.answer("Не удалось построить отчёт")
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
 
 @dp.callback_query(F.data == "report:yesterday")
 async def cb_report_yesterday(call: CallbackQuery):
-    await _send_period_report(call.message.chat.id, call.from_user.id, "Вчера", None, True)
-    await call.answer()
+    try:
+        await call.message.answer("Готовлю отчёт…")
+    except Exception:
+        pass
+    try:
+        await _send_period_report(call.message.chat.id, call.from_user.id, "Вчера", None, True)
+    except Exception as e:
+        logger.exception(e)
+        await call.message.answer("Не удалось построить отчёт")
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
 
 @dp.callback_query(F.data == "report:week")
 async def cb_report_week(call: CallbackQuery):
-    await _send_period_report(call.message.chat.id, call.from_user.id, "Последние 7 дней", 7, False)
-    await call.answer()
+    try:
+        await call.message.answer("Готовлю отчёт…")
+    except Exception:
+        pass
+    try:
+        await _send_period_report(call.message.chat.id, call.from_user.id, "Последние 7 дней", 7, False)
+    except Exception as e:
+        logger.exception(e)
+        await call.message.answer("Не удалось построить отчёт")
+    finally:
+        try:
+            await call.answer()
+        except Exception:
+            pass
 
 @dp.message(Command("today"))
 async def on_today(message: Message):
@@ -1190,6 +1226,10 @@ def _creatives_picker_kb(creatives: list[str]) -> InlineKeyboardMarkup:
 
 @dp.callback_query(F.data == "report:pick:team")
 async def cb_report_pick_team(call: CallbackQuery):
+    try:
+        await call.message.answer("Открываю список команд…")
+    except Exception:
+        pass
     users = await db.list_users()
     me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
     role = (me or {}).get("role", "buyer")
@@ -1211,10 +1251,17 @@ async def cb_report_pick_team(call: CallbackQuery):
         await call.message.answer("Нет доступных команд")
     else:
         await call.message.answer("Выберите команду:", reply_markup=_teams_picker_kb(teams_vis))
-    await call.answer()
+    try:
+        await call.answer()
+    except Exception:
+        pass
 
 @dp.callback_query(F.data == "report:pick:buyer")
 async def cb_report_pick_buyer(call: CallbackQuery):
+    try:
+        await call.message.answer("Открываю список байеров…")
+    except Exception:
+        pass
     users = await db.list_users()
     me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
     role = (me or {}).get("role", "buyer")
@@ -1234,10 +1281,17 @@ async def cb_report_pick_buyer(call: CallbackQuery):
         await call.message.answer("Нет доступных байеров")
     else:
         await call.message.answer("Выберите байера:", reply_markup=_buyers_picker_kb(buyers))
-    await call.answer()
+    try:
+        await call.answer()
+    except Exception:
+        pass
 
 @dp.callback_query(F.data == "report:pick:offer")
 async def cb_report_pick_offer(call: CallbackQuery):
+    try:
+        await call.message.answer("Открываю офферы…")
+    except Exception:
+        pass
     users = await db.list_users()
     # scope by role
     scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
@@ -1262,10 +1316,17 @@ async def cb_report_pick_offer(call: CallbackQuery):
         await call.message.answer("Нет доступных офферов")
     else:
         await call.message.answer("Выберите оффер:", reply_markup=_offers_picker_kb(offers))
-    await call.answer()
+    try:
+        await call.answer()
+    except Exception:
+        pass
 
 @dp.callback_query(F.data == "report:pick:creative")
 async def cb_report_pick_creative(call: CallbackQuery):
+    try:
+        await call.message.answer("Открываю креативы…")
+    except Exception:
+        pass
     users = await db.list_users()
     scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
     cur = await db.get_report_filter(call.from_user.id)
@@ -1289,7 +1350,10 @@ async def cb_report_pick_creative(call: CallbackQuery):
         await call.message.answer("Нет доступных креативов")
     else:
         await call.message.answer("Выберите крео:", reply_markup=_creatives_picker_kb(creatives))
-    await call.answer()
+    try:
+        await call.answer()
+    except Exception:
+        pass
 
 @dp.callback_query(F.data.startswith("report:set:"))
 async def cb_report_set_filter_quick(call: CallbackQuery):
