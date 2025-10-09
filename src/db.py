@@ -330,7 +330,12 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
                 """,
                 (
                     payload["status"], payload["offer"], payload["country"], payload["source"],
-                    float(payload["payout"]) if (payload["payout"] not in (None, "")) else None,
+                    (
+                        (lambda v: (lambda s: (float(s) if s not in (None, "") else None))(
+                            (str(v).replace(",", ".").strip()) if not (isinstance(v, str) and v.strip().startswith("{") and v.strip().endswith("}")) else None
+                        ))(payload["payout"]) if (payload["payout"] not in (None, "")) else None
+                    )
+                    if True else None,
                     payload["currency"], payload["clickid"], json.dumps(raw, ensure_ascii=False), routed_user_id
                 )
             )
