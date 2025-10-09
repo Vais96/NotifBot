@@ -244,9 +244,9 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
         if supplied_token != settings.postback_token:
             raise HTTPException(403, "Forbidden")
 
-    # If no meaningful fields are present, respond with 404 (as requested)
+    # If no meaningful fields are present, return 200 with a simple ACK body
     if not _has_meaningful_postback_fields(data):
-        raise HTTPException(404, "Empty postback payload")
+        return JSONResponse({"success": 200})
 
     # Try alias-based routing by campaign_name prefix
     campaign_name = data.get("campaign_name") or data.get("campaign")
@@ -471,9 +471,9 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
             if supplied_token != settings.postback_token:
                 raise HTTPException(403, "Forbidden")
 
-        # If no meaningful fields are present, respond with 404
+        # If no meaningful fields are present, return 200 with a simple ACK body
         if not _has_meaningful_postback_fields(data):
-            raise HTTPException(404, "Empty postback payload")
+            return JSONResponse({"success": 200})
 
         campaign_name = data.get("campaign_name") or data.get("campaign")
         alias_key = None
