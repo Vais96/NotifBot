@@ -205,7 +205,10 @@ async def upsert_user(telegram_id: int, username: Optional[str], full_name: Opti
                 """
                 INSERT INTO tg_users(telegram_id, username, full_name)
                 VALUES(%s, %s, %s)
-                ON DUPLICATE KEY UPDATE username=VALUES(username), full_name=VALUES(full_name), is_active=1
+                ON DUPLICATE KEY UPDATE
+                    username = COALESCE(NULLIF(VALUES(username), ''), username),
+                    full_name = COALESCE(NULLIF(VALUES(full_name), ''), full_name),
+                    is_active = 1
                 """,
                 (telegram_id, username, full_name)
             )
