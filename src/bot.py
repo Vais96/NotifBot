@@ -291,11 +291,34 @@ async def cb_team_add_member(call: CallbackQuery):
         return await call.answer("Нет прав", show_alert=True)
     # callback format: team:add:<team_id>:<user_id>
     _, _, team_id, uid = call.data.split(":", 3)
-    # ensure user exists in DB (stub if needed)
+    # Ensure user exists and enrich with Telegram username/full_name if possible; preserve existing values
     try:
-        await db.upsert_user(int(uid), None, None)
+        existing = await db.get_user(int(uid))
+        tg_username = None
+        tg_fullname = None
+        try:
+            chat = await bot.get_chat(int(uid))
+            tg_username = chat.username
+            # Build full name from first/last if full_name not available
+            try:
+                fn = getattr(chat, "first_name", None) or ""
+                ln = getattr(chat, "last_name", None) or ""
+                name = (fn + (" " + ln if ln else "")).strip()
+                tg_fullname = name or None
+            except Exception:
+                tg_fullname = None
+        except Exception:
+            # fetching chat can fail for privacy/blocked; ignore
+            pass
+        final_username = tg_username or (existing.get("username") if existing else None)
+        final_fullname = tg_fullname or (existing.get("full_name") if existing else None)
+        await db.upsert_user(int(uid), final_username, final_fullname)
     except Exception:
-        pass
+        # As a fallback, at least ensure a stub row exists without overwriting name fields
+        try:
+            await db.upsert_user(int(uid), None, None)
+        except Exception:
+            pass
     await db.set_user_team(int(uid), int(team_id))
     await call.answer("Добавлен")
 
