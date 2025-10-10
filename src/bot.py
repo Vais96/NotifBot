@@ -279,11 +279,42 @@ async def cb_team_members_manage(call: CallbackQuery):
     # controls
     add_buttons = [[InlineKeyboardButton(text=f"Добавить @{u['username'] or u['telegram_id']}", callback_data=f"team:add:{team_id}:{u['telegram_id']}")] for u in non_members[:25]]
     remove_buttons = [[InlineKeyboardButton(text=f"Убрать @{u['username'] or u['telegram_id']}", callback_data=f"team:remove:{team_id}:{u['telegram_id']}")] for u in members[:25]]
+    action_buttons = [[InlineKeyboardButton(text="Обновить имена", callback_data=f"team:refresh_names:{team_id}")]]
     if add_buttons:
         await call.message.answer("Добавить в команду:", reply_markup=InlineKeyboardMarkup(inline_keyboard=add_buttons))
     if remove_buttons:
         await call.message.answer("Убрать из команды:", reply_markup=InlineKeyboardMarkup(inline_keyboard=remove_buttons))
+    # refresh button
+    await call.message.answer("Действия:", reply_markup=InlineKeyboardMarkup(inline_keyboard=action_buttons))
     await call.answer()
+
+@dp.callback_query(F.data.startswith("team:refresh_names:"))
+async def cb_team_refresh_names(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    team_id = int(call.data.split(":", 2)[2])
+    users = await db.list_users()
+    members = [u for u in users if u.get("team_id") == team_id]
+    updated = 0
+    for u in members:
+        uid = int(u["telegram_id"])  # type: ignore
+        try:
+            chat = await bot.get_chat(uid)
+            uname = chat.username or u.get("username")
+            try:
+                fn = getattr(chat, "first_name", None) or ""
+                ln = getattr(chat, "last_name", None) or ""
+                name = (fn + (" " + ln if ln else "")).strip()
+                fullname = name or u.get("full_name")
+            except Exception:
+                fullname = u.get("full_name")
+            await db.upsert_user(uid, uname, fullname)
+            updated += 1
+        except Exception:
+            # ignore fetch errors
+            pass
+    await call.answer("Готово")
+    await call.message.answer(f"Обновлено профилей: {updated}")
 
 @dp.callback_query(F.data.startswith("team:add:"))
 async def cb_team_add_member(call: CallbackQuery):
