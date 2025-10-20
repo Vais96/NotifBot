@@ -359,7 +359,7 @@ async def count_today_user_sales(user_id: int) -> int:
         FROM tg_events
         WHERE routed_user_id=%s
           AND created_at >= %s AND created_at < %s
-          AND LOWER(COALESCE(status, '')) IN ({placeholders})
+          AND LOWER(TRIM(COALESCE(status, ''))) IN ({placeholders})
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
@@ -383,7 +383,7 @@ async def sum_today_user_profit(user_id: int) -> float:
         FROM tg_events
         WHERE routed_user_id=%s
           AND created_at >= %s AND created_at < %s
-          AND LOWER(COALESCE(status, '')) IN ({placeholders})
+          AND LOWER(TRIM(COALESCE(status, ''))) IN ({placeholders})
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
@@ -466,7 +466,7 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
         SELECT COUNT(*), COALESCE(SUM(payout),0)
         FROM tg_events
         WHERE created_at >= %s AND created_at < %s
-          AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+          AND LOWER(TRIM(COALESCE(status,''))) IN ({placeholders_status})
           AND routed_user_id IN ({placeholders_users})
           {offer_filter_sql}
           {creative_filter_sql}
@@ -476,7 +476,7 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')), offer) AS offer_name, COUNT(*) AS cnt
             FROM tg_events
             WHERE created_at >= %s AND created_at < %s
-                AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                AND LOWER(TRIM(COALESCE(status,''))) IN ({placeholders_status})
                 AND routed_user_id IN ({placeholders_users})
                 {offer_filter_sql}
                 {creative_filter_sql}
@@ -489,7 +489,7 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             SELECT country AS k, COUNT(*)
             FROM tg_events
             WHERE created_at >= %s AND created_at < %s
-                AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                AND LOWER(TRIM(COALESCE(status,''))) IN ({placeholders_status})
                 AND routed_user_id IN ({placeholders_users})
                 {offer_filter_sql}
                 {creative_filter_sql}
@@ -514,7 +514,7 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
                          COUNT(*)
             FROM tg_events
             WHERE created_at >= %s AND created_at < %s
-                AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                AND LOWER(TRIM(COALESCE(status,''))) IN ({placeholders_status})
                 AND routed_user_id IN ({placeholders_users})
                 {offer_filter_sql}
                 {creative_filter_sql}
@@ -527,7 +527,7 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             SELECT routed_user_id AS uid, COUNT(*) AS cnt
             FROM tg_events
             WHERE created_at >= %s AND created_at < %s
-                AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                AND LOWER(TRIM(COALESCE(status,''))) IN ({placeholders_status})
                 AND routed_user_id IN ({placeholders_users})
                 {offer_filter_sql}
                 {creative_filter_sql}
@@ -577,7 +577,7 @@ async def trend_daily_sales(user_ids: List[int], days: int = 7) -> List[Tuple[st
                 SELECT DATE(CONVERT_TZ(created_at, '+00:00', '+00:00')) AS d, COUNT(*)
                 FROM tg_events
                 WHERE created_at >= %s AND created_at < %s + INTERVAL 1 DAY
-                  AND LOWER(COALESCE(status,'')) IN ({placeholders_status})
+                  AND LOWER(TRIM(COALESCE(status,''))) IN ({placeholders_status})
                   AND routed_user_id IN ({placeholders_users})
                 GROUP BY d
                 ORDER BY d ASC
