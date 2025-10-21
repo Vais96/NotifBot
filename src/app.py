@@ -279,6 +279,7 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
                     used_fallback = True
             except Exception:
                 pass
+    routed_id = None
     # Log event with final routed user id only if it's a real performer (buyer/lead/mentor); avoid fallback and admin/head
     try:
         routed_id = buyer_id
@@ -295,6 +296,14 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
         await db.log_event(data, routed_id)
     except Exception as e:
         logger.warning(f"Failed to log event: {e}")
+        routed_id = None
+
+    stats_user_id: int | None = None
+    if routed_id is not None:
+        try:
+            stats_user_id = int(routed_id)
+        except Exception as e:
+            logger.warning(f"Failed to coerce routed user id {routed_id}: {e}")
 
     # do not return early: admins should still receive notifications even if not routed
 
@@ -388,13 +397,13 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     # Build text via unified formatter (with optional daily deposits count)
     daily_count: int | None = None
     kpi_daily_goal: int | None = None
-    if is_sale and buyer_id:
+    if is_sale and stats_user_id is not None:
         try:
-            daily_count = await db.count_today_user_sales(int(buyer_id))
+            daily_count = await db.count_today_user_sales(stats_user_id)
         except Exception as e:
             logger.warning(f"Failed to get daily count: {e}")
         try:
-            kpi = await db.get_kpi(int(buyer_id))
+            kpi = await db.get_kpi(stats_user_id)
             kpi_daily_goal = kpi.get("daily_goal")
         except Exception as e:
             logger.warning(f"Failed to get KPI: {e}")
@@ -518,6 +527,7 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
             await db.log_event(data, routed_id)
         except Exception as e:
             logger.warning(f"GET postback log_event failed: {e}")
+            routed_id = None
 
         # do not return early: admins must still receive notifications
 
@@ -557,15 +567,22 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         campaign_name = _clean(campaign_name)
 
         # Build text via unified formatter (with optional daily deposits count)
+        stats_user_id: int | None = None
+        if routed_id is not None:
+            try:
+                stats_user_id = int(routed_id)
+            except Exception as e:
+                logger.warning(f"Failed to coerce routed user id {routed_id}: {e}")
+
         daily_count: int | None = None
         kpi_daily_goal: int | None = None
-        if is_sale and buyer_id:
+        if is_sale and stats_user_id is not None:
             try:
-                daily_count = await db.count_today_user_sales(int(buyer_id))
+                daily_count = await db.count_today_user_sales(stats_user_id)
             except Exception as e:
                 logger.warning(f"Failed to get daily count: {e}")
             try:
-                kpi = await db.get_kpi(int(buyer_id))
+                kpi = await db.get_kpi(stats_user_id)
                 kpi_daily_goal = kpi.get("daily_goal")
             except Exception as e:
                 logger.warning(f"Failed to get KPI: {e}")
