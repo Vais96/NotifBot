@@ -24,7 +24,7 @@ async def _resolve_user_id(identifier: str) -> int:
         return int(hit["telegram_id"])  # type: ignore
     # numeric id
     return int(s)
-def main_menu(is_admin: bool, role: str | None = None) -> InlineKeyboardMarkup:
+def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = False) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
         [InlineKeyboardButton(text="Отчеты", callback_data="menu:reports"), InlineKeyboardButton(text="KPI", callback_data="menu:kpi")],
@@ -37,7 +37,7 @@ def main_menu(is_admin: bool, role: str | None = None) -> InlineKeyboardMarkup:
         ]
     else:
         # For lead/head expose 'Моя команда'
-        if role in ("lead", "head"):
+        if has_lead_access or role in ("lead", "head"):
             buttons += [[InlineKeyboardButton(text="Моя команда", callback_data="menu:myteam")]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -52,12 +52,14 @@ async def _send_list_users(chat_id: int, actor_id: int):
     if actor_id in ADMIN_IDS:
         my_role = "admin"
     my_team = my.get("team_id") if my else None
+    lead_team_ids = await db.list_user_lead_teams(actor_id) if my_role not in ("admin", "head") else []
     visible = []
     for u in users:
         if my_role in ("admin", "head"):
             visible.append(u)
-        elif my_role == "lead":
-            if u.get("team_id") == my_team:
+        elif lead_team_ids:
+            team_id = u.get("team_id")
+            if team_id is not None and int(team_id) in lead_team_ids:
                 visible.append(u)
         else:
             if u["telegram_id"] == actor_id:
@@ -79,13 +81,17 @@ async def _send_list_routes(chat_id: int, actor_id: int):
     if actor_id in ADMIN_IDS:
         my_role = "admin"
     my_team = (my or {}).get("team_id")
+    lead_team_ids = await db.list_user_lead_teams(actor_id) if my_role not in ("admin", "head") else []
     rows = await db.list_routes()
     def visible(r: dict) -> bool:
         if my_role in ("admin", "head"):
             return True
-        if my_role == "lead":
+        if lead_team_ids:
             ru = next((u for u in users if u["telegram_id"] == r["user_id"]), None)
-            return ru and ru.get("team_id") == my_team
+            if not ru:
+                return False
+            team_id = ru.get("team_id")
+            return team_id is not None and int(team_id) in lead_team_ids
         return r["user_id"] == actor_id
     vis = [r for r in rows if visible(r)]
     if not vis:
@@ -128,24 +134,23 @@ def _myteam_menu() -> InlineKeyboardMarkup:
 async def _send_myteam(chat_id: int, actor_id: int):
     users = await db.list_users()
     me = next((u for u in users if u["telegram_id"] == actor_id), None)
-    role = (me or {}).get("role")
-    if (actor_id not in ADMIN_IDS) and (role not in ("lead", "head")):
-        return await bot.send_message(chat_id, "Недостаточно прав")
-    if not me or not me.get("team_id"):
-        return await bot.send_message(chat_id, "Вы не состоите в команде")
+    lead_team_ids = await db.list_user_lead_teams(actor_id)
+    if actor_id in ADMIN_IDS:
+        lead_team_ids = [int(me.get("team_id"))] if me and me.get("team_id") else []
+    if not lead_team_ids:
+        return await bot.send_message(chat_id, "Недостаточно прав или вы не закреплены за командой")
     await bot.send_message(chat_id, "Моя команда — управление", reply_markup=_myteam_menu())
 
 @dp.callback_query(F.data == "myteam:list")
 async def cb_myteam_list(call: CallbackQuery):
     users = await db.list_users()
     me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
-    if not me or (me["role"] not in ("lead", "head") and call.from_user.id not in ADMIN_IDS):
+    team_id = await db.get_primary_lead_team(call.from_user.id)
+    if call.from_user.id in ADMIN_IDS and not team_id:
+        team_id = int(me.get("team_id")) if me and me.get("team_id") else None
+    if team_id is None:
         return await call.answer("Нет прав", show_alert=True)
-    team_id = me.get("team_id")
-    if not team_id:
-        await call.message.answer("У вас нет команды")
-        return await call.answer()
-    members = [u for u in users if u.get("team_id") == team_id]
+    members = [u for u in users if u.get("team_id") is not None and int(u.get("team_id")) == int(team_id)]
     if not members:
         await call.message.answer("Состав пуст")
     else:
@@ -157,11 +162,12 @@ async def cb_myteam_list(call: CallbackQuery):
 async def cb_myteam_add(call: CallbackQuery):
     users = await db.list_users()
     me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
-    if not me or (me["role"] not in ("lead", "head") and call.from_user.id not in ADMIN_IDS):
+    team_id = await db.get_primary_lead_team(call.from_user.id)
+    if call.from_user.id in ADMIN_IDS and not team_id:
+        team_id = int(me.get("team_id")) if me and me.get("team_id") else None
+    if team_id is None:
         return await call.answer("Нет прав", show_alert=True)
-    if not me.get("team_id"):
-        return await call.answer("Нет команды", show_alert=True)
-    await db.set_pending_action(call.from_user.id, "myteam:add", None)
+    await db.set_pending_action(call.from_user.id, f"myteam:add:{team_id}", None)
     await call.message.answer("Пришлите Telegram ID пользователя для добавления в вашу команду")
     await call.answer()
 
@@ -169,12 +175,12 @@ async def cb_myteam_add(call: CallbackQuery):
 async def cb_myteam_remove(call: CallbackQuery):
     users = await db.list_users()
     me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
-    if not me or (me["role"] not in ("lead", "head") and call.from_user.id not in ADMIN_IDS):
+    team_id = await db.get_primary_lead_team(call.from_user.id)
+    if call.from_user.id in ADMIN_IDS and not team_id:
+        team_id = int(me.get("team_id")) if me and me.get("team_id") else None
+    if team_id is None:
         return await call.answer("Нет прав", show_alert=True)
-    team_id = me.get("team_id")
-    if not team_id:
-        return await call.answer("Нет команды", show_alert=True)
-    members = [u for u in users if u.get("team_id") == team_id]
+    members = [u for u in users if u.get("team_id") is not None and int(u.get("team_id")) == int(team_id)]
     if not members:
         await call.message.answer("Состав пуст")
         return await call.answer()
@@ -186,13 +192,15 @@ async def cb_myteam_remove(call: CallbackQuery):
 async def cb_myteam_remove_user(call: CallbackQuery):
     users = await db.list_users()
     me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
-    if not me or (me["role"] not in ("lead", "head") and call.from_user.id not in ADMIN_IDS):
+    team_id = await db.get_primary_lead_team(call.from_user.id)
+    if call.from_user.id in ADMIN_IDS and not team_id:
+        team_id = int(me.get("team_id")) if me and me.get("team_id") else None
+    if team_id is None:
         return await call.answer("Нет прав", show_alert=True)
-    team_id = me.get("team_id")
     uid = int(call.data.split(":", 2)[2])
     # ensure target is in same team
     target = next((u for u in users if u["telegram_id"] == uid), None)
-    if not target or target.get("team_id") != team_id:
+    if not target or target.get("team_id") is None or int(target.get("team_id")) != int(team_id):
         return await call.answer("Можно убирать только из своей команды", show_alert=True)
     await db.set_user_team(uid, None)
     await call.answer("Убран из команды")
@@ -371,7 +379,11 @@ async def on_menu(message: Message):
     role = (me or {}).get("role")
     if is_admin:
         role = "admin"
-    await message.answer("Меню:", reply_markup=main_menu(is_admin, role))
+    has_lead_access = is_admin
+    if not has_lead_access:
+        lead_team_ids = await db.list_user_lead_teams(message.from_user.id)
+        has_lead_access = bool(lead_team_ids) or (role in ("lead", "head"))
+    await message.answer("Меню:", reply_markup=main_menu(is_admin, role, has_lead_access=has_lead_access))
 
 @dp.callback_query(F.data.startswith("menu:"))
 async def on_menu_click(call: CallbackQuery):
@@ -459,12 +471,13 @@ async def on_list_users(message: Message):
     my_role = my["role"] if my else "buyer"
     if me in ADMIN_IDS:
         my_role = "admin"
-    my_team = my.get("team_id") if my else None
+    lead_team_ids = await db.list_user_lead_teams(me) if my_role not in ("admin", "head") else []
     for u in users:
         if my_role in ("admin", "head"):
             visible.append(u)
-        elif my_role == "lead":
-            if u.get("team_id") == my_team:
+        elif lead_team_ids:
+            team_id = u.get("team_id")
+            if team_id is not None and int(team_id) in lead_team_ids:
                 visible.append(u)
         else:  # buyer
             if u["telegram_id"] == me:
@@ -815,20 +828,27 @@ async def on_text_fallback(message: Message):
             except Exception:
                 pass
             await db.set_user_team(uid, team_id)
-            await db.set_user_role(uid, "lead")
+            user_row = await db.get_user(uid)
+            role_before = (user_row or {}).get("role")
+            if role_before not in ("mentor", "admin", "head"):
+                await db.set_user_role(uid, "lead")
+            await db.set_team_lead_override(team_id, uid)
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("Лид назначен")
-        if action == "myteam:add":
-            # leads can add only to their own team
+        if action.startswith("myteam:add"):
             users = await db.list_users()
-            me = next((u for u in users if u["telegram_id"] == message.from_user.id), None)
-            if not me or me.get("role") not in ("lead", "head"):
+            team_id = None
+            parts = action.split(":", 2)
+            if len(parts) == 3 and parts[2]:
+                try:
+                    team_id = int(parts[2])
+                except Exception:
+                    team_id = None
+            if team_id is None:
+                team_id = await db.get_primary_lead_team(message.from_user.id)
+            if team_id is None:
                 await db.clear_pending_action(message.from_user.id)
-                return await message.answer("Нет прав")
-            team_id = me.get("team_id")
-            if not team_id:
-                await db.clear_pending_action(message.from_user.id)
-                return await message.answer("У вас нет команды")
+                return await message.answer("Нет прав или команда не найдена")
             v = message.text.strip()
             uid = None
             if v.startswith("tg://user?id="):
@@ -889,6 +909,12 @@ async def cb_set_role(call: CallbackQuery):
     _, uid, role = call.data.split(":", 2)
     await db.set_user_role(int(uid), role)
     u = await db.get_user(int(uid))
+    if u and u.get("team_id") is not None:
+        team_id = int(u.get("team_id"))
+        if role == "mentor":
+            await db.set_team_lead_override(team_id, int(uid))
+        elif role != "lead":
+            await db.clear_team_lead_override(team_id)
     if u:
         await call.message.edit_reply_markup(reply_markup=_user_row_controls(u))
         await call.answer("Роль обновлена")
@@ -917,15 +943,18 @@ async def on_list_routes(message: Message):
     if me in ADMIN_IDS:
         my_role = "admin"
     my_team = (my or {}).get("team_id")
+    lead_team_ids = await db.list_user_lead_teams(me) if my_role not in ("admin", "head") else []
     rows = await db.list_routes()
     # filter by role
     def visible(r: dict) -> bool:
         if my_role in ("admin", "head"):
             return True
-        if my_role == "lead":
-            # find route's user and compare team
+        if lead_team_ids:
             ru = next((u for u in users if u["telegram_id"] == r["user_id"]), None)
-            return ru and ru.get("team_id") == my_team
+            if not ru:
+                return False
+            team_id = ru.get("team_id")
+            return team_id is not None and int(team_id) in lead_team_ids
         # buyer: only own
         return r["user_id"] == me
     vis = [r for r in rows if visible(r)]
@@ -1104,17 +1133,32 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     if my_role in ("admin", "head"):
         # Include buyers, leads, mentors; exclude admins/heads
         return [int(u["telegram_id"]) for u in users if u.get("is_active") and (u.get("role") in allowed_roles)]
-    if my_role == "lead":
-        team_id = me.get("team_id") if me else None
-        return [int(u["telegram_id"]) for u in users if u.get("team_id") == team_id and u.get("is_active") and (u.get("role") in allowed_roles)]
+    lead_team_ids = await db.list_user_lead_teams(actor_id)
+    scoped_ids: list[int] = []
+    if lead_team_ids:
+        for team_id in lead_team_ids:
+            scoped_ids.extend(
+                int(u["telegram_id"]) for u in users
+                if u.get("team_id") is not None and int(u.get("team_id")) == int(team_id)
+                and u.get("is_active") and (u.get("role") in allowed_roles)
+            )
     if my_role == "mentor":
-        # aggregate all users from teams the mentor follows
         team_ids = set(await db.list_mentor_teams(actor_id))
-        ids = [int(u["telegram_id"]) for u in users if (u.get("team_id") in team_ids) and u.get("is_active") and (u.get("role") in allowed_roles)]
-        # include own id as well (ментор тоже может лить)
-        if actor_id not in ids:
-            ids.append(actor_id)
-        return ids
+        scoped_ids.extend(
+            int(u["telegram_id"]) for u in users
+            if u.get("team_id") in team_ids and u.get("is_active") and (u.get("role") in allowed_roles)
+        )
+    if scoped_ids:
+        if actor_id not in scoped_ids:
+            scoped_ids.append(actor_id)
+        # deduplicate while preserving order
+        seen: set[int] = set()
+        result: list[int] = []
+        for uid in scoped_ids:
+            if uid not in seen:
+                seen.add(uid)
+                result.append(uid)
+        return result
     return [actor_id]
 
 def _report_text(title: str, agg: dict) -> str:
