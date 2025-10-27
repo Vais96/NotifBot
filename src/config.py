@@ -13,6 +13,8 @@ class Settings(BaseModel):
     admins: List[int] = Field(default_factory=list, validation_alias="ADMINS")
     port: int = Field(default=8080, validation_alias="PORT")
     postback_token: str = Field(default="", validation_alias="POSTBACK_TOKEN")
+    keitaro_api_key: str = Field(default="", validation_alias="KEITARO_API_KEY")
+    keitaro_base_url: str = Field(default="", validation_alias="KEITARO_BASE_URL")
 
     @classmethod
     def load(cls) -> "Settings":
@@ -34,6 +36,8 @@ class Settings(BaseModel):
             "ADMINS": admins,
             "PORT": int(os.getenv("PORT", "8080")),
             "POSTBACK_TOKEN": os.getenv("POSTBACK_TOKEN", ""),
+            "KEITARO_API_KEY": os.getenv("KEITARO_API_KEY", ""),
+            "KEITARO_BASE_URL": os.getenv("KEITARO_BASE_URL", ""),
         }
         return cls.model_validate(raw)
 

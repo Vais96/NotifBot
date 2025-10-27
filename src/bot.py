@@ -6,6 +6,7 @@ from loguru import logger
 from .config import settings
 from . import db
 from .dispatcher import bot, dp, ADMIN_IDS
+from .keitaro import normalize_domain
 
 # Helper: resolve user reference to Telegram ID (supports numeric ID, @username, tg://user?id=...)
 async def _resolve_user_id(identifier: str) -> int:
@@ -24,11 +25,64 @@ async def _resolve_user_id(identifier: str) -> int:
         return int(hit["telegram_id"])  # type: ignore
     # numeric id
     return int(s)
+
+
+async def _lookup_domain_info(domain_raw: str) -> str:
+    domain = normalize_domain(domain_raw)
+    if not domain:
+        return "Не удалось распознать домен. Пришлите строку вида salongierpl.online"
+    rows = await db.find_campaigns_by_domain(domain)
+    if not rows:
+        return f"Домен <code>{domain}</code> не найден среди кампаний Keitaro"
+    alias_cache: dict[str, dict | None] = {}
+    user_cache: dict[int, dict | None] = {}
+    lines: list[str] = []
+    for row in rows[:20]:
+        alias_key = (row.get("alias_key") or "").lower()
+        prefix = row.get("prefix") or alias_key or row.get("name") or "-"
+        alias_info = None
+        if alias_key:
+            if alias_key not in alias_cache:
+                alias_cache[alias_key] = await db.find_alias(alias_key)
+            alias_info = alias_cache[alias_key]
+        mention = None
+        if alias_info:
+            target_id = alias_info.get("lead_id") or alias_info.get("buyer_id")
+            if target_id:
+                tid = int(target_id)
+                if tid not in user_cache:
+                    user_cache[tid] = await db.get_user(tid)
+                user = user_cache[tid]
+                if user:
+                    username = user.get("username")
+                    fullname = user.get("full_name")
+                    if username:
+                        mention = f"@{username}"
+                    elif fullname:
+                        mention = str(fullname)
+        if not mention:
+            mention = prefix
+        source = row.get("source_domain")
+        target = row.get("target_domain")
+        if source and target:
+            path = f"{source} -> {target}"
+        else:
+            path = source or target or domain
+        if mention == prefix:
+            header = prefix
+        else:
+            header = f"{prefix} — {mention}"
+        lines.append(f"{header}\n{path}")
+    if len(rows) > 20:
+        lines.append(f"… и ещё {len(rows) - 20}")
+    header = f"Кампании для домена <code>{domain}</code>:"
+    return header + "\n\n" + "\n\n".join(lines)
 def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = False) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
         [InlineKeyboardButton(text="Отчеты", callback_data="menu:reports"), InlineKeyboardButton(text="KPI", callback_data="menu:kpi")],
     ]
+    buttons.append([InlineKeyboardButton(text="Проверить домен", callback_data="menu:checkdomain")])
     if is_admin:
         buttons += [
             [InlineKeyboardButton(text="Пользователи", callback_data="menu:listusers"), InlineKeyboardButton(text="Управление", callback_data="menu:manage")],
@@ -394,6 +448,10 @@ async def on_menu_click(call: CallbackQuery):
     if key == "listroutes":
         await _send_list_routes(call.message.chat.id, call.from_user.id)
         return await call.answer()
+    if key == "checkdomain":
+        await db.set_pending_action(call.from_user.id, "domain:check", None)
+        await call.message.answer("Пришлите домен в формате example.com или ссылку")
+        return await call.answer()
     if key == "listusers":
         await _send_list_users(call.message.chat.id, call.from_user.id)
         return await call.answer()
@@ -544,6 +602,17 @@ async def on_aliases(message: Message):
     # кнопка для создания нового алиаса
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Добавить алиас", callback_data="alias:new")]])
     await message.answer("Управление алиасами:", reply_markup=kb)
+
+
+@dp.message(Command("checkdomain"))
+async def on_checkdomain(message: Message):
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        await db.set_pending_action(message.from_user.id, "domain:check", None)
+        return await message.answer("Пришлите домен, например salongierpl.online")
+    result = await _lookup_domain_info(parts[1])
+    await message.answer(result)
 
 # ===== Mentors management (admin) =====
 def _mentor_row_controls(mentor_id: int) -> InlineKeyboardMarkup:
@@ -750,6 +819,14 @@ async def on_text_fallback(message: Message):
             await db.set_alias(alias)
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("Алиас создан. Откройте Алиасы в меню, чтобы назначить buyer/lead")
+        if action == "domain:check":
+            text = (message.text or "").strip()
+            if text.lower() in ("-", "stop", "стоп"):
+                await db.clear_pending_action(message.from_user.id)
+                return await message.answer("Готово. Проверка доменов завершена")
+            result = await _lookup_domain_info(text)
+            await message.answer(result + "\n\nОтправьте следующий домен или '-' чтобы завершить")
+            return
         if action.startswith("alias:setbuyer:"):
             alias = action.split(":", 2)[2]
             v = message.text.strip()

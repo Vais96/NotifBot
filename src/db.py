@@ -120,6 +120,21 @@ SCHEMA_SQL = [
         CONSTRAINT fk_tg_team_leads_extra_user FOREIGN KEY (user_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # cached Keitaro campaigns for domain lookups
+    """
+    CREATE TABLE IF NOT EXISTS keitaro_campaigns (
+        id BIGINT PRIMARY KEY,
+        name VARCHAR(512) NOT NULL,
+        prefix VARCHAR(255) NULL,
+        alias_key VARCHAR(255) NULL,
+        source_domain VARCHAR(255) NULL,
+        target_domain VARCHAR(255) NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_keitaro_campaign_source (source_domain),
+        INDEX idx_keitaro_campaign_target (target_domain),
+        INDEX idx_keitaro_campaign_alias (alias_key)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
     # KPI goals per user (daily/weekly deposits target)
     """
     CREATE TABLE IF NOT EXISTS tg_kpi (
@@ -748,6 +763,56 @@ async def list_aliases() -> List[Dict[str, Any]]:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute("SELECT alias, buyer_id, lead_id FROM tg_aliases ORDER BY alias ASC")
             return await cur.fetchall()
+
+async def replace_keitaro_campaigns(rows: List[Dict[str, Any]]) -> None:
+    """Replace cached Keitaro campaigns with the provided collection."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await conn.begin()
+            try:
+                await cur.execute("DELETE FROM keitaro_campaigns")
+                if rows:
+                    payload = []
+                    for row in rows:
+                        cid = int(row.get("id"))
+                        name = str(row.get("name") or "")
+                        prefix = row.get("prefix")
+                        alias_raw = row.get("alias_key")
+                        alias_key = alias_raw.lower() if isinstance(alias_raw, str) and alias_raw else None
+                        source_domain = (row.get("source_domain") or None)
+                        target_domain = (row.get("target_domain") or None)
+                        payload.append((cid, name, prefix, alias_key, source_domain, target_domain))
+                    await cur.executemany(
+                        """
+                        INSERT INTO keitaro_campaigns(id, name, prefix, alias_key, source_domain, target_domain, updated_at)
+                        VALUES(%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        """,
+                        payload
+                    )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+
+async def find_campaigns_by_domain(domain: str) -> List[Dict[str, Any]]:
+    if not domain:
+        return []
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            value = domain.lower()
+            await cur.execute(
+                """
+                SELECT id, name, prefix, alias_key, source_domain, target_domain, updated_at
+                FROM keitaro_campaigns
+                WHERE source_domain=%s OR target_domain=%s
+                ORDER BY prefix IS NULL, prefix ASC, name ASC
+                """,
+                (value, value)
+            )
+            rows = await cur.fetchall()
+            return rows or []
 
 async def list_offers_for_users(user_ids: List[int]) -> List[str]:
     if not user_ids:
