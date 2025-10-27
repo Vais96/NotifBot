@@ -6,6 +6,7 @@ from loguru import logger
 from .config import settings
 from . import db
 from .dispatcher import bot, dp, ADMIN_IDS
+from . import keitaro_sync
 from .keitaro import normalize_domain
 
 # Helper: resolve user reference to Telegram ID (supports numeric ID, @username, tg://user?id=...)
@@ -88,6 +89,7 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
             [InlineKeyboardButton(text="Пользователи", callback_data="menu:listusers"), InlineKeyboardButton(text="Управление", callback_data="menu:manage")],
             [InlineKeyboardButton(text="Команды", callback_data="menu:teams"), InlineKeyboardButton(text="Алиасы", callback_data="menu:aliases")],
             [InlineKeyboardButton(text="Менторы", callback_data="menu:mentors")],
+            [InlineKeyboardButton(text="Обновить домены", callback_data="menu:refreshdomains")],
         ]
     else:
         # For lead/head expose 'Моя команда'
@@ -452,6 +454,19 @@ async def on_menu_click(call: CallbackQuery):
         await db.set_pending_action(call.from_user.id, "domain:check", None)
         await call.message.answer("Пришлите домен в формате example.com или ссылку")
         return await call.answer()
+    if key == "refreshdomains":
+        if call.from_user.id not in ADMIN_IDS:
+            return await call.answer("Нет прав", show_alert=True)
+        await call.answer("Начинаю обновление")
+        status_msg = await call.message.answer("Запускаю обновление доменов из Keitaro…")
+        try:
+            count = await keitaro_sync.sync_campaigns()
+        except Exception as exc:
+            logger.exception("Failed to refresh Keitaro domains", error=exc)
+            await status_msg.edit_text("Не удалось обновить домены. Проверь логи и настройки Keitaro API.")
+        else:
+            await status_msg.edit_text(f"Готово. Обновлено {count} записей.")
+        return
     if key == "listusers":
         await _send_list_users(call.message.chat.id, call.from_user.id)
         return await call.answer()
