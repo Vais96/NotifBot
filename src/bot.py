@@ -1,3 +1,5 @@
+import re
+
 from aiogram import F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -28,19 +30,41 @@ async def _resolve_user_id(identifier: str) -> int:
     return int(s)
 
 
-async def _lookup_domain_info(domain_raw: str) -> str:
-    domain = normalize_domain(domain_raw)
-    if not domain:
-        return "Не удалось распознать домен. Пришлите строку вида salongierpl.online"
+_DOMAIN_SPLIT_RE = re.compile(r"[\s,;]+")
+MAX_DOMAINS_PER_REQUEST = 10
+
+
+def _extract_domains(raw_text: str) -> tuple[list[str], list[str]]:
+    tokens = [t.strip() for t in _DOMAIN_SPLIT_RE.split(raw_text or "") if t.strip()]
+    seen: set[str] = set()
+    domains: list[str] = []
+    invalid: list[str] = []
+    for token in tokens:
+        normalized = normalize_domain(token)
+        if not normalized:
+            invalid.append(token)
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        domains.append(normalized)
+        if len(domains) >= MAX_DOMAINS_PER_REQUEST:
+            break
+    return domains, invalid
+
+
+async def _render_domain_block(
+    domain: str,
+    alias_cache: dict[str, dict | None],
+    user_cache: dict[int, dict | None]
+) -> str:
     rows = await db.find_campaigns_by_domain(domain)
     if not rows:
-        return f"Домен <code>{domain}</code> не найден среди кампаний Keitaro"
-    alias_cache: dict[str, dict | None] = {}
-    user_cache: dict[int, dict | None] = {}
+        return f"Кампании для домена <code>{domain}</code>:\n\nНе найдено."
     lines: list[str] = []
     for row in rows[:20]:
         alias_key = (row.get("alias_key") or "").lower()
-        prefix = row.get("prefix") or alias_key or row.get("name") or "-"
+        prefix = row.get("prefix") or alias_key or (row.get("name") or "-")
         alias_info = None
         if alias_key:
             if alias_key not in alias_cache:
@@ -63,21 +87,33 @@ async def _lookup_domain_info(domain_raw: str) -> str:
                         mention = str(fullname)
         if not mention:
             mention = prefix
-        source = row.get("source_domain")
-        target = row.get("target_domain")
-        if source and target:
-            path = f"{source} -> {target}"
-        else:
-            path = source or target or domain
-        if mention == prefix:
-            header = prefix
-        else:
-            header = f"{prefix} — {mention}"
-        lines.append(f"{header}\n{path}")
+        header = prefix if mention == prefix else f"{prefix} — {mention}"
+        display_domain = row.get("source_domain") or domain
+        lines.append(f"{header}\n{display_domain}")
     if len(rows) > 20:
         lines.append(f"… и ещё {len(rows) - 20}")
-    header = f"Кампании для домена <code>{domain}</code>:"
-    return header + "\n\n" + "\n\n".join(lines)
+    return f"Кампании для домена <code>{domain}</code>:\n\n" + "\n\n".join(lines)
+
+
+async def _lookup_domains_text(raw_text: str) -> str:
+    domains, invalid = _extract_domains(raw_text)
+    if not domains:
+        if invalid:
+            listed = ", ".join(invalid[:5])
+            suffix = " …" if len(invalid) > 5 else ""
+            return f"Не удалось распознать домены: {listed}{suffix}. Пришлите строки вида example.com"
+        return "Не удалось распознать домен. Пришлите строку вида salongierpl.online"
+    alias_cache: dict[str, dict | None] = {}
+    user_cache: dict[int, dict | None] = {}
+    blocks = [await _render_domain_block(domain, alias_cache, user_cache) for domain in domains]
+    message = "\n\n".join(blocks)
+    if len(domains) == MAX_DOMAINS_PER_REQUEST:
+        message += "\n\nУчтены только первые 10 доменов за один запрос."
+    if invalid:
+        listed = ", ".join(invalid[:5])
+        suffix = " …" if len(invalid) > 5 else ""
+        message += f"\n\nПропущены значения: {listed}{suffix}."
+    return message
 def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = False) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
@@ -626,8 +662,8 @@ async def on_checkdomain(message: Message):
     if len(parts) < 2:
         await db.set_pending_action(message.from_user.id, "domain:check", None)
         return await message.answer("Пришлите домен, например salongierpl.online")
-    result = await _lookup_domain_info(parts[1])
-    await message.answer(result)
+    result = await _lookup_domains_text(parts[1])
+    await message.answer(result + "\n\nОтправьте следующий домен или '-' чтобы завершить")
 
 # ===== Mentors management (admin) =====
 def _mentor_row_controls(mentor_id: int) -> InlineKeyboardMarkup:
@@ -839,7 +875,7 @@ async def on_text_fallback(message: Message):
             if text.lower() in ("-", "stop", "стоп"):
                 await db.clear_pending_action(message.from_user.id)
                 return await message.answer("Готово. Проверка доменов завершена")
-            result = await _lookup_domain_info(text)
+            result = await _lookup_domains_text(text)
             await message.answer(result + "\n\nОтправьте следующий домен или '-' чтобы завершить")
             return
         if action.startswith("alias:setbuyer:"):
