@@ -941,7 +941,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
             else:
                 period_text = f"{parsed.period_start.isoformat()} — {parsed.period_end.isoformat()}"
 
-        summary_lines: list[str] = [
+        summary_main: list[str] = [
             f"<b>Файл:</b> {html.escape(filename)}",
             f"<b>Период:</b> {html.escape(period_text)}",
             f"<b>Кампаний:</b> {len(parsed.campaign_names)}",
@@ -956,14 +956,16 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
         if unresolved:
             shown = unresolved[:5]
             suffix = " …" if len(unresolved) > 5 else ""
-            summary_lines.append(
+            summary_main.append(
                 "Нет привязки к байеру для: " + ", ".join(html.escape(c) for c in shown) + suffix
             )
 
+        flag_section: list[str] = []
         if flag_changes:
-            summary_lines.append("<b>Изменения флагов:</b>")
-            for change in flag_changes:
-                summary_lines.append(
+            max_flag_rows = 30
+            flag_section.append("<b>Изменения флагов:</b>")
+            for change in flag_changes[:max_flag_rows]:
+                flag_section.append(
                     "• "
                     + html.escape(change["campaign"])
                     + ": "
@@ -974,11 +976,16 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                     + html.escape(change.get("reason") or "")
                     + ")"
                 )
+            remaining = len(flag_changes) - max_flag_rows
+            if remaining > 0:
+                flag_section.append(f"• ещё {remaining} изменений …")
+            summary_main.append("<b>Изменения флагов:</b> см. ниже")
         else:
-            summary_lines.append("Изменения флагов: нет")
+            summary_main.append("Изменения флагов: нет")
 
+        campaign_section: list[str] = []
         if per_campaign_info:
-            summary_lines.append("<b>Последний день по кампаниям:</b>")
+            campaign_section.append("<b>Последний день по кампаниям:</b>")
             top_entries = sorted(
                 per_campaign_info.items(),
                 key=lambda item: float(item[1].get("spend") or 0),
@@ -986,7 +993,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
             )[:5]
             for campaign, info in top_entries:
                 flag_label = flag_id_to_title.get(info.get("flag_id")) or info["decision"].code
-                summary_lines.append(
+                campaign_section.append(
                     "• "
                     + html.escape(campaign)
                     + " — "
@@ -1004,15 +1011,47 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
         missing_keitaro = sorted(
             c for c in parsed.campaign_names if c not in keitaro_stats.get("totals", {})
         )
+        missing_section: list[str] = []
         if missing_keitaro:
             shown = missing_keitaro[:5]
             suffix = " …" if len(missing_keitaro) > 5 else ""
-            summary_lines.append(
+            missing_section.append(
                 "Внимание: нет данных Keitaro для: " + ", ".join(html.escape(c) for c in shown) + suffix
             )
 
-        summary_text = "\n".join(summary_lines)
-        await status_msg.edit_text(summary_text, parse_mode=ParseMode.HTML)
+        def build_messages(sections: list[list[str]], max_length: int = 3500) -> list[str]:
+            lines: list[str] = []
+            for section in sections:
+                if not section:
+                    continue
+                if lines:
+                    lines.append("")
+                lines.extend(section)
+            messages: list[str] = []
+            current_lines: list[str] = []
+            current_len = 0
+            for line in lines:
+                appended_len = len(line) + 1
+                if appended_len > max_length:
+                    # hard truncate overly long lines to fit Telegram limit
+                    trimmed = line[: max_length - 4] + " …"
+                    line = trimmed
+                    appended_len = len(line) + 1
+                if current_lines and current_len + appended_len > max_length:
+                    messages.append("\n".join(current_lines))
+                    current_lines = []
+                    current_len = 0
+                current_lines.append(line)
+                current_len += appended_len
+            if current_lines:
+                messages.append("\n".join(current_lines))
+            return messages or [""]
+
+        sections = [summary_main, flag_section, campaign_section, missing_section]
+        message_chunks = build_messages(sections)
+        await status_msg.edit_text(message_chunks[0], parse_mode=ParseMode.HTML)
+        for extra_text in message_chunks[1:]:
+            await bot.send_message(message.chat.id, extra_text, parse_mode=ParseMode.HTML)
         if flag_changes:
             await _notify_flag_updates(filename, flag_changes)
         return True
