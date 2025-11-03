@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS fb_csv_uploads (
 CREATE TABLE IF NOT EXISTS fb_csv_rows (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     upload_id BIGINT NOT NULL,
-    account_name VARCHAR(255) NOT NULL,
+    account_name VARCHAR(255) NULL,
     campaign_name VARCHAR(255) NOT NULL,
     adset_name VARCHAR(255) NULL,
     ad_name VARCHAR(255) NULL,
