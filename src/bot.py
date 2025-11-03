@@ -892,7 +892,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                         "updated_by": user_id,
                     }
                 )
-            if new_flag_id != old_flag_id:
+            if state_raw is not None or new_flag_id is not None or old_flag_id is not None:
                 history_entries.append(
                     {
                         "campaign_name": campaign,
@@ -904,6 +904,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                         "note": info.get("reason"),
                     }
                 )
+            if new_flag_id != old_flag_id:
                 old_label = flag_id_to_title.get(old_flag_id) or flag_id_to_code.get(old_flag_id) or "—"
                 new_label = flag_id_to_title.get(new_flag_id) or flag_id_to_code.get(new_flag_id) or info["decision"].code
                 flag_changes.append(

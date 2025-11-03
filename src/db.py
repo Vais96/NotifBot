@@ -1600,7 +1600,10 @@ async def fetch_keitaro_campaign_stats(
                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id_2')), ''),
                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub2')), ''),
                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id2')), ''),
-                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.campaign')), '')
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.campaign_name')), ''),
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.campaign')), ''),
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.campaignName')), ''),
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.subid')), '')
                 ) AS campaign_name,
                 LOWER(TRIM(COALESCE(status, ''))) AS status_norm,
                 payout
@@ -1631,6 +1634,114 @@ async def fetch_keitaro_campaign_stats(
         agg["ftd"] += ftd
         agg["revenue"] += revenue
     return {"daily": daily, "totals": totals}
+
+
+async def list_fb_available_months(limit: int = 12) -> List[date]:
+    pool = await init_pool()
+    query = (
+        """
+        SELECT DATE_SUB(day_date, INTERVAL DAY(day_date) - 1 DAY) AS month_start
+        FROM fb_campaign_daily
+        GROUP BY month_start
+        ORDER BY month_start DESC
+        LIMIT %s
+        """
+    )
+    months: List[date] = []
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(query, (limit,))
+            rows = await cur.fetchall()
+    for row in rows or []:
+        value = row.get("month_start")
+        if isinstance(value, datetime):
+            months.append(value.date())
+        elif isinstance(value, date):
+            months.append(value)
+        elif isinstance(value, str):
+            try:
+                months.append(datetime.strptime(value, "%Y-%m-%d").date())
+            except ValueError:
+                continue
+    return months
+
+
+async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, Any]]:
+    if not isinstance(month_start, date):
+        raise ValueError("month_start must be a date instance")
+    normalized = month_start.replace(day=1)
+    if normalized.month == 12:
+        month_end = date(normalized.year + 1, 1, 1)
+    else:
+        month_end = date(normalized.year, normalized.month + 1, 1)
+    pool = await init_pool()
+    query = (
+        """
+        WITH month_data AS (
+            SELECT
+                d.campaign_name,
+                MAX(d.account_name) AS account_name,
+                MAX(d.buyer_id) AS buyer_id,
+                SUM(COALESCE(d.spend, 0)) AS spend,
+                SUM(COALESCE(d.impressions, 0)) AS impressions,
+                SUM(COALESCE(d.clicks, 0)) AS clicks,
+                SUM(COALESCE(d.registrations, 0)) AS registrations,
+                SUM(COALESCE(d.leads, 0)) AS leads,
+                SUM(COALESCE(d.ftd, 0)) AS ftd,
+                SUM(COALESCE(d.revenue, 0)) AS revenue
+            FROM fb_campaign_daily d
+            WHERE d.day_date >= %s AND d.day_date < %s
+            GROUP BY d.campaign_name
+        ),
+        prev_flags AS (
+            SELECT campaign_name, new_flag_id, changed_at
+            FROM (
+                SELECT
+                    h.*, ROW_NUMBER() OVER (PARTITION BY h.campaign_name ORDER BY h.changed_at DESC, h.id DESC) AS rn
+                FROM fb_campaign_history h
+                WHERE h.changed_at < %s
+            ) ranked
+            WHERE rn = 1
+        ),
+        curr_flags AS (
+            SELECT campaign_name, new_flag_id, changed_at
+            FROM (
+                SELECT
+                    h.*, ROW_NUMBER() OVER (PARTITION BY h.campaign_name ORDER BY h.changed_at DESC, h.id DESC) AS rn
+                FROM fb_campaign_history h
+            ) ranked
+            WHERE rn = 1
+        )
+        SELECT
+            md.campaign_name,
+            md.account_name,
+            md.buyer_id,
+            md.spend,
+            md.impressions,
+            md.clicks,
+            md.registrations,
+            md.leads,
+            md.ftd,
+            md.revenue,
+            prev_flags.new_flag_id AS prev_flag_id,
+            prev_flags.changed_at AS prev_flag_changed_at,
+            curr_flags.new_flag_id AS curr_flag_id,
+            curr_flags.changed_at AS curr_flag_changed_at,
+            st.flag_id AS state_flag_id,
+            st.status_id AS state_status_id
+        FROM month_data md
+        LEFT JOIN prev_flags ON prev_flags.campaign_name = md.campaign_name
+        LEFT JOIN curr_flags ON curr_flags.campaign_name = md.campaign_name
+        LEFT JOIN fb_campaign_state st ON st.campaign_name = md.campaign_name
+        ORDER BY md.spend DESC
+        """
+    )
+    params = (normalized, month_end, normalized)
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(query, params)
+            rows = await cur.fetchall()
+    return rows or []
 
 
 async def recompute_fb_campaign_totals(campaign_names: Iterable[str]) -> List[Dict[str, Any]]:
