@@ -1,5 +1,6 @@
 import html
 import re
+import traceback
 from collections import defaultdict
 from decimal import Decimal
 from io import BytesIO
@@ -66,6 +67,59 @@ def _lookup_inferred_buyer(campaign_name: Optional[str], alias_key: Optional[str
             except Exception:
                 continue
     return None
+
+
+async def _notify_admins_about_exception(context: str, exc: Exception, extra_details: Optional[List[str]] = None) -> None:
+    trace = ""
+    try:
+        trace = "".join(traceback.format_exception(exc.__class__, exc, exc.__traceback__))
+    except Exception as format_exc:
+        logger.warning("Failed to format exception traceback", exc_info=format_exc)
+        trace = str(exc)
+    snippet_limit = 3500
+    snippet = trace[-snippet_limit:] if len(trace) > snippet_limit else trace
+    lines: List[str] = [f"⚠️ {html.escape(context)}"]
+    if extra_details:
+        for item in extra_details:
+            if not item:
+                continue
+            lines.append(html.escape(item))
+    if snippet:
+        lines.append("<b>Traceback:</b>")
+        lines.append(f"<code>{html.escape(snippet)}</code>")
+    message_text = "\n".join(lines)
+
+    recipients: Set[int] = set()
+    try:
+        users = await db.list_users()
+    except Exception as fetch_exc:
+        logger.warning("Failed to fetch users for admin alert", exc_info=fetch_exc)
+        users = []
+    for row in users or []:
+        if not row.get("is_active", 1):
+            continue
+        if row.get("role") != "admin":
+            continue
+        telegram_id = row.get("telegram_id")
+        if telegram_id is None:
+            continue
+        try:
+            recipients.add(int(telegram_id))
+        except Exception:
+            continue
+    for aid in ADMIN_IDS:
+        try:
+            recipients.add(int(aid))
+        except Exception:
+            continue
+    if not recipients:
+        logger.warning("No admin recipients for alert", context=context)
+        return
+    for rid in recipients:
+        try:
+            await bot.send_message(rid, message_text, parse_mode=ParseMode.HTML)
+        except Exception as send_exc:
+            logger.warning("Failed to deliver admin alert", target=rid, exc_info=send_exc)
 
 
 async def _resolve_campaign_assignments(campaign_names: Set[str]) -> Dict[str, Dict[str, Any]]:
@@ -682,6 +736,14 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
     except Exception as exc:
         logger.exception("Failed to persist FB CSV upload", exc_info=exc)
         await status_msg.edit_text("Не удалось сохранить CSV в базе. Сообщите админу.")
+        await _notify_admins_about_exception(
+            "Ошибка при сохранении CSV",
+            exc,
+            [
+                f"User ID: {message.from_user.id}",
+                f"Filename: {filename}",
+            ],
+        )
         return False
 
     if upload_id is None:
@@ -956,6 +1018,15 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
     except Exception as exc:
         logger.exception("Failed to process FB CSV data", exc_info=exc)
         await status_msg.edit_text("Во время расчётов произошла ошибка. Сообщите админу.")
+        await _notify_admins_about_exception(
+            "Ошибка при обработке CSV",
+            exc,
+            [
+                f"User ID: {message.from_user.id}",
+                f"Filename: {filename}",
+                f"Upload ID: {upload_id or '—'}",
+            ],
+        )
         return False
 
 
