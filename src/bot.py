@@ -1,4 +1,9 @@
+import html
 import re
+from collections import defaultdict
+from decimal import Decimal
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Set
 
 from aiogram import F
 from aiogram.filters import CommandStart, Command
@@ -9,7 +14,8 @@ from .config import settings
 from . import db
 from .dispatcher import bot, dp, ADMIN_IDS
 from . import keitaro_sync
-from .keitaro import normalize_domain
+from .keitaro import normalize_domain, parse_campaign_name
+from . import fb_csv
 
 # Helper: resolve user reference to Telegram ID (supports numeric ID, @username, tg://user?id=...)
 async def _resolve_user_id(identifier: str) -> int:
@@ -32,6 +38,80 @@ async def _resolve_user_id(identifier: str) -> int:
 
 _DOMAIN_SPLIT_RE = re.compile(r"[\s,;]+")
 MAX_DOMAINS_PER_REQUEST = 10
+MAX_CSV_FILE_SIZE_BYTES = 8 * 1024 * 1024
+CSV_ALLOWED_MIME_TYPES = {"text/csv", "application/vnd.ms-excel"}
+
+
+def _fmt_money(value: Decimal | float | int | None) -> str:
+    if value is None:
+        return "$0.00"
+    amount = float(value)
+    return f"${amount:,.2f}".replace(",", " ")
+
+
+def _fmt_percent(value: Decimal | float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):.1f}%"
+
+
+def _lookup_inferred_buyer(campaign_name: Optional[str], alias_key: Optional[str], inferred: Dict[str, int]) -> Optional[int]:
+    for key in (campaign_name, alias_key):
+        if not key:
+            continue
+        candidate = inferred.get(key.strip().lower())
+        if candidate is not None:
+            try:
+                return int(candidate)
+            except Exception:
+                continue
+    return None
+
+
+async def _resolve_campaign_assignments(campaign_names: Set[str]) -> Dict[str, Dict[str, Any]]:
+    alias_keys: Dict[str, Optional[str]] = {}
+    for name in campaign_names:
+        meta = parse_campaign_name(name or "")
+        alias_key = (meta.get("alias_key") or "").strip().lower() or None
+        if not alias_key and name:
+            alias_key = name.split("_", 1)[0].strip().lower() or None
+        alias_keys[name] = alias_key
+    alias_values = [val for val in alias_keys.values() if val]
+    alias_map = await db.fetch_alias_map(alias_values)
+    identifiers: Set[str] = set()
+    for name in campaign_names:
+        if name:
+            identifiers.add(name)
+    identifiers.update(alias_values)
+    inferred = await db.infer_campaign_buyers(identifiers)
+    result: Dict[str, Dict[str, Any]] = {}
+    for name in campaign_names:
+        alias_key = alias_keys.get(name)
+        alias_row = alias_map.get(alias_key) if alias_key else None
+        buyer_id: Optional[int] = None
+        alias_lead_id: Optional[int] = None
+        if alias_row:
+            buyer_raw = alias_row.get("buyer_id")
+            if buyer_raw is not None:
+                try:
+                    buyer_id = int(buyer_raw)
+                except Exception:
+                    buyer_id = None
+            lead_raw = alias_row.get("lead_id")
+            if lead_raw is not None:
+                try:
+                    alias_lead_id = int(lead_raw)
+                except Exception:
+                    alias_lead_id = None
+        if buyer_id is None:
+            buyer_id = _lookup_inferred_buyer(name, alias_key, inferred)
+        result[name] = {
+            "buyer_id": buyer_id,
+            "alias_key": alias_key,
+            "alias_lead_id": alias_lead_id,
+            "alias_row": alias_row,
+        }
+    return result
 
 
 def _extract_domains(raw_text: str) -> tuple[list[str], list[str]]:
@@ -120,6 +200,7 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
         [InlineKeyboardButton(text="Отчеты", callback_data="menu:reports"), InlineKeyboardButton(text="KPI", callback_data="menu:kpi")],
     ]
     buttons.append([InlineKeyboardButton(text="Проверить домен", callback_data="menu:checkdomain")])
+    buttons.append([InlineKeyboardButton(text="Загрузить CSV", callback_data="menu:uploadcsv")])
     if is_admin:
         buttons += [
             [InlineKeyboardButton(text="Пользователи", callback_data="menu:listusers"), InlineKeyboardButton(text="Управление", callback_data="menu:manage")],
@@ -490,6 +571,14 @@ async def on_menu_click(call: CallbackQuery):
         await db.set_pending_action(call.from_user.id, "domain:check", None)
         await call.message.answer("Пришлите домен в формате example.com или ссылку")
         return await call.answer()
+    if key == "uploadcsv":
+        await db.set_pending_action(call.from_user.id, "fb:await_csv", None)
+        await call.message.answer(
+            "Пришлите CSV из Facebook Ads Manager.\n"
+            "Файл должен содержать колонку 'День' с разбивкой по датам.\n"
+            "Чтобы отменить ожидание, отправьте '-'"
+        )
+        return await call.answer()
     if key == "refreshdomains":
         if call.from_user.id not in ADMIN_IDS:
             return await call.answer("Нет прав", show_alert=True)
@@ -528,6 +617,559 @@ async def on_menu_click(call: CallbackQuery):
         await _send_kpi_menu(call.message.chat.id, call.from_user.id)
         return await call.answer()
 
+
+@dp.message(F.document)
+async def on_document_upload(message: Message):
+    pending = await db.get_pending_action(message.from_user.id)
+    if not pending or pending[0] != "fb:await_csv":
+        return
+    document = message.document
+    if document is None:
+        return
+    if document.file_size and document.file_size > MAX_CSV_FILE_SIZE_BYTES:
+        mb_limit = MAX_CSV_FILE_SIZE_BYTES // (1024 * 1024)
+        await message.answer(f"Файл слишком большой (> {mb_limit} МБ). Сожмите выгрузку или поделите на несколько файлов.")
+        return
+    filename = document.file_name or "upload.csv"
+    if not filename.lower().endswith(".csv"):
+        await message.answer("Мне нужен .csv файл. Отправьте корректную выгрузку.")
+        return
+    if document.mime_type and document.mime_type not in CSV_ALLOWED_MIME_TYPES:
+        await message.answer("Внимание: тип файла не похож на CSV. Попробую обработать, но если что-то пойдёт не так — выгрузите как CSV.")
+    status_msg = await message.answer("Получил файл, обрабатываю…")
+    buffer = BytesIO()
+    try:
+        await bot.download(document, destination=buffer)
+    except Exception as exc:
+        logger.exception("Failed to download CSV from Telegram", exc_info=exc)
+        await status_msg.edit_text("Не удалось скачать файл из Telegram. Попробуйте ещё раз.")
+        return
+    data = buffer.getvalue()
+    try:
+        parsed = fb_csv.parse_fb_csv(data)
+    except Exception as exc:
+        logger.exception("Failed to parse Facebook CSV", exc_info=exc)
+        await status_msg.edit_text("Не удалось распарсить CSV. Проверьте, что используете стандартную выгрузку из Ads Manager с разделителем запятая.")
+        return
+    succeeded = await _process_fb_csv_upload(message, filename, parsed, status_msg)
+    if succeeded:
+        await db.clear_pending_action(message.from_user.id)
+
+async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv.ParsedFbCsv, status_msg: Message) -> bool:
+    user_id = message.from_user.id
+    campaign_meta: Dict[str, Dict[str, Any]] = {}
+    assigned_buyers: Set[int] = set()
+    upload_id: Optional[int] = None
+    upload_buyer_id: Optional[int] = None
+    try:
+        campaign_meta = await _resolve_campaign_assignments(parsed.campaign_names)
+        assigned_buyers = {
+            int(meta.get("buyer_id"))
+            for meta in campaign_meta.values()
+            if meta.get("buyer_id") is not None
+        }
+        upload_buyer_id = next(iter(assigned_buyers)) if len(assigned_buyers) == 1 else None
+        upload_id = await db.create_fb_csv_upload(
+            uploaded_by=user_id,
+            buyer_id=upload_buyer_id,
+            original_filename=filename,
+            period_start=parsed.period_start,
+            period_end=parsed.period_end,
+            row_count=len(parsed.raw_rows),
+            has_totals=parsed.has_totals,
+        )
+        await db.bulk_insert_fb_csv_rows(upload_id, parsed.raw_rows)
+    except Exception as exc:
+        logger.exception("Failed to persist FB CSV upload", exc_info=exc)
+        await status_msg.edit_text("Не удалось сохранить CSV в базе. Сообщите админу.")
+        return False
+
+    if upload_id is None:
+        await status_msg.edit_text("Сохранение CSV не завершено. Попробуйте ещё раз позже.")
+        return False
+
+    if not parsed.daily_rows:
+        await status_msg.edit_text(
+            "CSV сохранён, но в файле нет строк с датой. Проверьте, что выгрузка сделана с разбивкой по дням."
+        )
+        # Обновим владельцев аккаунтов даже если нет дневных строк
+        await _update_fb_accounts(parsed, campaign_meta)
+        return True
+
+    try:
+        keitaro_stats = await db.fetch_keitaro_campaign_stats(
+            parsed.campaign_names,
+            parsed.period_start,
+            parsed.period_end,
+        )
+        flag_rows = await db.list_fb_flags()
+        flag_by_code = {row["code"].upper(): row for row in flag_rows}
+        flag_id_to_title = {row["id"]: row["title"] for row in flag_rows}
+        flag_id_to_code = {row["id"]: row["code"] for row in flag_rows}
+        state_map = await db.fetch_fb_campaign_state(parsed.campaign_names)
+        latest_day = parsed.latest_day_by_campaign
+        daily_stats = keitaro_stats.get("daily", {})
+
+        def as_decimal(value: Any) -> Decimal:
+            if value is None:
+                return Decimal("0")
+            if isinstance(value, Decimal):
+                return value
+            return Decimal(str(value))
+
+        daily_records: list[dict[str, Any]] = []
+        per_campaign_info: dict[str, dict[str, Any]] = {}
+        upload_spend = Decimal("0")
+        account_buyers: Dict[str, Set[int]] = defaultdict(set)
+
+        for row in parsed.daily_rows:
+            campaign = row.get("campaign_name")
+            day = row.get("day_date")
+            if not campaign or not day:
+                continue
+            meta = campaign_meta.get(campaign, {})
+            campaign_buyer_id = meta.get("buyer_id")
+            spend_raw = row.get("spend")
+            spend = as_decimal(spend_raw) if spend_raw is not None else Decimal("0")
+            impressions = row.get("impressions") or 0
+            clicks = row.get("clicks") or 0
+            leads = row.get("leads")
+            registrations = row.get("registrations")
+            ctr_raw = row.get("ctr")
+            ctr = as_decimal(ctr_raw) if ctr_raw is not None else None
+            cpc_raw = row.get("cpc")
+            cpc = as_decimal(cpc_raw) if cpc_raw is not None else None
+            geo = row.get("geo")
+            stats = daily_stats.get((campaign, day), {})
+            ftd = int(stats.get("ftd") or 0)
+            revenue = as_decimal(stats.get("revenue"))
+            roi = ((revenue - spend) / spend * Decimal(100)) if spend and spend != 0 else None
+            if roi is not None:
+                roi = roi
+            ftd_rate = (Decimal(ftd) / Decimal(registrations) * Decimal(100)) if registrations else None
+            flag_decision = fb_csv.decide_flag(spend, ctr, roi, ftd)
+            flag_row = flag_by_code.get(flag_decision.code.upper())
+            flag_id = flag_row.get("id") if flag_row else None
+            state = state_map.get(campaign) or {}
+            status_id = state.get("status_id")
+            account_name = row.get("account_name")
+            if account_name and campaign_buyer_id is not None:
+                try:
+                    account_buyers[account_name].add(int(campaign_buyer_id))
+                except Exception:
+                    pass
+
+            daily_records.append(
+                {
+                    "campaign_name": campaign,
+                    "day_date": day,
+                    "account_name": account_name,
+                    "buyer_id": campaign_buyer_id,
+                    "geo": geo,
+                    "spend": spend,
+                    "impressions": impressions,
+                    "clicks": clicks,
+                    "registrations": registrations,
+                    "leads": leads,
+                    "ftd": ftd,
+                    "revenue": revenue,
+                    "ctr": ctr,
+                    "cpc": cpc,
+                    "roi": roi,
+                    "ftd_rate": ftd_rate,
+                    "status_id": status_id,
+                    "flag_id": flag_id,
+                    "upload_id": upload_id,
+                }
+            )
+
+            upload_spend += spend
+
+            if latest_day.get(campaign) == day:
+                per_campaign_info[campaign] = {
+                    "decision": flag_decision,
+                    "flag_id": flag_id,
+                    "old_flag_id": state.get("flag_id"),
+                    "status_id": status_id,
+                    "roi": roi,
+                    "spend": spend,
+                    "ftd": ftd,
+                    "revenue": revenue,
+                    "ctr": ctr,
+                    "ftd_rate": ftd_rate,
+                    "reason": flag_decision.reason,
+                    "buyer_id": campaign_buyer_id,
+                    "alias_key": meta.get("alias_key"),
+                    "alias_lead_id": meta.get("alias_lead_id"),
+                    "day": day,
+                }
+
+        if daily_records:
+            await db.upsert_fb_campaign_daily(daily_records)
+
+        states_to_upsert: list[dict[str, Any]] = []
+        history_entries: list[dict[str, Any]] = []
+        flag_changes: list[dict[str, Any]] = []
+
+        for campaign, info in per_campaign_info.items():
+            new_flag_id = info.get("flag_id")
+            state_raw = state_map.get(campaign)
+            state = state_raw or {}
+            old_flag_id = info.get("old_flag_id")
+            status_id = info.get("status_id")
+            buyer_comment = state.get("buyer_comment")
+            lead_comment = state.get("lead_comment")
+            if state_raw is None or new_flag_id != old_flag_id:
+                states_to_upsert.append(
+                    {
+                        "campaign_name": campaign,
+                        "status_id": status_id,
+                        "flag_id": new_flag_id,
+                        "buyer_comment": buyer_comment,
+                        "lead_comment": lead_comment,
+                        "updated_by": user_id,
+                    }
+                )
+            if new_flag_id != old_flag_id:
+                history_entries.append(
+                    {
+                        "campaign_name": campaign,
+                        "changed_by": user_id,
+                        "old_status_id": status_id,
+                        "new_status_id": status_id,
+                        "old_flag_id": old_flag_id,
+                        "new_flag_id": new_flag_id,
+                        "note": info.get("reason"),
+                    }
+                )
+                old_label = flag_id_to_title.get(old_flag_id) or flag_id_to_code.get(old_flag_id) or "—"
+                new_label = flag_id_to_title.get(new_flag_id) or flag_id_to_code.get(new_flag_id) or info["decision"].code
+                flag_changes.append(
+                    {
+                        "campaign": campaign,
+                        "old": old_label,
+                        "new": new_label,
+                        "reason": info.get("reason", ""),
+                        "buyer_id": info.get("buyer_id"),
+                        "alias_key": info.get("alias_key"),
+                        "alias_lead_id": info.get("alias_lead_id"),
+                        "spend": info.get("spend"),
+                        "revenue": info.get("revenue"),
+                        "ftd": info.get("ftd"),
+                        "roi": info.get("roi"),
+                        "ctr": info.get("ctr"),
+                        "ftd_rate": info.get("ftd_rate"),
+                        "day": info.get("day"),
+                    }
+                )
+
+        if states_to_upsert:
+            await db.upsert_fb_campaign_state(states_to_upsert)
+        if history_entries:
+            await db.log_fb_campaign_history(history_entries)
+
+        await db.recompute_fb_campaign_totals(parsed.campaign_names)
+        await _update_fb_accounts(parsed, campaign_meta, account_buyers)
+
+        period_text = "—"
+        if parsed.period_start and parsed.period_end:
+            if parsed.period_start == parsed.period_end:
+                period_text = parsed.period_start.isoformat()
+            else:
+                period_text = f"{parsed.period_start.isoformat()} — {parsed.period_end.isoformat()}"
+
+        summary_lines: list[str] = [
+            f"<b>Файл:</b> {html.escape(filename)}",
+            f"<b>Период:</b> {html.escape(period_text)}",
+            f"<b>Кампаний:</b> {len(parsed.campaign_names)}",
+            f"<b>Строк:</b> {len(parsed.raw_rows)}",
+            f"<b>Spend за загрузку:</b> {_fmt_money(upload_spend)}",
+            f"<b>Байеров в загрузке:</b> {len(assigned_buyers)}",
+        ]
+
+        unresolved = sorted(
+            campaign for campaign, meta in campaign_meta.items() if meta.get("buyer_id") is None
+        )
+        if unresolved:
+            shown = unresolved[:5]
+            suffix = " …" if len(unresolved) > 5 else ""
+            summary_lines.append(
+                "Нет привязки к байеру для: " + ", ".join(html.escape(c) for c in shown) + suffix
+            )
+
+        if flag_changes:
+            summary_lines.append("<b>Изменения флагов:</b>")
+            for change in flag_changes:
+                summary_lines.append(
+                    "• "
+                    + html.escape(change["campaign"])
+                    + ": "
+                    + html.escape(change["old"] or "—")
+                    + " → "
+                    + html.escape(change["new"] or "—")
+                    + " ("
+                    + html.escape(change.get("reason") or "")
+                    + ")"
+                )
+        else:
+            summary_lines.append("Изменения флагов: нет")
+
+        if per_campaign_info:
+            summary_lines.append("<b>Последний день по кампаниям:</b>")
+            top_entries = sorted(
+                per_campaign_info.items(),
+                key=lambda item: float(item[1].get("spend") or 0),
+                reverse=True,
+            )[:5]
+            for campaign, info in top_entries:
+                flag_label = flag_id_to_title.get(info.get("flag_id")) or info["decision"].code
+                summary_lines.append(
+                    "• "
+                    + html.escape(campaign)
+                    + " — "
+                    + html.escape(flag_label)
+                    + ". Spend "
+                    + _fmt_money(info.get("spend"))
+                    + ", FTD "
+                    + str(info.get("ftd") or 0)
+                    + ", Rev "
+                    + _fmt_money(info.get("revenue"))
+                    + ", ROI "
+                    + _fmt_percent(info.get("roi"))
+                )
+
+        missing_keitaro = sorted(
+            c for c in parsed.campaign_names if c not in keitaro_stats.get("totals", {})
+        )
+        if missing_keitaro:
+            shown = missing_keitaro[:5]
+            suffix = " …" if len(missing_keitaro) > 5 else ""
+            summary_lines.append(
+                "Внимание: нет данных Keitaro для: " + ", ".join(html.escape(c) for c in shown) + suffix
+            )
+
+        summary_text = "\n".join(summary_lines)
+        await status_msg.edit_text(summary_text, parse_mode=ParseMode.HTML)
+        if flag_changes:
+            await _notify_flag_updates(filename, flag_changes)
+        return True
+    except Exception as exc:
+        logger.exception("Failed to process FB CSV data", exc_info=exc)
+        await status_msg.edit_text("Во время расчётов произошла ошибка. Сообщите админу.")
+        return False
+
+
+async def _update_fb_accounts(
+    parsed: fb_csv.ParsedFbCsv,
+    campaign_meta: Dict[str, Dict[str, Any]],
+    account_buyers: Optional[Dict[str, Set[int]]] = None,
+) -> None:
+    buyers_map: Dict[str, Set[int]] = {}
+    if account_buyers:
+        for account, buyers in account_buyers.items():
+            buyers_map[account] = {int(b) for b in buyers if b is not None}
+    else:
+        temp: Dict[str, Set[int]] = defaultdict(set)
+        for row in parsed.raw_rows:
+            account = row.get("account_name")
+            campaign = row.get("campaign_name")
+            if not account or not campaign:
+                continue
+            meta = campaign_meta.get(campaign) or {}
+            buyer_id = meta.get("buyer_id")
+            if buyer_id is None:
+                continue
+            try:
+                temp.setdefault(account, set()).add(int(buyer_id))
+            except Exception:
+                continue
+        buyers_map = temp
+    all_accounts: Set[str] = set()
+    all_accounts.update(buyers_map.keys())
+    all_accounts.update(name for name in parsed.account_names if name)
+    payload: List[Dict[str, Any]] = []
+    for account in sorted(all_accounts):
+        buyers = buyers_map.get(account, set())
+        buyer_id: Optional[int] = None
+        if len(buyers) == 1:
+            buyer_id = next(iter(buyers))
+        payload.append(
+            {
+                "account_name": account,
+                "buyer_id": buyer_id,
+                "owner_since": parsed.period_start,
+            }
+        )
+    if not payload:
+        return
+    try:
+        await db.upsert_fb_accounts(payload)
+    except Exception as exc:
+        logger.warning("Failed to upsert FB accounts", exc_info=exc)
+
+
+async def _notify_flag_updates(filename: str, flag_changes: List[Dict[str, Any]]) -> None:
+    if not flag_changes:
+        return
+    try:
+        users = await db.list_users()
+    except Exception as exc:
+        logger.warning("Failed to fetch users for flag notifications", exc_info=exc)
+        return
+    user_map: Dict[int, Dict[str, Any]] = {}
+    for row in users:
+        telegram_id = row.get("telegram_id")
+        if telegram_id is None:
+            continue
+        try:
+            user_map[int(telegram_id)] = row
+        except Exception:
+            continue
+    admins_from_db = {uid for uid, row in user_map.items() if row.get("role") == "admin" and row.get("is_active")}
+    heads = {uid for uid, row in user_map.items() if row.get("role") == "head" and row.get("is_active")}
+    env_admins: Set[int] = set()
+    for aid in ADMIN_IDS:
+        try:
+            env_admins.add(int(aid))
+        except Exception:
+            continue
+    admin_recipients = admins_from_db | env_admins
+    team_leads_cache: Dict[int, List[int]] = {}
+    team_mentors_cache: Dict[int, List[int]] = {}
+    recipient_messages: Dict[int, List[str]] = defaultdict(list)
+
+    async def get_team_leads_cached(team_id: int) -> List[int]:
+        if team_id not in team_leads_cache:
+            try:
+                team_leads_cache[team_id] = await db.list_team_leads(team_id)
+            except Exception as exc:
+                logger.warning("Failed to fetch team leads", team_id=team_id, exc_info=exc)
+                team_leads_cache[team_id] = []
+        return team_leads_cache[team_id]
+
+    async def get_team_mentors_cached(team_id: int) -> List[int]:
+        if team_id not in team_mentors_cache:
+            try:
+                team_mentors_cache[team_id] = await db.list_team_mentors(team_id)
+            except Exception as exc:
+                logger.warning("Failed to fetch team mentors", team_id=team_id, exc_info=exc)
+                team_mentors_cache[team_id] = []
+        return team_mentors_cache[team_id]
+
+    def format_user_label(user_id: Optional[int]) -> str:
+        if user_id is None:
+            return ""
+        try:
+            uid = int(user_id)
+        except Exception:
+            return str(user_id)
+        info = user_map.get(uid)
+        if not info:
+            return str(uid)
+        username = info.get("username")
+        if username:
+            return f"@{username}"
+        full_name = info.get("full_name")
+        if full_name:
+            return str(full_name)
+        return str(uid)
+
+    for change in flag_changes:
+        recipients: Set[int] = set(admin_recipients) | set(heads)
+        buyer_id = change.get("buyer_id")
+        alias_lead_id = change.get("alias_lead_id")
+        if buyer_id is not None:
+            try:
+                recipients.add(int(buyer_id))
+            except Exception:
+                pass
+        if alias_lead_id is not None:
+            try:
+                recipients.add(int(alias_lead_id))
+            except Exception:
+                pass
+        team_id: Optional[int] = None
+        if buyer_id is not None:
+            buyer_row = user_map.get(int(buyer_id))
+            if buyer_row:
+                tid = buyer_row.get("team_id")
+                if tid is not None:
+                    try:
+                        team_id = int(tid)
+                    except Exception:
+                        team_id = None
+        if team_id is not None:
+            leads = await get_team_leads_cached(team_id)
+            for lid in leads:
+                try:
+                    recipients.add(int(lid))
+                except Exception:
+                    continue
+            mentors = await get_team_mentors_cached(team_id)
+            for mid in mentors:
+                try:
+                    recipients.add(int(mid))
+                except Exception:
+                    continue
+        recipients = {
+            rid for rid in recipients
+            if rid in env_admins
+            or rid not in user_map
+            or user_map.get(rid, {}).get("is_active", 1)
+        }
+        campaign = html.escape(change.get("campaign") or "—")
+        old_label = html.escape(change.get("old") or "—")
+        new_label = html.escape(change.get("new") or "—")
+        alias_key = change.get("alias_key")
+        alias_text = f"Алиас: {html.escape(alias_key)}" if alias_key else None
+        day = change.get("day")
+        day_text = None
+        if day:
+            try:
+                day_text = f"Дата: {html.escape(day.isoformat())}"
+            except Exception:
+                day_text = None
+        buyer_label = format_user_label(buyer_id)
+        buyer_text = f"Байер: {html.escape(buyer_label)}" if buyer_label else None
+        metrics = (
+            f"Spend {_fmt_money(change.get('spend'))}, "
+            f"FTD {change.get('ftd') or 0}, "
+            f"Rev {_fmt_money(change.get('revenue'))}, "
+            f"ROI {_fmt_percent(change.get('roi'))}"
+        )
+        extras: List[str] = []
+        ctr_value = change.get("ctr")
+        if ctr_value is not None:
+            extras.append(f"CTR {_fmt_percent(ctr_value)}")
+        ftd_rate_value = change.get("ftd_rate")
+        if ftd_rate_value is not None:
+            extras.append(f"FTD rate {_fmt_percent(ftd_rate_value)}")
+        reason = change.get("reason") or ""
+        parts = [f"<b>{campaign}</b>: {old_label} → {new_label}"]
+        if day_text:
+            parts.append(day_text)
+        parts.append(metrics)
+        if extras:
+            parts.append("; ".join(extras))
+        if buyer_text:
+            parts.append(buyer_text)
+        if alias_text:
+            parts.append(alias_text)
+        if reason:
+            parts.append("Причина: " + html.escape(str(reason)))
+        line = "\n".join(parts)
+        for rid in recipients:
+            recipient_messages[rid].append(line)
+
+    if not recipient_messages:
+        return
+    header = f"<b>Обновления флагов</b> из {html.escape(filename)}"
+    for rid, lines in recipient_messages.items():
+        message_text = header + "\n\n" + "\n\n".join(lines)
+        try:
+            await bot.send_message(rid, message_text, parse_mode=ParseMode.HTML)
+        except Exception as exc:
+            logger.warning("Failed to send flag notification", user_id=rid, exc_info=exc)
 @dp.message(CommandStart())
 async def on_start(message: Message):
     await db.upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
@@ -865,6 +1507,12 @@ async def on_text_fallback(message: Message):
         return  # игнорируем обычные сообщения, чтобы не засорять чат
     action, _ = pending
     try:
+        if action == "fb:await_csv":
+            text = (message.text or "").strip()
+            if text.lower() in ("-", "стоп", "stop"):
+                await db.clear_pending_action(message.from_user.id)
+                return await message.answer("Загрузка CSV отменена")
+            return await message.answer("Пришлите CSV файлом или '-' чтобы отменить ожидание")
         if action == "alias:new":
             alias = message.text.strip()
             await db.set_alias(alias)

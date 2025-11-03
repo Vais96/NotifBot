@@ -1,5 +1,6 @@
 import aiomysql
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Iterable
+from datetime import date, timedelta, datetime
 from loguru import logger
 from .config import settings
 import urllib.parse
@@ -172,6 +173,40 @@ SCHEMA_SQL = [
     """,
 ]
 
+
+async def _ensure_fb_reference_data(conn: aiomysql.Connection) -> None:
+    async with conn.cursor() as cur:
+        try:
+            await cur.execute("SELECT COUNT(*) FROM fb_statuses")
+            row = await cur.fetchone()
+            count_status = int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            count_status = 0
+        if count_status == 0:
+            await cur.executemany(
+                "INSERT INTO fb_statuses(code, title, description) VALUES(%s, %s, %s)",
+                [
+                    ("ACTIVE", "Active", "Кампания активна"),
+                    ("TEST", "Test", "Кампания в тесте"),
+                    ("DEAD", "Dead", "Кампания остановлена"),
+                ],
+            )
+        try:
+            await cur.execute("SELECT COUNT(*) FROM fb_flags")
+            row = await cur.fetchone()
+            count_flags = int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            count_flags = 0
+        if count_flags == 0:
+            await cur.executemany(
+                "INSERT INTO fb_flags(code, title, severity, description) VALUES(%s, %s, %s, %s)",
+                [
+                    ("GREEN", "Зелёный", 10, "Результат хороший"),
+                    ("YELLOW", "Жёлтый", 50, "Требуется внимание"),
+                    ("RED", "Красный", 90, "Проблемный результат"),
+                ],
+            )
+
 async def init_pool() -> aiomysql.Pool:
     global _pool
     if _pool is None:
@@ -213,6 +248,10 @@ async def init_pool() -> aiomysql.Pool:
                         await cur.execute("ALTER TABLE tg_report_filters ADD COLUMN team_id BIGINT NULL AFTER buyer_id")
                 except Exception as e:
                     logger.warning(f"Failed to ensure columns in tg_report_filters: {e}")
+                try:
+                    await _ensure_fb_reference_data(conn)
+                except Exception as e:
+                    logger.warning(f"Failed to ensure default FB reference data: {e}")
     return _pool
 
 async def close_pool() -> None:
@@ -482,6 +521,7 @@ async def count_today_user_sales(user_id: int) -> int:
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
+    # cached Keitaro campaigns for domain lookups
             await cur.execute(query, (user_id, start, end, *sale_like))
             row = await cur.fetchone()
             return int(row[0]) if row else 0
@@ -496,6 +536,167 @@ async def sum_today_user_profit(user_id: int) -> float:
     sale_like = (
         "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
     )
+    # Facebook CSV uploads metadata
+    """
+    CREATE TABLE IF NOT EXISTS fb_csv_uploads (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        uploaded_by BIGINT NOT NULL,
+        buyer_id BIGINT NULL,
+        original_filename VARCHAR(255) NOT NULL,
+        period_start DATE NULL,
+        period_end DATE NULL,
+        row_count INT NOT NULL DEFAULT 0,
+        has_totals TINYINT(1) NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_fb_csv_upload_user FOREIGN KEY (uploaded_by) REFERENCES tg_users (telegram_id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_csv_upload_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Raw rows from CSV uploads
+    """
+    CREATE TABLE IF NOT EXISTS fb_csv_rows (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        upload_id BIGINT NOT NULL,
+        account_name VARCHAR(255) NOT NULL,
+        campaign_name VARCHAR(255) NOT NULL,
+        adset_name VARCHAR(255) NULL,
+        ad_name VARCHAR(255) NULL,
+        day_date DATE NULL,
+        currency VARCHAR(16) NULL,
+        spend DECIMAL(18,6) NULL,
+        impressions BIGINT NULL,
+        clicks BIGINT NULL,
+        leads INT NULL,
+        registrations INT NULL,
+        cpc DECIMAL(18,6) NULL,
+        ctr DECIMAL(18,6) NULL,
+        is_total TINYINT(1) NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_fb_rows_upload (upload_id),
+        INDEX idx_fb_rows_campaign_day (campaign_name, day_date),
+        INDEX idx_fb_rows_account_day (account_name, day_date),
+        CONSTRAINT fk_fb_rows_upload FOREIGN KEY (upload_id) REFERENCES fb_csv_uploads (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Aggregated daily metrics per campaign (after enrichment)
+    """
+    CREATE TABLE IF NOT EXISTS fb_campaign_daily (
+        campaign_name VARCHAR(255) NOT NULL,
+        day_date DATE NOT NULL,
+        account_name VARCHAR(255) NULL,
+        buyer_id BIGINT NULL,
+        geo VARCHAR(16) NULL,
+        spend DECIMAL(18,6) NULL,
+        impressions BIGINT NULL,
+        clicks BIGINT NULL,
+        registrations INT NULL,
+        leads INT NULL,
+        ftd INT NULL,
+        revenue DECIMAL(18,6) NULL,
+        ctr DECIMAL(18,6) NULL,
+        cpc DECIMAL(18,6) NULL,
+        roi DECIMAL(18,6) NULL,
+        ftd_rate DECIMAL(18,6) NULL,
+        status_id BIGINT NULL,
+        flag_id BIGINT NULL,
+        upload_id BIGINT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (campaign_name, day_date),
+        INDEX idx_fb_daily_buyer_day (buyer_id, day_date),
+        INDEX idx_fb_daily_account_day (account_name, day_date),
+        CONSTRAINT fk_fb_daily_upload FOREIGN KEY (upload_id) REFERENCES fb_csv_uploads (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_daily_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Totals per campaign/account for quick lookups
+    """
+    CREATE TABLE IF NOT EXISTS fb_campaign_totals (
+        campaign_name VARCHAR(255) PRIMARY KEY,
+        account_name VARCHAR(255) NULL,
+        buyer_id BIGINT NULL,
+        geo VARCHAR(16) NULL,
+        spend DECIMAL(18,6) NULL,
+        impressions BIGINT NULL,
+        clicks BIGINT NULL,
+        registrations INT NULL,
+        leads INT NULL,
+        ftd INT NULL,
+        revenue DECIMAL(18,6) NULL,
+        ctr DECIMAL(18,6) NULL,
+        cpc DECIMAL(18,6) NULL,
+        roi DECIMAL(18,6) NULL,
+        ftd_rate DECIMAL(18,6) NULL,
+        status_id BIGINT NULL,
+        flag_id BIGINT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_fb_totals_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Accounts ownership history
+    """
+    CREATE TABLE IF NOT EXISTS fb_accounts (
+        account_name VARCHAR(255) PRIMARY KEY,
+        buyer_id BIGINT NULL,
+        owner_since DATE NULL,
+        owner_until DATE NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_fb_accounts_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Status dictionary
+    """
+    CREATE TABLE IF NOT EXISTS fb_statuses (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        code VARCHAR(32) NOT NULL UNIQUE,
+        title VARCHAR(128) NOT NULL,
+        description TEXT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Flags dictionary
+    """
+    CREATE TABLE IF NOT EXISTS fb_flags (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        code VARCHAR(32) NOT NULL UNIQUE,
+        title VARCHAR(128) NOT NULL,
+        severity INT NOT NULL DEFAULT 0,
+        description TEXT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Current state per campaign (status, comments)
+    """
+    CREATE TABLE IF NOT EXISTS fb_campaign_state (
+        campaign_name VARCHAR(255) PRIMARY KEY,
+        status_id BIGINT NULL,
+        flag_id BIGINT NULL,
+        buyer_comment TEXT NULL,
+        lead_comment TEXT NULL,
+        updated_by BIGINT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_fb_state_status FOREIGN KEY (status_id) REFERENCES fb_statuses (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_state_flag FOREIGN KEY (flag_id) REFERENCES fb_flags (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_state_user FOREIGN KEY (updated_by) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # History of changes for audit/notifications
+    """
+    CREATE TABLE IF NOT EXISTS fb_campaign_history (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        campaign_name VARCHAR(255) NOT NULL,
+        changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        changed_by BIGINT NULL,
+        old_status_id BIGINT NULL,
+        new_status_id BIGINT NULL,
+        old_flag_id BIGINT NULL,
+        new_flag_id BIGINT NULL,
+        note TEXT NULL,
+        CONSTRAINT fk_fb_hist_status_old FOREIGN KEY (old_status_id) REFERENCES fb_statuses (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_hist_status_new FOREIGN KEY (new_status_id) REFERENCES fb_statuses (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_hist_flag_old FOREIGN KEY (old_flag_id) REFERENCES fb_flags (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_hist_flag_new FOREIGN KEY (new_flag_id) REFERENCES fb_flags (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_hist_user FOREIGN KEY (changed_by) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
     placeholders = ",".join(["%s"] * len(sale_like))
     query = f"""
         SELECT COALESCE(SUM(payout), 0)
@@ -764,6 +965,28 @@ async def list_aliases() -> List[Dict[str, Any]]:
             await cur.execute("SELECT alias, buyer_id, lead_id FROM tg_aliases ORDER BY alias ASC")
             return await cur.fetchall()
 
+
+async def fetch_alias_map(aliases: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    names = [a.strip().lower() for a in aliases if a and a.strip()]
+    if not names:
+        return {}
+    pool = await init_pool()
+    placeholders = ",".join(["%s"] * len(names))
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                f"SELECT alias, buyer_id, lead_id FROM tg_aliases WHERE alias IN ({placeholders})",
+                tuple(names),
+            )
+            rows = await cur.fetchall()
+    result: Dict[str, Dict[str, Any]] = {}
+    for row in rows or []:
+        alias = (row.get("alias") or "").strip().lower()
+        if not alias:
+            continue
+        result[alias] = row
+    return result
+
 async def replace_keitaro_campaigns(rows: List[Dict[str, Any]]) -> None:
     """Replace cached Keitaro campaigns with the provided collection."""
     pool = await init_pool()
@@ -897,6 +1120,66 @@ async def delete_alias(alias: str) -> None:
         async with conn.cursor() as cur:
             await cur.execute("DELETE FROM tg_aliases WHERE alias=%s", (alias.lower(),))
 
+
+async def infer_campaign_buyers(identifiers: Iterable[str], lookback_days: int = 45) -> Dict[str, int]:
+    names = {s.strip().lower() for s in identifiers if s and isinstance(s, str) and s.strip()}
+    if not names:
+        return {}
+    pool = await init_pool()
+    placeholders = ",".join(["%s"] * len(names))
+    cname_expr = """
+        LOWER(
+            COALESCE(
+                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id_2')), ''),
+                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub2')), ''),
+                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id2')), ''),
+                NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.campaign')), '')
+            )
+        )
+    """
+    start_ts = datetime.utcnow() - timedelta(days=max(1, lookback_days))
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                f"""
+                SELECT
+                    campaign_name,
+                    routed_user_id,
+                    cnt,
+                    last_event
+                FROM (
+                    SELECT
+                        {cname_expr} AS campaign_name,
+                        routed_user_id,
+                        COUNT(*) AS cnt,
+                        MAX(created_at) AS last_event
+                    FROM tg_events
+                    WHERE created_at >= %s
+                      AND routed_user_id IS NOT NULL
+                    GROUP BY campaign_name, routed_user_id
+                ) agg
+                WHERE campaign_name IS NOT NULL
+                  AND campaign_name <> ''
+                  AND campaign_name IN ({placeholders})
+                ORDER BY campaign_name ASC, cnt DESC, last_event DESC
+                """,
+                (start_ts, *names),
+            )
+            rows = await cur.fetchall()
+    result: Dict[str, int] = {}
+    for row in rows or []:
+        campaign_name = (row.get("campaign_name") or "").strip().lower()
+        routed_user_id = row.get("routed_user_id")
+        if not campaign_name or routed_user_id is None:
+            continue
+        if campaign_name in result:
+            continue
+        try:
+            result[campaign_name] = int(routed_user_id)
+        except Exception:
+            continue
+    return result
+
 async def set_pending_action(admin_id: int, action: str, target_user_id: Optional[int]) -> None:
     pool = await init_pool()
     async with pool.acquire() as conn:
@@ -961,3 +1244,460 @@ async def list_team_mentors(team_id: int) -> List[int]:
             await cur.execute("SELECT mentor_id FROM tg_mentor_teams WHERE team_id=%s", (team_id,))
             rows = await cur.fetchall()
             return [int(r[0]) for r in rows]
+
+
+# --- Facebook CSV uploads / analytics helpers ---
+
+async def create_fb_csv_upload(
+    uploaded_by: int,
+    buyer_id: Optional[int],
+    original_filename: str,
+    period_start: Optional[date],
+    period_end: Optional[date],
+    row_count: int,
+    has_totals: bool
+) -> int:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO fb_csv_uploads(uploaded_by, buyer_id, original_filename, period_start, period_end, row_count, has_totals)
+                VALUES(%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    uploaded_by,
+                    buyer_id,
+                    original_filename,
+                    period_start,
+                    period_end,
+                    row_count,
+                    1 if has_totals else 0,
+                )
+            )
+            return cur.lastrowid
+
+
+async def bulk_insert_fb_csv_rows(upload_id: int, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    pool = await init_pool()
+    payload = []
+    for row in rows:
+        payload.append(
+            (
+                upload_id,
+                row.get("account_name"),
+                row.get("campaign_name"),
+                row.get("adset_name"),
+                row.get("ad_name"),
+                row.get("day_date"),
+                row.get("currency"),
+                row.get("spend"),
+                row.get("impressions"),
+                row.get("clicks"),
+                row.get("leads"),
+                row.get("registrations"),
+                row.get("cpc"),
+                row.get("ctr"),
+                1 if row.get("is_total") else 0,
+            )
+        )
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO fb_csv_rows(
+                    upload_id, account_name, campaign_name, adset_name, ad_name,
+                    day_date, currency, spend, impressions, clicks, leads,
+                    registrations, cpc, ctr, is_total
+                )
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                payload,
+            )
+
+
+async def upsert_fb_accounts(records: List[Dict[str, Any]]) -> None:
+    if not records:
+        return
+    pool = await init_pool()
+    payload = []
+    for row in records:
+        payload.append(
+            (
+                row.get("account_name"),
+                row.get("buyer_id"),
+                row.get("owner_since"),
+            )
+        )
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO fb_accounts(account_name, buyer_id, owner_since)
+                VALUES(%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    buyer_id=VALUES(buyer_id),
+                    owner_since=COALESCE(owner_since, VALUES(owner_since)),
+                    owner_until=NULL,
+                    updated_at=CURRENT_TIMESTAMP,
+                    is_active=1
+                """,
+                payload,
+            )
+
+
+async def upsert_fb_campaign_daily(records: List[Dict[str, Any]]) -> None:
+    if not records:
+        return
+    pool = await init_pool()
+    payload = []
+    for row in records:
+        payload.append(
+            (
+                row.get("campaign_name"),
+                row.get("day_date"),
+                row.get("account_name"),
+                row.get("buyer_id"),
+                row.get("geo"),
+                row.get("spend"),
+                row.get("impressions"),
+                row.get("clicks"),
+                row.get("registrations"),
+                row.get("leads"),
+                row.get("ftd"),
+                row.get("revenue"),
+                row.get("ctr"),
+                row.get("cpc"),
+                row.get("roi"),
+                row.get("ftd_rate"),
+                row.get("status_id"),
+                row.get("flag_id"),
+                row.get("upload_id"),
+            )
+        )
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO fb_campaign_daily(
+                    campaign_name, day_date, account_name, buyer_id, geo,
+                    spend, impressions, clicks, registrations, leads, ftd, revenue,
+                    ctr, cpc, roi, ftd_rate, status_id, flag_id, upload_id
+                )
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    account_name=VALUES(account_name),
+                    buyer_id=VALUES(buyer_id),
+                    geo=VALUES(geo),
+                    spend=VALUES(spend),
+                    impressions=VALUES(impressions),
+                    clicks=VALUES(clicks),
+                    registrations=VALUES(registrations),
+                    leads=VALUES(leads),
+                    ftd=VALUES(ftd),
+                    revenue=VALUES(revenue),
+                    ctr=VALUES(ctr),
+                    cpc=VALUES(cpc),
+                    roi=VALUES(roi),
+                    ftd_rate=VALUES(ftd_rate),
+                    status_id=VALUES(status_id),
+                    flag_id=VALUES(flag_id),
+                    upload_id=VALUES(upload_id)
+                """,
+                payload,
+            )
+
+
+async def upsert_fb_campaign_totals(records: List[Dict[str, Any]]) -> None:
+    if not records:
+        return
+    pool = await init_pool()
+    payload = []
+    for row in records:
+        payload.append(
+            (
+                row.get("campaign_name"),
+                row.get("account_name"),
+                row.get("buyer_id"),
+                row.get("geo"),
+                row.get("spend"),
+                row.get("impressions"),
+                row.get("clicks"),
+                row.get("registrations"),
+                row.get("leads"),
+                row.get("ftd"),
+                row.get("revenue"),
+                row.get("ctr"),
+                row.get("cpc"),
+                row.get("roi"),
+                row.get("ftd_rate"),
+                row.get("status_id"),
+                row.get("flag_id"),
+            )
+        )
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO fb_campaign_totals(
+                    campaign_name, account_name, buyer_id, geo, spend, impressions, clicks,
+                    registrations, leads, ftd, revenue, ctr, cpc, roi, ftd_rate, status_id, flag_id
+                )
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    account_name=VALUES(account_name),
+                    buyer_id=VALUES(buyer_id),
+                    geo=VALUES(geo),
+                    spend=VALUES(spend),
+                    impressions=VALUES(impressions),
+                    clicks=VALUES(clicks),
+                    registrations=VALUES(registrations),
+                    leads=VALUES(leads),
+                    ftd=VALUES(ftd),
+                    revenue=VALUES(revenue),
+                    ctr=VALUES(ctr),
+                    cpc=VALUES(cpc),
+                    roi=VALUES(roi),
+                    ftd_rate=VALUES(ftd_rate),
+                    status_id=VALUES(status_id),
+                    flag_id=VALUES(flag_id)
+                """,
+                payload,
+            )
+
+
+async def fetch_fb_campaign_state(campaign_names: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    names = [c for c in campaign_names if c]
+    if not names:
+        return {}
+    pool = await init_pool()
+    placeholders = ",".join(["%s"] * len(names))
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                f"SELECT campaign_name, status_id, flag_id, buyer_comment, lead_comment, updated_by, updated_at FROM fb_campaign_state WHERE campaign_name IN ({placeholders})",
+                tuple(names),
+            )
+            rows = await cur.fetchall()
+    return {str(row["campaign_name"]): row for row in rows}
+
+
+async def upsert_fb_campaign_state(states: List[Dict[str, Any]]) -> None:
+    if not states:
+        return
+    pool = await init_pool()
+    payload = []
+    for row in states:
+        payload.append(
+            (
+                row.get("campaign_name"),
+                row.get("status_id"),
+                row.get("flag_id"),
+                row.get("buyer_comment"),
+                row.get("lead_comment"),
+                row.get("updated_by"),
+            )
+        )
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO fb_campaign_state(campaign_name, status_id, flag_id, buyer_comment, lead_comment, updated_by)
+                VALUES(%s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    status_id=VALUES(status_id),
+                    flag_id=VALUES(flag_id),
+                    buyer_comment=VALUES(buyer_comment),
+                    lead_comment=VALUES(lead_comment),
+                    updated_by=VALUES(updated_by)
+                """,
+                payload,
+            )
+
+
+async def log_fb_campaign_history(entries: List[Dict[str, Any]]) -> None:
+    if not entries:
+        return
+    pool = await init_pool()
+    payload = []
+    for row in entries:
+        payload.append(
+            (
+                row.get("campaign_name"),
+                row.get("changed_by"),
+                row.get("old_status_id"),
+                row.get("new_status_id"),
+                row.get("old_flag_id"),
+                row.get("new_flag_id"),
+                row.get("note"),
+            )
+        )
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO fb_campaign_history(
+                    campaign_name, changed_by, old_status_id, new_status_id, old_flag_id, new_flag_id, note
+                )
+                VALUES(%s, %s, %s, %s, %s, %s, %s)
+                """,
+                payload,
+            )
+
+
+async def list_fb_statuses() -> List[Dict[str, Any]]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT id, code, title, description FROM fb_statuses ORDER BY id ASC")
+            return await cur.fetchall()
+
+
+async def list_fb_flags() -> List[Dict[str, Any]]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute("SELECT id, code, title, severity, description FROM fb_flags ORDER BY severity DESC, id ASC")
+            return await cur.fetchall()
+
+
+async def fetch_keitaro_campaign_stats(
+    campaign_names: Iterable[str],
+    period_start: Optional[date],
+    period_end: Optional[date]
+) -> Dict[str, Dict[Any, Any]]:
+    names = [c.strip() for c in campaign_names if c and c.strip()]
+    if not names or not period_start or not period_end:
+        return {"daily": {}, "totals": {}}
+    start = min(period_start, period_end)
+    end = max(period_start, period_end)
+    pool = await init_pool()
+    placeholders_names = ",".join(["%s"] * len(names))
+    sale_like = (
+        "sale",
+        "approved",
+        "approve",
+        "confirmed",
+        "confirm",
+        "purchase",
+        "paid",
+        "success",
+        "ftd",
+    )
+    placeholders_status = ",".join(["%s"] * len(sale_like))
+    query = f"""
+        SELECT
+            t.campaign_name,
+            t.day_date,
+            COUNT(*) AS ftd,
+            SUM(COALESCE(t.payout, 0)) AS revenue
+        FROM (
+            SELECT
+                DATE(created_at) AS day_date,
+                COALESCE(
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id_2')), ''),
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub2')), ''),
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id2')), ''),
+                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.campaign')), '')
+                ) AS campaign_name,
+                LOWER(TRIM(COALESCE(status, ''))) AS status_norm,
+                payout
+            FROM tg_events
+            WHERE created_at >= %s AND created_at < %s
+        ) AS t
+        WHERE t.campaign_name IS NOT NULL
+          AND t.campaign_name IN ({placeholders_names})
+          AND t.status_norm IN ({placeholders_status})
+        GROUP BY t.campaign_name, t.day_date
+    """
+    params: List[Any] = [start, end + timedelta(days=1)]
+    params.extend(names)
+    params.extend(sale_like)
+    daily: Dict[Tuple[str, date], Dict[str, Any]] = {}
+    totals: Dict[str, Dict[str, Any]] = {}
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(query, tuple(params))
+            rows = await cur.fetchall()
+    for row in rows or []:
+        campaign = str(row.get("campaign_name"))
+        day = row.get("day_date")
+        ftd = int(row.get("ftd") or 0)
+        revenue = float(row.get("revenue") or 0)
+        daily[(campaign, day)] = {"ftd": ftd, "revenue": revenue}
+        agg = totals.setdefault(campaign, {"ftd": 0, "revenue": 0.0})
+        agg["ftd"] += ftd
+        agg["revenue"] += revenue
+    return {"daily": daily, "totals": totals}
+
+
+async def recompute_fb_campaign_totals(campaign_names: Iterable[str]) -> List[Dict[str, Any]]:
+    names = [c.strip() for c in campaign_names if c and c.strip()]
+    if not names:
+        return []
+    pool = await init_pool()
+    placeholders = ",".join(["%s"] * len(names))
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                f"""
+                SELECT
+                    campaign_name,
+                    MAX(account_name) AS account_name,
+                    MAX(buyer_id) AS buyer_id,
+                    MAX(geo) AS geo,
+                    SUM(COALESCE(spend, 0)) AS spend,
+                    SUM(COALESCE(impressions, 0)) AS impressions,
+                    SUM(COALESCE(clicks, 0)) AS clicks,
+                    SUM(COALESCE(registrations, 0)) AS registrations,
+                    SUM(COALESCE(leads, 0)) AS leads,
+                    SUM(COALESCE(ftd, 0)) AS ftd,
+                    SUM(COALESCE(revenue, 0)) AS revenue
+                FROM fb_campaign_daily
+                WHERE campaign_name IN ({placeholders})
+                GROUP BY campaign_name
+                """,
+                tuple(names),
+            )
+            rows = await cur.fetchall()
+    state_map = await fetch_fb_campaign_state(names)
+    records: List[Dict[str, Any]] = []
+    for row in rows or []:
+        campaign = str(row.get("campaign_name"))
+        spend = float(row.get("spend") or 0.0)
+        impressions = int(row.get("impressions") or 0)
+        clicks = int(row.get("clicks") or 0)
+        registrations = int(row.get("registrations") or 0)
+        ftd = int(row.get("ftd") or 0)
+        revenue = float(row.get("revenue") or 0.0)
+        ctr = (clicks / impressions * 100) if impressions else None
+        cpc = (spend / clicks) if clicks else None
+        roi = ((revenue - spend) / spend * 100) if spend else None
+        ftd_rate = (ftd / registrations * 100) if registrations else None
+        state = state_map.get(campaign) or {}
+        records.append(
+            {
+                "campaign_name": campaign,
+                "account_name": row.get("account_name"),
+                "buyer_id": row.get("buyer_id"),
+                "geo": row.get("geo"),
+                "spend": spend,
+                "impressions": impressions,
+                "clicks": clicks,
+                "registrations": registrations,
+                "leads": int(row.get("leads") or 0),
+                "ftd": ftd,
+                "revenue": revenue,
+                "ctr": ctr,
+                "cpc": cpc,
+                "roi": roi,
+                "ftd_rate": ftd_rate,
+                "status_id": state.get("status_id"),
+                "flag_id": state.get("flag_id"),
+            }
+        )
+    if records:
+        await upsert_fb_campaign_totals(records)
+    return records
