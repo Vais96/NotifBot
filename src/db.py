@@ -1675,8 +1675,21 @@ async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, An
     else:
         month_end = date(normalized.year, normalized.month + 1, 1)
     pool = await init_pool()
+    sale_like = (
+        "sale",
+        "approved",
+        "approve",
+        "confirmed",
+        "confirm",
+        "purchase",
+        "purchased",
+        "paid",
+        "success",
+        "ftd",
+    )
+    placeholders_status = ",".join(["%s"] * len(sale_like))
     query = (
-        """
+        f"""
         WITH month_data AS (
             SELECT
                 d.campaign_name,
@@ -1692,6 +1705,19 @@ async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, An
             FROM fb_campaign_daily d
             WHERE d.day_date >= %s AND d.day_date < %s
             GROUP BY d.campaign_name
+                        ),
+                        conversion_data AS (
+            SELECT
+                fc.sub_id_2 AS campaign_name,
+                COUNT(*) AS ftd,
+                SUM(COALESCE(fc.revenue, 0)) AS revenue
+            FROM fact_conversions fc
+            WHERE fc.conversion_time_utc >= %s
+              AND fc.conversion_time_utc < %s
+              AND fc.sub_id_2 IS NOT NULL
+              AND fc.sub_id_2 <> ''
+                                    AND LOWER(fc.status) IN ({placeholders_status})
+            GROUP BY fc.sub_id_2
         ),
         prev_flags AS (
             SELECT campaign_name, new_flag_id, changed_at
@@ -1721,8 +1747,8 @@ async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, An
             md.clicks,
             md.registrations,
             md.leads,
-            md.ftd,
-            md.revenue,
+            COALESCE(conv.ftd, md.ftd, 0) AS ftd,
+            COALESCE(conv.revenue, md.revenue, 0) AS revenue,
             prev_flags.new_flag_id AS prev_flag_id,
             prev_flags.changed_at AS prev_flag_changed_at,
             curr_flags.new_flag_id AS curr_flag_id,
@@ -1730,43 +1756,96 @@ async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, An
             st.flag_id AS state_flag_id,
             st.status_id AS state_status_id
         FROM month_data md
+        LEFT JOIN conversion_data conv ON conv.campaign_name = md.campaign_name
         LEFT JOIN prev_flags ON prev_flags.campaign_name = md.campaign_name
         LEFT JOIN curr_flags ON curr_flags.campaign_name = md.campaign_name
         LEFT JOIN fb_campaign_state st ON st.campaign_name = md.campaign_name
         ORDER BY md.spend DESC
         """
     )
-    params = (normalized, month_end, normalized)
+    params: List[Any] = [normalized, month_end, normalized, month_end]
+    params.extend(sale_like)
+    params.append(normalized)
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(query, params)
+            await cur.execute(query, tuple(params))
             rows = await cur.fetchall()
     return rows or []
 
 
 async def fetch_fb_monthly_summary(limit: int = 12) -> List[Dict[str, Any]]:
     pool = await init_pool()
+    sale_like = (
+        "sale",
+        "approved",
+        "approve",
+        "confirmed",
+        "confirm",
+        "purchase",
+        "purchased",
+        "paid",
+        "success",
+        "ftd",
+    )
+    placeholders_status = ",".join(["%s"] * len(sale_like))
     query = (
-        """
+        f"""
+        WITH monthly_fb AS (
+            SELECT
+                DATE_SUB(d.day_date, INTERVAL DAY(d.day_date) - 1 DAY) AS month_start,
+                COUNT(DISTINCT d.campaign_name) AS campaign_count,
+                COUNT(DISTINCT d.account_name) AS account_count,
+                SUM(COALESCE(d.spend, 0)) AS spend,
+                SUM(COALESCE(d.impressions, 0)) AS impressions,
+                SUM(COALESCE(d.clicks, 0)) AS clicks,
+                SUM(COALESCE(d.registrations, 0)) AS registrations
+            FROM fb_campaign_daily d
+            GROUP BY month_start
+        ),
+        monthly_conv AS (
+            SELECT
+                DATE_SUB(DATE(fc.conversion_time_utc), INTERVAL DAY(DATE(fc.conversion_time_utc)) - 1 DAY) AS month_start,
+                COUNT(DISTINCT fc.sub_id_2) AS campaign_count,
+                COUNT(*) AS ftd,
+                SUM(COALESCE(fc.revenue, 0)) AS revenue
+            FROM fact_conversions fc
+            WHERE fc.sub_id_2 IS NOT NULL
+              AND fc.sub_id_2 <> ''
+              AND LOWER(fc.status) IN ({placeholders_status})
+              AND EXISTS (
+                    SELECT 1
+                    FROM fb_campaign_daily d
+                    WHERE d.campaign_name = fc.sub_id_2
+                )
+            GROUP BY month_start
+        ),
+        all_months AS (
+            SELECT month_start FROM monthly_fb
+            UNION
+            SELECT month_start FROM monthly_conv
+        )
         SELECT
-            DATE_SUB(day_date, INTERVAL DAY(day_date) - 1 DAY) AS month_start,
-            COUNT(DISTINCT campaign_name) AS campaign_count,
-            COUNT(DISTINCT account_name) AS account_count,
-            SUM(COALESCE(spend, 0)) AS spend,
-            SUM(COALESCE(revenue, 0)) AS revenue,
-            SUM(COALESCE(ftd, 0)) AS ftd,
-            SUM(COALESCE(impressions, 0)) AS impressions,
-            SUM(COALESCE(clicks, 0)) AS clicks,
-            SUM(COALESCE(registrations, 0)) AS registrations
-        FROM fb_campaign_daily
-        GROUP BY month_start
-        ORDER BY month_start DESC
+            am.month_start,
+            COALESCE(fb.campaign_count, conv.campaign_count, 0) AS campaign_count,
+            COALESCE(fb.account_count, 0) AS account_count,
+            COALESCE(fb.spend, 0) AS spend,
+            COALESCE(conv.revenue, 0) AS revenue,
+            COALESCE(conv.ftd, 0) AS ftd,
+            COALESCE(fb.impressions, 0) AS impressions,
+            COALESCE(fb.clicks, 0) AS clicks,
+            COALESCE(fb.registrations, 0) AS registrations
+        FROM all_months am
+        LEFT JOIN monthly_fb fb ON fb.month_start = am.month_start
+        LEFT JOIN monthly_conv conv ON conv.month_start = am.month_start
+        ORDER BY am.month_start DESC
         LIMIT %s
         """
     )
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(query, (limit,))
+            params: List[Any] = list(sale_like)
+            params.append(limit)
+            await cur.execute(query, tuple(params))
             rows = await cur.fetchall()
     result: List[Dict[str, Any]] = []
     for row in rows or []:
