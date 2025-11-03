@@ -154,11 +154,34 @@ async def _send_reports_menu(chat_id: int, actor_id: int):
 
 
 def _build_fb_month_keyboard(kind: str, months: list[date]) -> InlineKeyboardMarkup:
-    buttons: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
+    today_month = date.today().replace(day=1)
+    seen: set[date] = {today_month}
+    entries: list[tuple[str, date]] = [("📅 Текущий месяц", today_month)]
     for month in months:
-        label = _month_label_ru(month)
-        row.append(InlineKeyboardButton(text=label, callback_data=f"report:fb:month:{kind}:{month.isoformat()}"))
+        normalized = month.replace(day=1)
+        if normalized in seen:
+            continue
+        entries.append((_month_label_ru(normalized), normalized))
+        seen.add(normalized)
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    # first button for current month as a single row
+    if entries:
+        label, value = entries[0]
+        buttons.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"report:fb:month:{kind}:{value.isoformat()}",
+            )
+        ])
+    row: list[InlineKeyboardButton] = []
+    for label, value in entries[1:]:
+        row.append(
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"report:fb:month:{kind}:{value.isoformat()}",
+            )
+        )
         if len(row) == 2:
             buttons.append(row)
             row = []

@@ -1744,6 +1744,50 @@ async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, An
     return rows or []
 
 
+async def fetch_fb_monthly_summary(limit: int = 12) -> List[Dict[str, Any]]:
+    pool = await init_pool()
+    query = (
+        """
+        SELECT
+            DATE_SUB(day_date, INTERVAL DAY(day_date) - 1 DAY) AS month_start,
+            COUNT(DISTINCT campaign_name) AS campaign_count,
+            COUNT(DISTINCT account_name) AS account_count,
+            SUM(COALESCE(spend, 0)) AS spend,
+            SUM(COALESCE(revenue, 0)) AS revenue,
+            SUM(COALESCE(ftd, 0)) AS ftd,
+            SUM(COALESCE(impressions, 0)) AS impressions,
+            SUM(COALESCE(clicks, 0)) AS clicks,
+            SUM(COALESCE(registrations, 0)) AS registrations
+        FROM fb_campaign_daily
+        GROUP BY month_start
+        ORDER BY month_start DESC
+        LIMIT %s
+        """
+    )
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(query, (limit,))
+            rows = await cur.fetchall()
+    result: List[Dict[str, Any]] = []
+    for row in rows or []:
+        value = row.get("month_start")
+        month_value: Optional[date] = None
+        if isinstance(value, datetime):
+            month_value = value.date().replace(day=1)
+        elif isinstance(value, date):
+            month_value = value.replace(day=1)
+        elif isinstance(value, str):
+            try:
+                month_value = datetime.strptime(value, "%Y-%m-%d").date().replace(day=1)
+            except ValueError:
+                month_value = None
+        if month_value is None:
+            continue
+        row["month_start"] = month_value
+        result.append(row)
+    return result
+
+
 async def recompute_fb_campaign_totals(campaign_names: Iterable[str]) -> List[Dict[str, Any]]:
     names = [c.strip() for c in campaign_names if c and c.strip()]
     if not names:
