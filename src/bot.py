@@ -44,6 +44,90 @@ def _canonical_alias_key(value: Optional[str]) -> Optional[str]:
         return None
     return _ALIAS_OVERRIDES.get(normalized, normalized)
 
+
+def _chunk_lines(lines: List[str], limit: int = 3500) -> List[str]:
+    if not lines:
+        return [""]
+    messages: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for raw in lines:
+        segment = raw or ""
+        appended_len = len(segment) + 1
+        if current and current_len + appended_len > limit:
+            messages.append("\n".join(current))
+            current = [segment]
+            current_len = len(segment)
+            continue
+        if len(segment) > limit:
+            if current:
+                messages.append("\n".join(current))
+                current = []
+                current_len = 0
+            for i in range(0, len(segment), limit):
+                messages.append(segment[i : i + limit])
+            continue
+        current.append(segment)
+        current_len += appended_len
+    if current:
+        messages.append("\n".join(current))
+    return messages or [""]
+
+
+def _parse_decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+    if value is None:
+        return default
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return default
+
+
+def _parse_decimal_optional(value: Any) -> Optional[Decimal]:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _build_account_detail_messages(payload: Dict[str, Any]) -> List[str]:
+    account_name = str(payload.get("account_name") or "Без кабинета")
+    flag_label = str(payload.get("flag_label") or "—")
+    spend_value = _parse_decimal(payload.get("spend"))
+    revenue_value = _parse_decimal(payload.get("revenue"))
+    roi_value = _parse_decimal_optional(payload.get("roi"))
+    if roi_value is None and spend_value:
+        roi_value = (revenue_value - spend_value) / spend_value * Decimal(100)
+    ftd_value = int(payload.get("ftd") or 0)
+    campaign_count = int(payload.get("campaign_count") or 0)
+    ctr_value = _parse_decimal_optional(payload.get("ctr"))
+    ftd_rate_value = _parse_decimal_optional(payload.get("ftd_rate"))
+    lines: List[str] = []
+    lines.append(f"<b>{html.escape(account_name)}</b>")
+    lines.append("Флаг кабинета: " + html.escape(flag_label))
+    lines.append(
+        f"Spend {_fmt_money(spend_value)} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)} | FTD {ftd_value} | Кампаний {campaign_count}"
+    )
+    lines.append(f"CTR {_fmt_percent(ctr_value)} | FTD rate {_fmt_percent(ftd_rate_value)}")
+    campaign_lines = payload.get("campaign_lines") or []
+    if campaign_lines:
+        lines.append("")
+        lines.append("<b>Кампании:</b>")
+        for idx, item in enumerate(campaign_lines):
+            lines.append(str(item))
+            if idx < len(campaign_lines) - 1:
+                lines.append("")
+    else:
+        lines.append("")
+        lines.append("Кампаний не найдено для этого кабинета.")
+    return _chunk_lines(lines)
+
 # Helper: resolve user reference to Telegram ID (supports numeric ID, @username, tg://user?id=...)
 async def _resolve_user_id(identifier: str) -> int:
     s = (identifier or "").strip()
@@ -1963,97 +2047,54 @@ async def on_fb_upload_account_detail(callback: CallbackQuery):
         logger.warning("Failed to decode FB account payload", exc_info=exc)
         await callback.answer("Ошибка чтения данных.", show_alert=True)
         return
-    account_name = str(payload.get("account_name") or "Без кабинета")
-    flag_label = str(payload.get("flag_label") or "—")
-    spend_raw = payload.get("spend")
-    revenue_raw = payload.get("revenue")
-    roi_raw = payload.get("roi")
-    ftd_value = int(payload.get("ftd") or 0)
-    campaign_count = int(payload.get("campaign_count") or 0)
-    try:
-        spend_value = Decimal(str(spend_raw)) if spend_raw is not None else Decimal("0")
-    except Exception:
-        spend_value = Decimal("0")
-    try:
-        revenue_value = Decimal(str(revenue_raw)) if revenue_raw is not None else Decimal("0")
-    except Exception:
-        revenue_value = Decimal("0")
-    roi_value: Optional[Decimal]
-    if roi_raw is not None:
-        try:
-            roi_value = Decimal(str(roi_raw))
-        except Exception:
-            roi_value = None
-    else:
-        roi_value = ((revenue_value - spend_value) / spend_value * Decimal(100)) if spend_value else None
-    lines: List[str] = []
-    lines.append(f"<b>{html.escape(account_name)}</b>")
-    lines.append("Флаг кабинета: " + html.escape(flag_label))
-    lines.append(
-        f"Spend {_fmt_money(spend_value)} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)} | FTD {ftd_value} | Кампаний {campaign_count}"
-    )
-    ctr_raw = payload.get("ctr")
-    ftd_rate_raw = payload.get("ftd_rate")
-    try:
-        ctr_value = Decimal(str(ctr_raw)) if ctr_raw is not None else None
-    except Exception:
-        ctr_value = None
-    try:
-        ftd_rate_value = Decimal(str(ftd_rate_raw)) if ftd_rate_raw is not None else None
-    except Exception:
-        ftd_rate_value = None
-
-    campaign_lines = payload.get("campaign_lines") or []
-    if campaign_lines:
-        lines.append("")
-        lines.append("<b>Кампании:</b>")
-        for idx, item in enumerate(campaign_lines):
-            lines.append(str(item))
-            if idx < len(campaign_lines) - 1:
-                lines.append("")
-    else:
-        lines.append("")
-        lines.append("Кампаний не найдено для этого кабинета в загрузке.")
-    details_line = (
-        f"CTR {_fmt_percent(ctr_value)} | FTD rate {_fmt_percent(ftd_rate_value)}"
-    )
-    lines.insert(3, details_line)
-
-    def _chunk_text(parts: List[str], limit: int = 3500) -> List[str]:
-        messages: List[str] = []
-        current: List[str] = []
-        current_len = 0
-        for raw in parts:
-            segment = raw or ""
-            appended_len = len(segment) + 1
-            if current and current_len + appended_len > limit:
-                messages.append("\n".join(current))
-                current = [segment]
-                current_len = len(segment)
-                continue
-            if len(segment) > limit:
-                # hard split oversized segments
-                for i in range(0, len(segment), limit):
-                    chunk = segment[i : i + limit]
-                    if current:
-                        messages.append("\n".join(current))
-                        current = []
-                        current_len = 0
-                    messages.append(chunk)
-                continue
-            current.append(segment)
-            current_len += appended_len
-        if current:
-            messages.append("\n".join(current))
-        return messages or [""]
-
-    chunks = _chunk_text(lines)
+    chunks = _build_account_detail_messages(payload)
     target_chat = callback.message.chat.id if callback.message else callback.from_user.id
     try:
         for chunk in chunks:
             await bot.send_message(target_chat, chunk, parse_mode=ParseMode.HTML)
     except Exception as exc:
         logger.warning("Failed to send FB account detail", exc_info=exc)
+        await callback.answer("Не удалось отправить сообщение.", show_alert=True)
+        return
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("fbar:"))
+async def on_fb_report_account_detail(callback: CallbackQuery):
+    data = callback.data or ""
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Некорректный запрос.", show_alert=True)
+        return
+    _, month_raw, idx_str = parts
+    try:
+        idx = int(idx_str)
+    except Exception:
+        await callback.answer("Некорректный индекс.", show_alert=True)
+        return
+    kind = f"fbar:{month_raw}"
+    try:
+        cached = await db.get_ui_cache_value(callback.from_user.id, kind, idx)
+    except Exception as exc:
+        logger.warning("Failed to read FB report account cache", exc_info=exc)
+        await callback.answer("Не удалось прочитать данные.", show_alert=True)
+        return
+    if not cached:
+        await callback.answer("Данные устарели. Перестройте отчёт.", show_alert=True)
+        return
+    try:
+        payload = json.loads(cached)
+    except Exception as exc:
+        logger.warning("Failed to decode FB report account payload", exc_info=exc)
+        await callback.answer("Ошибка чтения данных.", show_alert=True)
+        return
+    chunks = _build_account_detail_messages(payload)
+    target_chat = callback.message.chat.id if callback.message else callback.from_user.id
+    try:
+        for chunk in chunks:
+            await bot.send_message(target_chat, chunk, parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        logger.warning("Failed to send FB report account detail", exc_info=exc)
         await callback.answer("Не удалось отправить сообщение.", show_alert=True)
         return
     await callback.answer()
@@ -2858,6 +2899,7 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
     total_clicks = 0
     total_registrations = 0
     max_items = 20
+    display_count = min(max_items, len(rows))
     lines: list[str] = []
     for idx, row in enumerate(rows, start=1):
         spend = _as_decimal(row.get("spend"))
@@ -2889,6 +2931,8 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
                 f"Флаг: {prev_flag_label} → {curr_flag_label}"
             )
             lines.append(line)
+            if idx < display_count:
+                lines.append("")
     header_lines = [
         f"<b>FB кампании — {html.escape(_month_label_ru(month))}</b>",
         f"Кампаний с активностью: <b>{len(rows)}</b>",
@@ -2903,15 +2947,21 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
         header_lines.append(f"CTR: <b>{_fmt_percent(ctr)}</b> ({total_clicks}/{total_impressions})")
     if total_registrations:
         header_lines.append(f"Регистраций: <b>{total_registrations}</b>")
-    text = "\n".join(header_lines)
+    all_lines: List[str] = header_lines[:]
     if lines:
-        text += "\n\n" + "\n".join(lines)
+        all_lines.append("")
+        all_lines.extend(lines)
+        if len(rows) > max_items:
+            all_lines.append("")
+            all_lines.append(f"Показаны первые {max_items} кампаний из {len(rows)}.")
     if len(rows) > max_items:
-        text += f"\n\nПоказаны первые {max_items} кампаний из {len(rows)}."
-    await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+        pass
+    chunks = _chunk_lines(all_lines)
+    for chunk in chunks:
+        await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
 
 
-async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
+async def _send_fb_account_report(chat_id: int, month_start: date, requester_id: int) -> None:
     month = month_start.replace(day=1)
     rows = await db.fetch_fb_campaign_month_report(month)
     if not rows:
@@ -2961,6 +3011,7 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
                 "prev_flag_severity": -1,
                 "curr_flag_id": None,
                 "curr_flag_severity": -1,
+                "campaign_lines": [],
             },
         )
         spend = _as_decimal(row.get("spend"))
@@ -2984,6 +3035,18 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
         campaign_name = row.get("campaign_name")
         if campaign_name:
             entry["campaigns"].add(str(campaign_name))
+        roi_single = ((revenue - spend) / spend * Decimal(100)) if spend else None
+        ftd_rate_single = (Decimal(ftd) / Decimal(registrations) * Decimal(100)) if registrations else None
+        ctr_single = (Decimal(clicks) / Decimal(impressions) * Decimal(100)) if impressions else None
+        campaign_decision = fb_csv.decide_flag(spend, ctr_single, roi_single, ftd)
+        campaign_flag = _format_flag_decision(campaign_decision)
+        entry.setdefault("campaign_lines", []).append(
+            "• <code>"
+            + html.escape(str(campaign_name or "—"))
+            + "</code> — "
+            + html.escape(campaign_flag)
+            + f". Spend {_fmt_money(spend)} | FTD {ftd} | Rev {_fmt_money(revenue)} | ROI {_fmt_percent(roi_single)}"
+        )
         prev_flag_id = row.get("prev_flag_id")
         if prev_flag_id is not None:
             try:
@@ -3018,6 +3081,14 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
         roi_value = ((revenue - spend) / spend * Decimal(100)) if spend else None
         decision = fb_csv.decide_flag(spend, ctr_value, roi_value, info["ftd"])
         info["decision"] = decision
+        info["roi"] = roi_value
+        info["ctr"] = ctr_value
+        info["ftd_rate"] = (
+            (Decimal(info["ftd"]) / Decimal(registrations) * Decimal(100))
+            if registrations
+            else None
+        )
+        info["flag_label"] = _format_flag_decision(decision)
     sorted_accounts = sorted(accounts.items(), key=lambda item: item[1]["spend"], reverse=True)
     total_spend = sum((info["spend"] for _, info in sorted_accounts), Decimal("0"))
     total_revenue = sum((info["revenue"] for _, info in sorted_accounts), Decimal("0"))
@@ -3027,6 +3098,10 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
     total_registrations = sum(info["registrations"] for _, info in sorted_accounts)
     lines: list[str] = []
     max_items = 20
+    display_count = min(max_items, len(sorted_accounts))
+    account_cache_values: List[str] = []
+    account_keyboard_rows: List[List[InlineKeyboardButton]] = []
+    cache_kind = f"fbar:{month.isoformat()}"
     for idx, (account_name_raw, info) in enumerate(sorted_accounts[:max_items], start=1):
         spend = info["spend"]
         revenue = info["revenue"]
@@ -3045,7 +3120,7 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
         else:
             buyers_text = "—"
         prev_flag_label = html.escape(_format_flag_label(info["prev_flag_id"], flags_by_id))
-        curr_flag_label = html.escape(_format_flag_decision(info.get("decision")))
+        curr_flag_label = html.escape(info.get("flag_label") or _format_flag_decision(info.get("decision")))
         account_name = html.escape(account_name_raw)
         line = (
             f"{idx}) <code>{account_name}</code> | Кампаний: {len(info['campaigns'])} | "
@@ -3054,6 +3129,31 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
             f"Флаг: {prev_flag_label} → {curr_flag_label}"
         )
         lines.append(line)
+        if idx < display_count:
+            lines.append("")
+        payload = {
+            "account_name": account_name_raw,
+            "flag_label": info.get("flag_label"),
+            "spend": str(spend),
+            "revenue": str(revenue),
+            "roi": str(roi) if roi is not None else None,
+            "ftd": ftd,
+            "campaign_count": len(info["campaigns"]),
+            "campaign_lines": info.get("campaign_lines", []),
+            "ctr": str(info.get("ctr")) if info.get("ctr") is not None else None,
+            "ftd_rate": str(info.get("ftd_rate")) if info.get("ftd_rate") is not None else None,
+        }
+        account_cache_values.append(json.dumps(payload))
+        flag_icon = (info.get("flag_label") or "").split(" ", 1)[0] if info.get("flag_label") else "—"
+        short_name = account_name_raw
+        if len(short_name) > 28:
+            short_name = short_name[:27] + "…"
+        button_text = f"{idx}. {flag_icon} {short_name}".strip()
+        if len(button_text) > 64:
+            button_text = button_text[:63] + "…"
+        account_keyboard_rows.append(
+            [InlineKeyboardButton(text=button_text, callback_data=f"fbar:{month.isoformat()}:{idx - 1}")]
+        )
     header_lines = [
         f"<b>FB кабинеты — {html.escape(_month_label_ru(month))}</b>",
         f"Кабинетов: <b>{len(sorted_accounts)}</b>",
@@ -3068,12 +3168,29 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
         header_lines.append(f"CTR: <b>{_fmt_percent(ctr)}</b> ({total_clicks}/{total_impressions})")
     if total_registrations:
         header_lines.append(f"Регистраций: <b>{total_registrations}</b>")
-    text = "\n".join(header_lines)
+    summary_lines: List[str] = header_lines[:]
     if lines:
-        text += "\n\n" + "\n".join(lines)
+        summary_lines.append("")
+        summary_lines.extend(lines)
     if len(sorted_accounts) > max_items:
-        text += f"\n\nПоказаны первые {max_items} кабинетов из {len(sorted_accounts)}."
-    await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+        summary_lines.append("")
+        summary_lines.append(f"Показаны первые {max_items} кабинетов из {len(sorted_accounts)}.")
+    keyboard_markup: Optional[InlineKeyboardMarkup] = None
+    if account_keyboard_rows:
+        summary_lines.append("")
+        summary_lines.append("Нажми кнопку ниже, чтобы раскрыть кабинет.")
+        keyboard_markup = InlineKeyboardMarkup(inline_keyboard=account_keyboard_rows[:12])
+    chunks = _chunk_lines(summary_lines)
+    if chunks:
+        await bot.send_message(chat_id, chunks[0], parse_mode=ParseMode.HTML, reply_markup=keyboard_markup)
+        for chunk in chunks[1:]:
+            await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
+    else:
+        await bot.send_message(chat_id, "Нет кабинетов для отображения.", parse_mode=ParseMode.HTML)
+    try:
+        await db.set_ui_cache_list(requester_id, cache_kind, account_cache_values)
+    except Exception as exc:
+        logger.warning("Failed to cache FB account report payloads", exc_info=exc)
 
 async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     users = await db.list_users()
@@ -3280,7 +3397,7 @@ async def cb_report_fb_month(call: CallbackQuery):
         if kind == "campaigns":
             await _send_fb_campaign_report(call.message.chat.id, month)
         elif kind == "accounts":
-            await _send_fb_account_report(call.message.chat.id, month)
+            await _send_fb_account_report(call.message.chat.id, month, call.from_user.id)
         else:
             await call.message.answer("Неизвестный тип отчёта.")
         await status_msg.edit_text("Отчёт готов.")
