@@ -1025,6 +1025,68 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 "Нет привязки к байеру для: " + ", ".join(html.escape(c) for c in shown) + suffix
             )
 
+        target_month_start: Optional[date] = None
+        if parsed.period_end:
+            target_month_start = parsed.period_end.replace(day=1)
+        elif parsed.period_start:
+            target_month_start = parsed.period_start.replace(day=1)
+        else:
+            target_month_start = date.today().replace(day=1)
+
+        month_summary: Optional[Dict[str, Any]] = None
+        month_campaign_rows: List[Dict[str, Any]] = []
+        if target_month_start:
+            try:
+                month_campaign_rows = await db.fetch_fb_campaign_month_report(target_month_start)
+            except Exception as exc:
+                logger.warning("Failed to fetch FB campaign month report", exc_info=exc)
+            try:
+                month_rows = await db.fetch_fb_monthly_summary(month_start=target_month_start)
+                if month_rows:
+                    month_summary = month_rows[0]
+            except Exception as exc:
+                logger.warning("Failed to fetch FB month summary", exc_info=exc)
+
+        def _should_skip_month_campaign(name: Any) -> bool:
+            if not name:
+                return True
+            return "," in str(name)
+
+        if month_summary is None and month_campaign_rows and target_month_start:
+            spend_total = Decimal("0")
+            revenue_total = Decimal("0")
+            impressions_total = Decimal("0")
+            clicks_total = Decimal("0")
+            registrations_total = 0
+            ftd_total = 0
+            valid_campaign_count = 0
+            account_names: Set[str] = set()
+            for row in month_campaign_rows:
+                campaign_name = row.get("campaign_name")
+                if _should_skip_month_campaign(campaign_name):
+                    continue
+                valid_campaign_count += 1
+                spend_total += as_decimal(row.get("spend"))
+                revenue_total += as_decimal(row.get("revenue"))
+                impressions_total += as_decimal(row.get("impressions"))
+                clicks_total += as_decimal(row.get("clicks"))
+                registrations_total += int(row.get("registrations") or 0)
+                ftd_total += int(row.get("ftd") or 0)
+                account = row.get("account_name")
+                if account:
+                    account_names.add(str(account))
+            month_summary = {
+                "month_start": target_month_start,
+                "spend": spend_total,
+                "revenue": revenue_total,
+                "impressions": impressions_total,
+                "clicks": clicks_total,
+                "registrations": registrations_total,
+                "ftd": ftd_total,
+                "campaign_count": valid_campaign_count,
+                "account_count": len(account_names),
+            }
+
         flag_section: list[str] = []
         if flag_changes:
             max_flag_rows = 30
@@ -1048,33 +1110,52 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
         else:
             summary_main.append("Изменения флагов: нет")
 
+        month_section: list[str] = []
+        if month_summary and target_month_start:
+            month_label = _month_label_ru(target_month_start)
+            spend_total = as_decimal(month_summary.get("spend"))
+            revenue_total = as_decimal(month_summary.get("revenue"))
+            ftd_total = int(month_summary.get("ftd") or 0)
+            registrations_total = int(month_summary.get("registrations") or 0)
+            roi_total = ((revenue_total - spend_total) / spend_total * Decimal(100)) if spend_total else None
+            ftd_rate_total = (Decimal(ftd_total) / Decimal(registrations_total) * Decimal(100)) if registrations_total else None
+            campaign_count = int(month_summary.get("campaign_count") or 0)
+            account_count = int(month_summary.get("account_count") or 0)
+            month_section.append("<b>" + html.escape(month_label) + "</b>")
+            month_section.append(
+                f"Spend {_fmt_money(spend_total)} | Rev {_fmt_money(revenue_total)} | ROI {_fmt_percent(roi_total)} | FTD {ftd_total} (FTD rate {_fmt_percent(ftd_rate_total)}) | Кампаний {campaign_count} | Кабинетов {account_count}"
+            )
+
         campaign_section: list[str] = []
-        if per_campaign_info:
-            campaign_section.append("<b>Последний день по кампаниям:</b>")
-            top_entries = sorted(
-                per_campaign_info.items(),
-                key=lambda item: float(item[1].get("spend") or 0),
+        if month_campaign_rows and target_month_start:
+            campaign_section.append(
+                "<b>Кампании за " + html.escape(_month_label_ru(target_month_start)) + ":</b>"
+            )
+            sorted_rows = sorted(
+                month_campaign_rows,
+                key=lambda row: float(row.get("spend") or 0),
                 reverse=True,
-            )[:5]
-            for campaign, info in top_entries:
-                flag_label = flag_id_to_title.get(info.get("flag_id")) or info["decision"].code
-                campaign_section.append(
-                    "• "
-                    + html.escape(campaign)
-                    + " — "
-                    + html.escape(flag_label)
-                    + ". Spend "
-                    + _fmt_money(info.get("spend"))
-                    + ", FTD "
-                    + str(info.get("ftd") or 0)
-                    + ", Rev "
-                    + _fmt_money(info.get("revenue"))
-                    + ", ROI "
-                    + _fmt_percent(info.get("roi"))
-                )
+            )
+            for row in sorted_rows:
+                name = row.get("campaign_name")
+                if _should_skip_month_campaign(name):
+                    continue
+                spend_value = as_decimal(row.get("spend"))
+                revenue_value = as_decimal(row.get("revenue"))
+                ftd_value = int(row.get("ftd") or 0)
+                roi_value = ((revenue_value - spend_value) / spend_value * Decimal(100)) if spend_value else None
+                account_name = row.get("account_name")
+                flag_id = row.get("curr_flag_id") or row.get("state_flag_id") or row.get("prev_flag_id")
+                flag_label = flag_id_to_title.get(flag_id) or flag_id_to_code.get(flag_id) or "—"
+                line = "• " + html.escape(str(name))
+                if account_name:
+                    line += f" ({html.escape(str(account_name))})"
+                line += " — " + html.escape(flag_label)
+                line += f". Spend {_fmt_money(spend_value)} | FTD {ftd_value} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)}"
+                campaign_section.append(line)
 
         missing_keitaro = sorted(
-            c for c in parsed.campaign_names if c not in keitaro_stats.get("totals", {})
+            c for c in parsed.campaign_names if c not in keitaro_stats.get("totals", {}) and "," not in c
         )
         missing_section: list[str] = []
         if missing_keitaro:
@@ -1083,32 +1164,6 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
             missing_section.append(
                 "Внимание: нет данных Keitaro для: " + ", ".join(html.escape(c) for c in shown) + suffix
             )
-
-        monthly_section: list[str] = []
-        try:
-            monthly_rows = await db.fetch_fb_monthly_summary(limit=12)
-        except Exception as exc:
-            logger.warning("Failed to fetch FB monthly summary", exc_info=exc)
-            monthly_rows = []
-        if monthly_rows:
-            monthly_section.append("<b>Накопительный итог по месяцам:</b>")
-            for row in monthly_rows:
-                month_value = row.get("month_start")
-                if not isinstance(month_value, date):
-                    continue
-                spend_total = as_decimal(row.get("spend"))
-                revenue_total = as_decimal(row.get("revenue"))
-                ftd_total = int(row.get("ftd") or 0)
-                registrations_total = int(row.get("registrations") or 0)
-                roi_total = ((revenue_total - spend_total) / spend_total * Decimal(100)) if spend_total else None
-                ftd_rate_total = (Decimal(ftd_total) / Decimal(registrations_total) * Decimal(100)) if registrations_total else None
-                campaign_count = int(row.get("campaign_count") or 0)
-                account_count = int(row.get("account_count") or 0)
-                monthly_section.append(
-                    "• "
-                    + html.escape(_month_label_ru(month_value))
-                    + f": Spend {_fmt_money(spend_total)} | Rev {_fmt_money(revenue_total)} | ROI {_fmt_percent(roi_total)} | FTD {ftd_total} (FTD rate {_fmt_percent(ftd_rate_total)}) | Кампаний {campaign_count} | Кабинетов {account_count}"
-                )
 
         def build_messages(sections: list[list[str]], max_length: int = 3500) -> list[str]:
             lines: list[str] = []
@@ -1138,7 +1193,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 messages.append("\n".join(current_lines))
             return messages or [""]
 
-        sections = [summary_main, flag_section, campaign_section, monthly_section, missing_section]
+        sections = [summary_main, flag_section, month_section, campaign_section, missing_section]
         message_chunks = build_messages(sections)
         await status_msg.edit_text(message_chunks[0], parse_mode=ParseMode.HTML)
         for extra_text in message_chunks[1:]:

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Set
 
 
 HEADER_ALIASES: Dict[str, List[str]] = {
-    "account_name": ["названиеаккаунта", "accountname", "account"],
+    "account_name": ["названиеаккаунта", "идентификатораккаунта", "accountname", "account"],
     "campaign_name": ["названиекампании", "campaignname", "campaign"],
     "adset_name": ["названиегруппыобъявлений", "adsetname", "группаобъявлений", "adset"],
     "ad_name": ["названиеобъявления", "adname", "объявление", "ad"],
