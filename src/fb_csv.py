@@ -15,7 +15,7 @@ HEADER_ALIASES: Dict[str, List[str]] = {
     "currency": ["валюта", "currency", "accountcurrency"],
     "spend": ["суммазатратusd", "суммазатрат", "amountspend", "amountspent", "amountspentusd", "spend"],
     "impressions": ["показы", "impressions"],
-    "clicks": ["кликитвсе", "клики", "clicks", "clicksall"],
+    "clicks": ["кликитвсе", "клики", "clicks", "clicksall", "кликивсе"],
     "leads": ["лиды", "leads"],
     "registrations": ["завершенныерегистрации", "registrations", "complete_registration", "completedregistration"],
     "ctr": ["ctr", "ctrвсе", "ctral"],

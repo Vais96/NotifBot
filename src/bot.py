@@ -914,90 +914,14 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
 
             if latest_day.get(campaign) == day:
                 per_campaign_info[campaign] = {
-                    "decision": flag_decision,
-                    "flag_id": flag_id,
-                    "old_flag_id": state.get("flag_id"),
                     "status_id": status_id,
-                    "roi": roi,
-                    "spend": spend,
-                    "ftd": ftd,
-                    "revenue": revenue,
-                    "ctr": ctr,
-                    "ftd_rate": ftd_rate,
-                    "reason": flag_decision.reason,
                     "buyer_id": campaign_buyer_id,
                     "alias_key": meta.get("alias_key"),
                     "alias_lead_id": meta.get("alias_lead_id"),
-                    "day": day,
                 }
 
         if daily_records:
             await db.upsert_fb_campaign_daily(daily_records)
-
-        states_to_upsert: list[dict[str, Any]] = []
-        history_entries: list[dict[str, Any]] = []
-        flag_changes: list[dict[str, Any]] = []
-
-        for campaign, info in per_campaign_info.items():
-            new_flag_id = info.get("flag_id")
-            state_raw = state_map.get(campaign)
-            state = state_raw or {}
-            old_flag_id = info.get("old_flag_id")
-            status_id = info.get("status_id")
-            buyer_comment = state.get("buyer_comment")
-            lead_comment = state.get("lead_comment")
-            if state_raw is None or new_flag_id != old_flag_id:
-                states_to_upsert.append(
-                    {
-                        "campaign_name": campaign,
-                        "status_id": status_id,
-                        "flag_id": new_flag_id,
-                        "buyer_comment": buyer_comment,
-                        "lead_comment": lead_comment,
-                        "updated_by": user_id,
-                    }
-                )
-            if state_raw is not None or new_flag_id is not None or old_flag_id is not None:
-                history_entries.append(
-                    {
-                        "campaign_name": campaign,
-                        "changed_by": user_id,
-                        "old_status_id": status_id,
-                        "new_status_id": status_id,
-                        "old_flag_id": old_flag_id,
-                        "new_flag_id": new_flag_id,
-                        "note": info.get("reason"),
-                    }
-                )
-            if new_flag_id != old_flag_id:
-                old_label = flag_id_to_title.get(old_flag_id) or flag_id_to_code.get(old_flag_id) or "—"
-                new_label = flag_id_to_title.get(new_flag_id) or flag_id_to_code.get(new_flag_id) or info["decision"].code
-                flag_changes.append(
-                    {
-                        "campaign": campaign,
-                        "old": old_label,
-                        "new": new_label,
-                        "reason": info.get("reason", ""),
-                        "buyer_id": info.get("buyer_id"),
-                        "alias_key": info.get("alias_key"),
-                        "alias_lead_id": info.get("alias_lead_id"),
-                        "spend": info.get("spend"),
-                        "revenue": info.get("revenue"),
-                        "ftd": info.get("ftd"),
-                        "roi": info.get("roi"),
-                        "ctr": info.get("ctr"),
-                        "ftd_rate": info.get("ftd_rate"),
-                        "day": info.get("day"),
-                    }
-                )
-
-        if states_to_upsert:
-            await db.upsert_fb_campaign_state(states_to_upsert)
-        if history_entries:
-            await db.log_fb_campaign_history(history_entries)
-
-        await db.recompute_fb_campaign_totals(parsed.campaign_names)
-        await _update_fb_accounts(parsed, campaign_meta, account_buyers)
 
         period_text = "—"
         if parsed.period_start and parsed.period_end:
@@ -1040,41 +964,248 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 month_campaign_rows = await db.fetch_fb_campaign_month_report(target_month_start)
             except Exception as exc:
                 logger.warning("Failed to fetch FB campaign month report", exc_info=exc)
-            try:
-                month_rows = await db.fetch_fb_monthly_summary(month_start=target_month_start)
-                if month_rows:
-                    month_summary = month_rows[0]
-            except Exception as exc:
-                logger.warning("Failed to fetch FB month summary", exc_info=exc)
 
         def _should_skip_month_campaign(name: Any) -> bool:
             if not name:
                 return True
             return "," in str(name)
 
-        if month_summary is None and month_campaign_rows and target_month_start:
-            spend_total = Decimal("0")
-            revenue_total = Decimal("0")
-            impressions_total = Decimal("0")
-            clicks_total = Decimal("0")
-            registrations_total = 0
-            ftd_total = 0
-            valid_campaign_count = 0
-            account_names: Set[str] = set()
-            for row in month_campaign_rows:
-                campaign_name = row.get("campaign_name")
+        aggregated_month_campaigns: Dict[str, Dict[str, Any]] = {}
+        aggregated_account_names: Set[str] = set()
+        if target_month_start:
+            for daily_row in parsed.daily_rows:
+                day_value = daily_row.get("day_date")
+                if not day_value or day_value.replace(day=1) != target_month_start:
+                    continue
+                campaign_name = daily_row.get("campaign_name")
                 if _should_skip_month_campaign(campaign_name):
                     continue
+                entry = aggregated_month_campaigns.setdefault(
+                    campaign_name,
+                    {
+                        "spend": Decimal("0"),
+                        "impressions": 0,
+                        "clicks": 0,
+                        "registrations": 0,
+                        "ftd": 0,
+                        "revenue": Decimal("0"),
+                        "account_name": daily_row.get("account_name"),
+                        "flag_id": None,
+                    },
+                )
+                entry["spend"] += as_decimal(daily_row.get("spend"))
+                entry["impressions"] += int(daily_row.get("impressions") or 0)
+                entry["clicks"] += int(daily_row.get("clicks") or 0)
+                entry["registrations"] += int(daily_row.get("registrations") or 0)
+                account_name = daily_row.get("account_name")
+                if account_name:
+                    aggregated_account_names.add(str(account_name))
+                    if not entry.get("account_name"):
+                        entry["account_name"] = account_name
+
+        month_campaign_lookup: Dict[str, Dict[str, Any]] = {}
+        for row in month_campaign_rows:
+            campaign_name = row.get("campaign_name")
+            if _should_skip_month_campaign(campaign_name):
+                continue
+            if campaign_name:
+                month_campaign_lookup[str(campaign_name)] = row
+
+        for campaign_name, entry in aggregated_month_campaigns.items():
+            db_row = month_campaign_lookup.get(campaign_name)
+            if not db_row:
+                continue
+            entry["ftd"] = int(db_row.get("ftd") or entry.get("ftd") or 0)
+            entry["revenue"] = as_decimal(db_row.get("revenue"))
+            flag_id = db_row.get("curr_flag_id") or db_row.get("state_flag_id") or db_row.get("prev_flag_id")
+            if flag_id is not None:
+                entry["flag_id"] = flag_id
+            account_name = db_row.get("account_name")
+            if account_name:
+                aggregated_account_names.add(str(account_name))
+                if not entry.get("account_name"):
+                    entry["account_name"] = account_name
+
+        def _update_month_flag_info(
+            campaign: str,
+            spend_value: Decimal,
+            revenue_value: Decimal,
+            impressions_value: int,
+            clicks_value: int,
+            registrations_value: int,
+            ftd_value: int,
+            account_name_value: Optional[str],
+        ) -> Dict[str, Any]:
+            state = state_map.get(campaign) or {}
+            meta = campaign_meta.get(campaign, {})
+            existing = per_campaign_info.get(campaign, {})
+            buyer_id = existing.get("buyer_id", meta.get("buyer_id"))
+            alias_key = existing.get("alias_key", meta.get("alias_key"))
+            alias_lead_id = existing.get("alias_lead_id", meta.get("alias_lead_id"))
+            status_id = existing.get("status_id", state.get("status_id"))
+            day_value = latest_day.get(campaign)
+            ctr_value = (
+                (Decimal(clicks_value) / Decimal(impressions_value) * Decimal(100))
+                if impressions_value
+                else None
+            )
+            roi_value = ((revenue_value - spend_value) / spend_value * Decimal(100)) if spend_value else None
+            ftd_rate_value = (
+                (Decimal(ftd_value) / Decimal(registrations_value) * Decimal(100))
+                if registrations_value
+                else None
+            )
+            flag_decision = fb_csv.decide_flag(spend_value, ctr_value, roi_value, ftd_value)
+            flag_row = flag_by_code.get(flag_decision.code.upper())
+            new_flag_id = flag_row.get("id") if flag_row else None
+            info = {
+                "decision": flag_decision,
+                "flag_id": new_flag_id,
+                "old_flag_id": state.get("flag_id"),
+                "status_id": status_id,
+                "roi": roi_value,
+                "spend": spend_value,
+                "ftd": ftd_value,
+                "revenue": revenue_value,
+                "ctr": ctr_value,
+                "ftd_rate": ftd_rate_value,
+                "reason": flag_decision.reason,
+                "buyer_id": buyer_id,
+                "alias_key": alias_key,
+                "alias_lead_id": alias_lead_id,
+                "day": day_value,
+                "account_name": account_name_value,
+            }
+            per_campaign_info[campaign] = info
+            return info
+
+        campaign_section: list[str] = []
+        if aggregated_month_campaigns and target_month_start:
+            account_names_for_summary = set(aggregated_account_names)
+            spend_total = sum((entry["spend"] for entry in aggregated_month_campaigns.values()), Decimal("0"))
+            revenue_total = sum(
+                (entry.get("revenue", Decimal("0")) for entry in aggregated_month_campaigns.values()),
+                Decimal("0"),
+            )
+            impressions_total = sum(entry["impressions"] for entry in aggregated_month_campaigns.values())
+            clicks_total = sum(entry["clicks"] for entry in aggregated_month_campaigns.values())
+            registrations_total = sum(entry["registrations"] for entry in aggregated_month_campaigns.values())
+            ftd_total = sum(int(entry.get("ftd") or 0) for entry in aggregated_month_campaigns.values())
+            for entry in aggregated_month_campaigns.values():
+                account_name = entry.get("account_name")
+                if account_name:
+                    account_names_for_summary.add(str(account_name))
+            month_summary = {
+                "month_start": target_month_start,
+                "spend": spend_total,
+                "revenue": revenue_total,
+                "impressions": impressions_total,
+                "clicks": clicks_total,
+                "registrations": registrations_total,
+                "ftd": ftd_total,
+                "campaign_count": len(aggregated_month_campaigns),
+                "account_count": len(account_names_for_summary),
+            }
+            campaign_section.append(
+                "<b>Кампании за " + html.escape(_month_label_ru(target_month_start)) + ":</b>"
+            )
+            sorted_items = sorted(
+                aggregated_month_campaigns.items(),
+                key=lambda item: float(item[1]["spend"]),
+                reverse=True,
+            )
+            for name, stats in sorted_items:
+                spend_value = stats["spend"]
+                revenue_value = stats.get("revenue", Decimal("0"))
+                ftd_value = int(stats.get("ftd") or 0)
+                impressions_value = int(stats.get("impressions") or 0)
+                clicks_value = int(stats.get("clicks") or 0)
+                registrations_value = int(stats.get("registrations") or 0)
+                account_name = stats.get("account_name")
+                info = _update_month_flag_info(
+                    name,
+                    spend_value,
+                    revenue_value,
+                    impressions_value,
+                    clicks_value,
+                    registrations_value,
+                    ftd_value,
+                    account_name,
+                )
+                flag_label = (
+                    flag_id_to_title.get(info.get("flag_id"))
+                    or flag_id_to_code.get(info.get("flag_id"))
+                    or info["decision"].code
+                )
+                roi_value = info.get("roi")
+                line = "• " + html.escape(str(name))
+                if account_name:
+                    line += f" ({html.escape(str(account_name))})"
+                line += " — " + html.escape(str(flag_label))
+                line += (
+                    f". Spend {_fmt_money(spend_value)} | FTD {ftd_value} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)}"
+                )
+                campaign_section.append(line)
+        elif month_campaign_rows and target_month_start:
+            spend_total = Decimal("0")
+            revenue_total = Decimal("0")
+            impressions_total = 0
+            clicks_total = 0
+            registrations_total = 0
+            ftd_total = 0
+            account_names: Set[str] = set()
+            valid_campaign_count = 0
+            campaign_section.append(
+                "<b>Кампании за " + html.escape(_month_label_ru(target_month_start)) + ":</b>"
+            )
+            sorted_rows = sorted(
+                month_campaign_rows,
+                key=lambda row: float(row.get("spend") or 0),
+                reverse=True,
+            )
+            for row in sorted_rows:
+                name = row.get("campaign_name")
+                if _should_skip_month_campaign(name):
+                    continue
+                spend_value = as_decimal(row.get("spend"))
+                revenue_value = as_decimal(row.get("revenue"))
+                impressions_value = int(row.get("impressions") or 0)
+                clicks_value = int(row.get("clicks") or 0)
+                registrations_value = int(row.get("registrations") or 0)
+                ftd_value = int(row.get("ftd") or 0)
+                account_name = row.get("account_name")
+                info = _update_month_flag_info(
+                    str(name),
+                    spend_value,
+                    revenue_value,
+                    impressions_value,
+                    clicks_value,
+                    registrations_value,
+                    ftd_value,
+                    account_name,
+                )
+                flag_label = (
+                    flag_id_to_title.get(info.get("flag_id"))
+                    or flag_id_to_code.get(info.get("flag_id"))
+                    or info["decision"].code
+                )
+                line = "• " + html.escape(str(name))
+                if account_name:
+                    line += f" ({html.escape(str(account_name))})"
+                line += " — " + html.escape(str(flag_label))
+                line += (
+                    f". Spend {_fmt_money(spend_value)} | FTD {ftd_value} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(info.get('roi'))}"
+                )
+                campaign_section.append(line)
+                spend_total += spend_value
+                revenue_total += revenue_value
+                impressions_total += impressions_value
+                clicks_total += clicks_value
+                registrations_total += registrations_value
+                ftd_total += ftd_value
+                if account_name:
+                    account_names.add(str(account_name))
                 valid_campaign_count += 1
-                spend_total += as_decimal(row.get("spend"))
-                revenue_total += as_decimal(row.get("revenue"))
-                impressions_total += as_decimal(row.get("impressions"))
-                clicks_total += as_decimal(row.get("clicks"))
-                registrations_total += int(row.get("registrations") or 0)
-                ftd_total += int(row.get("ftd") or 0)
-                account = row.get("account_name")
-                if account:
-                    account_names.add(str(account))
             month_summary = {
                 "month_start": target_month_start,
                 "spend": spend_total,
@@ -1086,6 +1217,79 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 "campaign_count": valid_campaign_count,
                 "account_count": len(account_names),
             }
+
+        per_campaign_info = {
+            campaign: info for campaign, info in per_campaign_info.items() if info.get("decision")
+        }
+
+        states_to_upsert: list[dict[str, Any]] = []
+        history_entries: list[dict[str, Any]] = []
+        flag_changes: list[dict[str, Any]] = []
+
+        for campaign, info in per_campaign_info.items():
+            new_flag_id = info.get("flag_id")
+            state_raw = state_map.get(campaign)
+            state = state_raw or {}
+            old_flag_id = info.get("old_flag_id")
+            status_id = info.get("status_id")
+            buyer_comment = state.get("buyer_comment")
+            lead_comment = state.get("lead_comment")
+            if state_raw is None or new_flag_id != old_flag_id:
+                states_to_upsert.append(
+                    {
+                        "campaign_name": campaign,
+                        "status_id": status_id,
+                        "flag_id": new_flag_id,
+                        "buyer_comment": buyer_comment,
+                        "lead_comment": lead_comment,
+                        "updated_by": user_id,
+                    }
+                )
+            if state_raw is not None or new_flag_id is not None or old_flag_id is not None:
+                history_entries.append(
+                    {
+                        "campaign_name": campaign,
+                        "changed_by": user_id,
+                        "old_status_id": status_id,
+                        "new_status_id": status_id,
+                        "old_flag_id": old_flag_id,
+                        "new_flag_id": new_flag_id,
+                        "note": info.get("reason"),
+                    }
+                )
+            if new_flag_id != old_flag_id:
+                old_label = flag_id_to_title.get(old_flag_id) or flag_id_to_code.get(old_flag_id) or "—"
+                new_label = (
+                    flag_id_to_title.get(new_flag_id)
+                    or flag_id_to_code.get(new_flag_id)
+                    or info["decision"].code
+                )
+                flag_changes.append(
+                    {
+                        "campaign": campaign,
+                        "old": old_label,
+                        "new": new_label,
+                        "reason": info.get("reason", ""),
+                        "buyer_id": info.get("buyer_id"),
+                        "alias_key": info.get("alias_key"),
+                        "alias_lead_id": info.get("alias_lead_id"),
+                        "spend": info.get("spend"),
+                        "revenue": info.get("revenue"),
+                        "ftd": info.get("ftd"),
+                        "roi": info.get("roi"),
+                        "ctr": info.get("ctr"),
+                        "ftd_rate": info.get("ftd_rate"),
+                        "day": info.get("day"),
+                    }
+                )
+
+        if states_to_upsert:
+            await db.upsert_fb_campaign_state(states_to_upsert)
+        if history_entries:
+            await db.log_fb_campaign_history(history_entries)
+
+        await db.recompute_fb_campaign_totals(parsed.campaign_names)
+        await _update_fb_accounts(parsed, campaign_meta, account_buyers)
 
         flag_section: list[str] = []
         if flag_changes:
