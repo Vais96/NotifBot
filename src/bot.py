@@ -901,6 +901,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
         per_campaign_info: dict[str, dict[str, Any]] = {}
         upload_spend = Decimal("0")
         account_buyers: Dict[str, Set[int]] = defaultdict(set)
+        aggregated_daily: Dict[tuple[str, date], Dict[str, Any]] = {}
 
         for row in parsed.daily_rows:
             campaign = row.get("campaign_name")
@@ -915,21 +916,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
             clicks = row.get("clicks") or 0
             leads = row.get("leads")
             registrations = row.get("registrations")
-            ctr_raw = row.get("ctr")
-            ctr = as_decimal(ctr_raw) if ctr_raw is not None else None
-            cpc_raw = row.get("cpc")
-            cpc = as_decimal(cpc_raw) if cpc_raw is not None else None
             geo = row.get("geo")
-            stats = daily_stats.get((campaign, day), {})
-            ftd = int(stats.get("ftd") or 0)
-            revenue = as_decimal(stats.get("revenue"))
-            roi = ((revenue - spend) / spend * Decimal(100)) if spend and spend != 0 else None
-            if roi is not None:
-                roi = roi
-            ftd_rate = (Decimal(ftd) / Decimal(registrations) * Decimal(100)) if registrations else None
-            flag_decision = fb_csv.decide_flag(spend, ctr, roi, ftd)
-            flag_row = flag_by_code.get(flag_decision.code.upper())
-            flag_id = flag_row.get("id") if flag_row else None
             state = state_map.get(campaign) or {}
             status_id = state.get("status_id")
             account_name = row.get("account_name")
@@ -939,38 +926,92 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 except Exception:
                     pass
 
-            daily_records.append(
+            key = (campaign, day)
+            entry = aggregated_daily.setdefault(
+                key,
                 {
                     "campaign_name": campaign,
                     "day_date": day,
                     "account_name": account_name,
                     "buyer_id": campaign_buyer_id,
                     "geo": geo,
-                    "spend": spend,
-                    "impressions": impressions,
-                    "clicks": clicks,
-                    "registrations": registrations,
-                    "leads": leads,
+                    "spend": Decimal("0"),
+                    "impressions": 0,
+                    "clicks": 0,
+                    "registrations": 0,
+                    "leads": 0,
+                    "status_id": status_id,
+                },
+            )
+            entry["spend"] += spend
+            entry["impressions"] += int(impressions or 0)
+            entry["clicks"] += int(clicks or 0)
+            if registrations is not None:
+                entry["registrations"] += int(registrations)
+            if leads is not None:
+                entry["leads"] += int(leads)
+            if account_name and not entry.get("account_name"):
+                entry["account_name"] = account_name
+            if campaign_buyer_id is not None and entry.get("buyer_id") is None:
+                entry["buyer_id"] = campaign_buyer_id
+            if geo and not entry.get("geo"):
+                entry["geo"] = geo
+            if status_id is not None:
+                entry["status_id"] = status_id
+
+            upload_spend += spend
+
+        for (campaign, day), entry in aggregated_daily.items():
+            meta = campaign_meta.get(campaign, {})
+            stats = daily_stats.get((campaign, day), {})
+            ftd = int(stats.get("ftd") or 0)
+            revenue = as_decimal(stats.get("revenue"))
+            spend_total = entry["spend"]
+            impressions_total = entry["impressions"]
+            clicks_total = entry["clicks"]
+            registrations_total = entry["registrations"]
+            leads_total = entry["leads"]
+            ctr = (Decimal(clicks_total) / Decimal(impressions_total) * Decimal(100)) if impressions_total else None
+            cpc = (spend_total / Decimal(clicks_total)) if clicks_total else None
+            roi = ((revenue - spend_total) / spend_total * Decimal(100)) if spend_total else None
+            ftd_rate = (
+                (Decimal(ftd) / Decimal(registrations_total) * Decimal(100))
+                if registrations_total
+                else None
+            )
+            flag_decision = fb_csv.decide_flag(spend_total, ctr, roi, ftd)
+            flag_row = flag_by_code.get(flag_decision.code.upper())
+            flag_id = flag_row.get("id") if flag_row else None
+            daily_records.append(
+                {
+                    "campaign_name": campaign,
+                    "day_date": day,
+                    "account_name": entry.get("account_name"),
+                    "buyer_id": entry.get("buyer_id"),
+                    "geo": entry.get("geo"),
+                    "spend": spend_total,
+                    "impressions": impressions_total,
+                    "clicks": clicks_total,
+                    "registrations": registrations_total,
+                    "leads": leads_total,
                     "ftd": ftd,
                     "revenue": revenue,
                     "ctr": ctr,
                     "cpc": cpc,
                     "roi": roi,
                     "ftd_rate": ftd_rate,
-                    "status_id": status_id,
+                    "status_id": entry.get("status_id"),
                     "flag_id": flag_id,
                     "upload_id": upload_id,
                 }
             )
-
-            upload_spend += spend
-
             if latest_day.get(campaign) == day:
                 per_campaign_info[campaign] = {
-                    "status_id": status_id,
-                    "buyer_id": campaign_buyer_id,
+                    "status_id": entry.get("status_id"),
+                    "buyer_id": entry.get("buyer_id"),
                     "alias_key": meta.get("alias_key"),
                     "alias_lead_id": meta.get("alias_lead_id"),
+                    "day": day,
                 }
 
         if daily_records:
