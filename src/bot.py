@@ -326,6 +326,7 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
             [InlineKeyboardButton(text="Команды", callback_data="menu:teams"), InlineKeyboardButton(text="Алиасы", callback_data="menu:aliases")],
             [InlineKeyboardButton(text="Менторы", callback_data="menu:mentors")],
             [InlineKeyboardButton(text="Обновить домены", callback_data="menu:refreshdomains")],
+            [InlineKeyboardButton(text="Очистить FB данные", callback_data="menu:resetfbdata")],
         ]
     else:
         # For lead/head expose 'Моя команда'
@@ -711,6 +712,26 @@ async def on_menu_click(call: CallbackQuery):
         else:
             await status_msg.edit_text(f"Готово. Обновлено {count} записей.")
         return
+    if key == "resetfbdata":
+        if call.from_user.id not in ADMIN_IDS:
+            return await call.answer("Нет прав", show_alert=True)
+        warning_text = (
+            "⚠️ <b>Внимание</b>\n"
+            "Эта операция очистит все данные, загруженные из FB CSV, включая: "
+            "<code>fb_campaign_daily</code>, <code>fb_campaign_totals</code>, <code>fb_campaign_state</code>, "
+            "<code>fb_campaign_history</code>, <code>fb_csv_rows</code>, <code>fb_csv_uploads</code> и <code>fb_accounts</code>."
+            "\nПродолжить?"
+        )
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Очистить", callback_data="resetfbdata:confirm"),
+                    InlineKeyboardButton(text="Отмена", callback_data="resetfbdata:cancel"),
+                ]
+            ]
+        )
+        await call.message.answer(warning_text, reply_markup=kb)
+        return await call.answer()
     if key == "listusers":
         await _send_list_users(call.message.chat.id, call.from_user.id)
         return await call.answer()
@@ -735,6 +756,38 @@ async def on_menu_click(call: CallbackQuery):
     if key == "kpi":
         await _send_kpi_menu(call.message.chat.id, call.from_user.id)
         return await call.answer()
+
+
+@dp.callback_query(F.data == "resetfbdata:confirm")
+async def cb_resetfbdata_confirm(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    await call.answer("Очищаю данные…")
+    try:
+        await db.reset_fb_upload_data()
+    except Exception as exc:
+        logger.exception("Failed to reset FB upload data", exc_info=exc)
+        text = "Не удалось очистить данные. Смотри логи."
+    else:
+        text = (
+            "✅ Очистка завершена."
+            " Данные FB CSV удалены, можно загружать свежий отчёт."
+        )
+    try:
+        await call.message.edit_text(text)
+    except Exception:
+        await call.message.answer(text)
+
+
+@dp.callback_query(F.data == "resetfbdata:cancel")
+async def cb_resetfbdata_cancel(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    await call.answer("Отменено")
+    try:
+        await call.message.edit_text("Операция отменена.")
+    except Exception:
+        pass
 
 
 @dp.message(F.document)

@@ -1935,3 +1935,29 @@ async def recompute_fb_campaign_totals(campaign_names: Iterable[str]) -> List[Di
     if records:
         await upsert_fb_campaign_totals(records)
     return records
+
+
+async def reset_fb_upload_data() -> None:
+    tables = (
+        "fb_campaign_history",
+        "fb_campaign_daily",
+        "fb_campaign_totals",
+        "fb_campaign_state",
+        "fb_csv_rows",
+        "fb_csv_uploads",
+        "fb_accounts",
+    )
+    pool = await init_pool()
+    async with pool.acquire() as conn:  # type: ignore[attr-defined]
+        async with conn.cursor() as cur:
+            await cur.execute("SET FOREIGN_KEY_CHECKS=0")
+            try:
+                for table in tables:
+                    try:
+                        await cur.execute(f"TRUNCATE TABLE {table}")
+                        logger.info("Truncated table %s during FB data reset", table)
+                    except Exception as exc:
+                        logger.error("Failed to truncate table %s: %s", table, exc)
+                        raise
+            finally:
+                await cur.execute("SET FOREIGN_KEY_CHECKS=1")
