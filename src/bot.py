@@ -31,12 +31,6 @@ _FLAG_REASON_OVERRIDES = {
     "CTR < 0.7%": "⚠️ Жёлтый флаг",
 }
 
-_FLAG_SEVERITY_ORDER = {
-    "RED": 3,
-    "YELLOW": 2,
-    "GREEN": 1,
-}
-
 _ALIAS_OVERRIDES = {
     "ars": "arseny",
 }
@@ -1239,11 +1233,12 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
 
         def _add_campaign_to_account(
             account_name_value: Optional[str],
-            decision: Optional[fb_csv.FlagDecision],
-            flag_label: str,
             spend_value: Decimal,
             revenue_value: Decimal,
             ftd_value: int,
+            impressions_value: int,
+            clicks_value: int,
+            registrations_value: int,
             campaign_line: str,
         ) -> None:
             account_label = _account_label(account_name_value)
@@ -1254,8 +1249,9 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                     "revenue": Decimal("0"),
                     "ftd": 0,
                     "campaign_count": 0,
-                    "max_severity": 0,
-                    "flag_label": flag_label,
+                    "impressions": 0,
+                    "clicks": 0,
+                    "registrations": 0,
                     "campaign_lines": [],
                 },
             )
@@ -1263,15 +1259,10 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
             summary["revenue"] += revenue_value
             summary["ftd"] += ftd_value
             summary["campaign_count"] += 1
+            summary["impressions"] += int(impressions_value or 0)
+            summary["clicks"] += int(clicks_value or 0)
+            summary["registrations"] += int(registrations_value or 0)
             summary["campaign_lines"].append(campaign_line)
-            severity = 0
-            if decision and decision.code:
-                severity = _FLAG_SEVERITY_ORDER.get(decision.code.upper(), 0)
-            if severity > summary["max_severity"]:
-                summary["max_severity"] = severity
-                summary["flag_label"] = flag_label
-            elif summary["campaign_count"] == 1:
-                summary["flag_label"] = flag_label
 
         if aggregated_month_campaigns and target_month_start:
             account_names_for_summary = set(aggregated_account_names)
@@ -1333,11 +1324,12 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 )
                 _add_campaign_to_account(
                     account_name,
-                    info.get("decision"),
-                    flag_label,
                     spend_value,
                     revenue_value,
                     ftd_value,
+                    impressions_value,
+                    clicks_value,
+                    registrations_value,
                     campaign_line,
                 )
         elif month_campaign_rows and target_month_start:
@@ -1385,11 +1377,12 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 )
                 _add_campaign_to_account(
                     account_name,
-                    info.get("decision"),
-                    flag_label,
                     spend_value,
                     revenue_value,
                     ftd_value,
+                    impressions_value,
+                    clicks_value,
+                    registrations_value,
                     campaign_line,
                 )
                 spend_total += spend_value
@@ -1411,6 +1404,35 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 "campaign_count": valid_campaign_count,
                 "account_count": len(account_names),
             }
+
+        for summary in account_summaries.values():
+            spend_value = summary.get("spend", Decimal("0"))
+            revenue_value = summary.get("revenue", Decimal("0"))
+            ftd_value = int(summary.get("ftd") or 0)
+            impressions_total = int(summary.get("impressions") or 0)
+            clicks_total = int(summary.get("clicks") or 0)
+            registrations_total = int(summary.get("registrations") or 0)
+            ctr_value = (
+                (Decimal(clicks_total) / Decimal(impressions_total) * Decimal(100))
+                if impressions_total
+                else None
+            )
+            roi_value = (
+                (revenue_value - spend_value) / spend_value * Decimal(100)
+                if spend_value
+                else None
+            )
+            ftd_rate_value = (
+                (Decimal(ftd_value) / Decimal(registrations_total) * Decimal(100))
+                if registrations_total
+                else None
+            )
+            decision = fb_csv.decide_flag(spend_value, ctr_value, roi_value, ftd_value)
+            summary["ctr"] = ctr_value
+            summary["roi"] = roi_value
+            summary["ftd_rate"] = ftd_rate_value
+            summary["decision"] = decision
+            summary["flag_label"] = _format_flag_decision(decision)
 
         per_campaign_info = {
             campaign: info for campaign, info in per_campaign_info.items() if info.get("decision")
@@ -1543,7 +1565,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 revenue_value = summary["revenue"]
                 ftd_value = summary["ftd"]
                 campaign_count = summary["campaign_count"]
-                roi_value = ((revenue_value - spend_value) / spend_value * Decimal(100)) if spend_value else None
+                roi_value = summary.get("roi")
                 flag_label = summary.get("flag_label") or "—"
                 line = (
                     "• "
@@ -1554,14 +1576,19 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 )
                 if idx < max_accounts_in_text:
                     account_section.append(line)
+                    if idx < min(max_accounts_in_text, len(sorted_accounts)) - 1:
+                        account_section.append("")
                 payload = {
                     "account_name": account_name,
                     "flag_label": flag_label,
                     "spend": str(spend_value),
                     "revenue": str(revenue_value),
+                    "roi": str(roi_value) if roi_value is not None else None,
                     "ftd": ftd_value,
                     "campaign_count": campaign_count,
                     "campaign_lines": summary["campaign_lines"],
+                    "ctr": str(summary.get("ctr")) if summary.get("ctr") is not None else None,
+                    "ftd_rate": str(summary.get("ftd_rate")) if summary.get("ftd_rate") is not None else None,
                 }
                 account_cache_values.append(json.dumps(payload))
                 if idx < max_accounts_in_keyboard:
@@ -1940,6 +1967,7 @@ async def on_fb_upload_account_detail(callback: CallbackQuery):
     flag_label = str(payload.get("flag_label") or "—")
     spend_raw = payload.get("spend")
     revenue_raw = payload.get("revenue")
+    roi_raw = payload.get("roi")
     ftd_value = int(payload.get("ftd") or 0)
     campaign_count = int(payload.get("campaign_count") or 0)
     try:
@@ -1950,25 +1978,80 @@ async def on_fb_upload_account_detail(callback: CallbackQuery):
         revenue_value = Decimal(str(revenue_raw)) if revenue_raw is not None else Decimal("0")
     except Exception:
         revenue_value = Decimal("0")
-    roi_value = ((revenue_value - spend_value) / spend_value * Decimal(100)) if spend_value else None
+    roi_value: Optional[Decimal]
+    if roi_raw is not None:
+        try:
+            roi_value = Decimal(str(roi_raw))
+        except Exception:
+            roi_value = None
+    else:
+        roi_value = ((revenue_value - spend_value) / spend_value * Decimal(100)) if spend_value else None
     lines: List[str] = []
     lines.append(f"<b>{html.escape(account_name)}</b>")
     lines.append("Флаг кабинета: " + html.escape(flag_label))
     lines.append(
         f"Spend {_fmt_money(spend_value)} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)} | FTD {ftd_value} | Кампаний {campaign_count}"
     )
+    ctr_raw = payload.get("ctr")
+    ftd_rate_raw = payload.get("ftd_rate")
+    try:
+        ctr_value = Decimal(str(ctr_raw)) if ctr_raw is not None else None
+    except Exception:
+        ctr_value = None
+    try:
+        ftd_rate_value = Decimal(str(ftd_rate_raw)) if ftd_rate_raw is not None else None
+    except Exception:
+        ftd_rate_value = None
+
     campaign_lines = payload.get("campaign_lines") or []
     if campaign_lines:
         lines.append("")
         lines.append("<b>Кампании:</b>")
-        lines.extend(str(item) for item in campaign_lines)
+        for idx, item in enumerate(campaign_lines):
+            lines.append(str(item))
+            if idx < len(campaign_lines) - 1:
+                lines.append("")
     else:
         lines.append("")
         lines.append("Кампаний не найдено для этого кабинета в загрузке.")
-    message_text = "\n".join(lines)
+    details_line = (
+        f"CTR {_fmt_percent(ctr_value)} | FTD rate {_fmt_percent(ftd_rate_value)}"
+    )
+    lines.insert(3, details_line)
+
+    def _chunk_text(parts: List[str], limit: int = 3500) -> List[str]:
+        messages: List[str] = []
+        current: List[str] = []
+        current_len = 0
+        for raw in parts:
+            segment = raw or ""
+            appended_len = len(segment) + 1
+            if current and current_len + appended_len > limit:
+                messages.append("\n".join(current))
+                current = [segment]
+                current_len = len(segment)
+                continue
+            if len(segment) > limit:
+                # hard split oversized segments
+                for i in range(0, len(segment), limit):
+                    chunk = segment[i : i + limit]
+                    if current:
+                        messages.append("\n".join(current))
+                        current = []
+                        current_len = 0
+                    messages.append(chunk)
+                continue
+            current.append(segment)
+            current_len += appended_len
+        if current:
+            messages.append("\n".join(current))
+        return messages or [""]
+
+    chunks = _chunk_text(lines)
     target_chat = callback.message.chat.id if callback.message else callback.from_user.id
     try:
-        await bot.send_message(target_chat, message_text, parse_mode=ParseMode.HTML)
+        for chunk in chunks:
+            await bot.send_message(target_chat, chunk, parse_mode=ParseMode.HTML)
     except Exception as exc:
         logger.warning("Failed to send FB account detail", exc_info=exc)
         await callback.answer("Не удалось отправить сообщение.", show_alert=True)
