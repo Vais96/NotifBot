@@ -1,10 +1,11 @@
 import html
-import re
 import traceback
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
+import json
+import re
 from typing import Any, Dict, List, Optional, Set
 
 from aiogram import F
@@ -29,6 +30,25 @@ _FLAG_REASON_OVERRIDES = {
     "Spend ≥ $200 и FTD = 0": "🟥 Красный флаг",
     "CTR < 0.7%": "⚠️ Жёлтый флаг",
 }
+
+_FLAG_SEVERITY_ORDER = {
+    "RED": 3,
+    "YELLOW": 2,
+    "GREEN": 1,
+}
+
+_ALIAS_OVERRIDES = {
+    "ars": "arseny",
+}
+
+
+def _canonical_alias_key(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    return _ALIAS_OVERRIDES.get(normalized, normalized)
 
 # Helper: resolve user reference to Telegram ID (supports numeric ID, @username, tg://user?id=...)
 async def _resolve_user_id(identifier: str) -> int:
@@ -222,9 +242,10 @@ async def _resolve_campaign_assignments(campaign_names: Set[str]) -> Dict[str, D
     alias_keys: Dict[str, Optional[str]] = {}
     for name in campaign_names:
         meta = parse_campaign_name(name or "")
-        alias_key = (meta.get("alias_key") or "").strip().lower() or None
+        alias_key = _canonical_alias_key(meta.get("alias_key"))
         if not alias_key and name:
-            alias_key = name.split("_", 1)[0].strip().lower() or None
+            fallback = name.split("_", 1)[0].strip() if "_" in name else name
+            alias_key = _canonical_alias_key(fallback)
         alias_keys[name] = alias_key
     alias_values = [val for val in alias_keys.values() if val]
     alias_map = await db.fetch_alias_map(alias_values)
@@ -1205,7 +1226,53 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
             per_campaign_info[campaign] = info
             return info
 
-        campaign_section: list[str] = []
+        account_section: list[str] = []
+        account_cache_values: List[str] = []
+        account_keyboard_rows: List[List[InlineKeyboardButton]] = []
+        account_keyboard_markup: Optional[InlineKeyboardMarkup] = None
+        account_summaries: Dict[str, Dict[str, Any]] = {}
+        cache_kind = f"fbua:{upload_id}"
+
+        def _account_label(raw_name: Optional[str]) -> str:
+            text = (raw_name or "").strip()
+            return text or "Без кабинета"
+
+        def _add_campaign_to_account(
+            account_name_value: Optional[str],
+            decision: Optional[fb_csv.FlagDecision],
+            flag_label: str,
+            spend_value: Decimal,
+            revenue_value: Decimal,
+            ftd_value: int,
+            campaign_line: str,
+        ) -> None:
+            account_label = _account_label(account_name_value)
+            summary = account_summaries.setdefault(
+                account_label,
+                {
+                    "spend": Decimal("0"),
+                    "revenue": Decimal("0"),
+                    "ftd": 0,
+                    "campaign_count": 0,
+                    "max_severity": 0,
+                    "flag_label": flag_label,
+                    "campaign_lines": [],
+                },
+            )
+            summary["spend"] += spend_value
+            summary["revenue"] += revenue_value
+            summary["ftd"] += ftd_value
+            summary["campaign_count"] += 1
+            summary["campaign_lines"].append(campaign_line)
+            severity = 0
+            if decision and decision.code:
+                severity = _FLAG_SEVERITY_ORDER.get(decision.code.upper(), 0)
+            if severity > summary["max_severity"]:
+                summary["max_severity"] = severity
+                summary["flag_label"] = flag_label
+            elif summary["campaign_count"] == 1:
+                summary["flag_label"] = flag_label
+
         if aggregated_month_campaigns and target_month_start:
             account_names_for_summary = set(aggregated_account_names)
             spend_total = sum((entry["spend"] for entry in aggregated_month_campaigns.values()), Decimal("0"))
@@ -1232,9 +1299,6 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 "campaign_count": len(aggregated_month_campaigns),
                 "account_count": len(account_names_for_summary),
             }
-            campaign_section.append(
-                "<b>Кампании за " + html.escape(_month_label_ru(target_month_start)) + ":</b>"
-            )
             sorted_items = sorted(
                 aggregated_month_campaigns.items(),
                 key=lambda item: float(item[1]["spend"]),
@@ -1260,14 +1324,22 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 )
                 flag_label = _format_flag_decision(info.get("decision"))
                 roi_value = info.get("roi")
-                line = "• " + html.escape(str(name))
-                if account_name:
-                    line += f" ({html.escape(str(account_name))})"
-                line += " — " + html.escape(str(flag_label))
-                line += (
-                    f". Spend {_fmt_money(spend_value)} | FTD {ftd_value} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)}"
+                campaign_line = (
+                    "• "
+                    + html.escape(str(name))
+                    + " — "
+                    + html.escape(str(flag_label))
+                    + f". Spend {_fmt_money(spend_value)} | FTD {ftd_value} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)}"
                 )
-                campaign_section.append(line)
+                _add_campaign_to_account(
+                    account_name,
+                    info.get("decision"),
+                    flag_label,
+                    spend_value,
+                    revenue_value,
+                    ftd_value,
+                    campaign_line,
+                )
         elif month_campaign_rows and target_month_start:
             spend_total = Decimal("0")
             revenue_total = Decimal("0")
@@ -1277,9 +1349,6 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
             ftd_total = 0
             account_names: Set[str] = set()
             valid_campaign_count = 0
-            campaign_section.append(
-                "<b>Кампании за " + html.escape(_month_label_ru(target_month_start)) + ":</b>"
-            )
             sorted_rows = sorted(
                 month_campaign_rows,
                 key=lambda row: float(row.get("spend") or 0),
@@ -1307,22 +1376,29 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                     account_name,
                 )
                 flag_label = _format_flag_decision(info.get("decision"))
-                line = "• " + html.escape(str(name))
-                if account_name:
-                    line += f" ({html.escape(str(account_name))})"
-                line += " — " + html.escape(str(flag_label))
-                line += (
-                    f". Spend {_fmt_money(spend_value)} | FTD {ftd_value} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(info.get('roi'))}"
+                campaign_line = (
+                    "• "
+                    + html.escape(str(name))
+                    + " — "
+                    + html.escape(str(flag_label))
+                    + f". Spend {_fmt_money(spend_value)} | FTD {ftd_value} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(info.get('roi'))}"
                 )
-                campaign_section.append(line)
+                _add_campaign_to_account(
+                    account_name,
+                    info.get("decision"),
+                    flag_label,
+                    spend_value,
+                    revenue_value,
+                    ftd_value,
+                    campaign_line,
+                )
                 spend_total += spend_value
                 revenue_total += revenue_value
                 impressions_total += impressions_value
                 clicks_total += clicks_value
                 registrations_total += registrations_value
                 ftd_total += ftd_value
-                if account_name:
-                    account_names.add(str(account_name))
+                account_names.add(_account_label(account_name))
                 valid_campaign_count += 1
             month_summary = {
                 "month_start": target_month_start,
@@ -1383,6 +1459,8 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                         "campaign": campaign,
                         "old": old_label,
                         "new": new_label,
+                        "old_flag_id": old_flag_id,
+                        "new_flag_id": new_flag_id,
                         "reason": info.get("reason", ""),
                         "buyer_id": info.get("buyer_id"),
                         "alias_key": info.get("alias_key"),
@@ -1444,33 +1522,72 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 f"Spend {_fmt_money(spend_total)} | Rev {_fmt_money(revenue_total)} | ROI {_fmt_percent(roi_total)} | FTD {ftd_total} (FTD rate {_fmt_percent(ftd_rate_total)}) | Кампаний {campaign_count} | Кабинетов {account_count}"
             )
 
-        campaign_section: list[str] = []
-        if month_campaign_rows and target_month_start:
-            campaign_section.append(
-                "<b>Кампании за " + html.escape(_month_label_ru(target_month_start)) + ":</b>"
-            )
-            sorted_rows = sorted(
-                month_campaign_rows,
-                key=lambda row: float(row.get("spend") or 0),
+        max_accounts_in_text = 20
+        max_accounts_in_keyboard = 12
+        if account_summaries:
+            period_label = _month_label_ru(target_month_start) if target_month_start else None
+            if period_label:
+                account_section.append(
+                    "<b>Кабинеты за " + html.escape(period_label) + ":</b>"
+                )
+            else:
+                account_section.append("<b>Кабинеты:</b>")
+            account_section.append("Нажми кнопку ниже, чтобы посмотреть кампании кабинета.")
+            sorted_accounts = sorted(
+                account_summaries.items(),
+                key=lambda item: float(item[1]["spend"]),
                 reverse=True,
             )
-            for row in sorted_rows:
-                name = row.get("campaign_name")
-                if _should_skip_month_campaign(name):
-                    continue
-                spend_value = as_decimal(row.get("spend"))
-                revenue_value = as_decimal(row.get("revenue"))
-                ftd_value = int(row.get("ftd") or 0)
+            for idx, (account_name, summary) in enumerate(sorted_accounts):
+                spend_value = summary["spend"]
+                revenue_value = summary["revenue"]
+                ftd_value = summary["ftd"]
+                campaign_count = summary["campaign_count"]
                 roi_value = ((revenue_value - spend_value) / spend_value * Decimal(100)) if spend_value else None
-                account_name = row.get("account_name")
-                flag_id = row.get("curr_flag_id") or row.get("state_flag_id") or row.get("prev_flag_id")
-                flag_label = flag_id_to_title.get(flag_id) or flag_id_to_code.get(flag_id) or "—"
-                line = "• " + html.escape(str(name))
-                if account_name:
-                    line += f" ({html.escape(str(account_name))})"
-                line += " — " + html.escape(flag_label)
-                line += f". Spend {_fmt_money(spend_value)} | FTD {ftd_value} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)}"
-                campaign_section.append(line)
+                flag_label = summary.get("flag_label") or "—"
+                line = (
+                    "• "
+                    + html.escape(account_name)
+                    + " — "
+                    + html.escape(flag_label)
+                    + f". Spend {_fmt_money(spend_value)} | FTD {ftd_value} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)} | Кампаний {campaign_count}"
+                )
+                if idx < max_accounts_in_text:
+                    account_section.append(line)
+                payload = {
+                    "account_name": account_name,
+                    "flag_label": flag_label,
+                    "spend": str(spend_value),
+                    "revenue": str(revenue_value),
+                    "ftd": ftd_value,
+                    "campaign_count": campaign_count,
+                    "campaign_lines": summary["campaign_lines"],
+                }
+                account_cache_values.append(json.dumps(payload))
+                if idx < max_accounts_in_keyboard:
+                    flag_icon = flag_label.split(" ", 1)[0] if flag_label else "—"
+                    short_name = account_name
+                    if len(short_name) > 28:
+                        short_name = short_name[:27] + "…"
+                    button_text = f"{idx + 1}. {flag_icon} {short_name}".strip()
+                    if len(button_text) > 64:
+                        button_text = button_text[:63] + "…"
+                    account_keyboard_rows.append(
+                        [InlineKeyboardButton(text=button_text, callback_data=f"fbua:{upload_id}:{idx}")]
+                    )
+            remaining_accounts = len(account_summaries) - max_accounts_in_text
+            if remaining_accounts > 0:
+                account_section.append(f"… и ещё {remaining_accounts} кабинетов")
+            if account_keyboard_rows:
+                account_keyboard_markup = InlineKeyboardMarkup(inline_keyboard=account_keyboard_rows)
+        else:
+            account_section.append("Кабинеты в этой загрузке не найдены.")
+
+        try:
+            await db.set_ui_cache_list(user_id, cache_kind, account_cache_values)
+        except Exception as exc:
+            logger.warning("Failed to update FB account cache", exc_info=exc)
+            account_keyboard_markup = None
 
         missing_keitaro = sorted(
             c for c in parsed.campaign_names if c not in keitaro_stats.get("totals", {}) and "," not in c
@@ -1511,9 +1628,16 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 messages.append("\n".join(current_lines))
             return messages or [""]
 
-        sections = [summary_main, flag_section, month_section, campaign_section, missing_section]
+        sections = [summary_main, flag_section, month_section, account_section, missing_section]
         message_chunks = build_messages(sections)
-        await status_msg.edit_text(message_chunks[0], parse_mode=ParseMode.HTML)
+        if account_keyboard_markup:
+            await status_msg.edit_text(
+                message_chunks[0],
+                parse_mode=ParseMode.HTML,
+                reply_markup=account_keyboard_markup,
+            )
+        else:
+            await status_msg.edit_text(message_chunks[0], parse_mode=ParseMode.HTML)
         for extra_text in message_chunks[1:]:
             await bot.send_message(message.chat.id, extra_text, parse_mode=ParseMode.HTML)
         if flag_changes:
@@ -1587,6 +1711,42 @@ async def _notify_flag_updates(filename: str, flag_changes: List[Dict[str, Any]]
     if not flag_changes:
         return
     try:
+        flag_rows = await db.list_fb_flags()
+    except Exception as exc:
+        logger.warning("Failed to fetch flags for notifications", exc_info=exc)
+        flag_rows = []
+    red_flag_ids: Set[int] = set()
+    for row in flag_rows or []:
+        code = (row.get("code") or "").upper()
+        identifier = row.get("id")
+        if code != "RED" or identifier is None:
+            continue
+        try:
+            red_flag_ids.add(int(identifier))
+        except Exception:
+            continue
+
+    def _is_red_related(change: Dict[str, Any]) -> bool:
+        new_id = change.get("new_flag_id")
+        old_id = change.get("old_flag_id")
+        for value in (new_id, old_id):
+            if value is None:
+                continue
+            try:
+                if red_flag_ids and int(value) in red_flag_ids:
+                    return True
+            except Exception:
+                continue
+        if not red_flag_ids:
+            for label in (change.get("new"), change.get("old")):
+                if isinstance(label, str) and "🔴" in label:
+                    return True
+        return False
+
+    filtered_changes = [change for change in flag_changes if _is_red_related(change)]
+    if not filtered_changes:
+        return
+    try:
         users = await db.list_users()
     except Exception as exc:
         logger.warning("Failed to fetch users for flag notifications", exc_info=exc)
@@ -1649,7 +1809,7 @@ async def _notify_flag_updates(filename: str, flag_changes: List[Dict[str, Any]]
             return str(full_name)
         return str(uid)
 
-    for change in flag_changes:
+    for change in filtered_changes:
         recipients: Set[int] = set(admin_recipients) | set(heads)
         buyer_id = change.get("buyer_id")
         alias_lead_id = change.get("alias_lead_id")
@@ -1745,6 +1905,75 @@ async def _notify_flag_updates(filename: str, flag_changes: List[Dict[str, Any]]
             await bot.send_message(rid, message_text, parse_mode=ParseMode.HTML)
         except Exception as exc:
             logger.warning("Failed to send flag notification", user_id=rid, exc_info=exc)
+
+
+@dp.callback_query(F.data.startswith("fbua:"))
+async def on_fb_upload_account_detail(callback: CallbackQuery):
+    data = callback.data or ""
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Не удалось открыть кабинет.", show_alert=True)
+        return
+    _, upload_id_str, idx_str = parts
+    try:
+        idx = int(idx_str)
+    except Exception:
+        await callback.answer("Некорректный индекс кабинета.", show_alert=True)
+        return
+    kind = f"fbua:{upload_id_str}"
+    try:
+        cached = await db.get_ui_cache_value(callback.from_user.id, kind, idx)
+    except Exception as exc:
+        logger.warning("Failed to read FB account cache", exc_info=exc)
+        await callback.answer("Не удалось прочитать данные.", show_alert=True)
+        return
+    if not cached:
+        await callback.answer("Данные недоступны. Отправьте CSV заново.", show_alert=True)
+        return
+    try:
+        payload = json.loads(cached)
+    except Exception as exc:
+        logger.warning("Failed to decode FB account payload", exc_info=exc)
+        await callback.answer("Ошибка чтения данных.", show_alert=True)
+        return
+    account_name = str(payload.get("account_name") or "Без кабинета")
+    flag_label = str(payload.get("flag_label") or "—")
+    spend_raw = payload.get("spend")
+    revenue_raw = payload.get("revenue")
+    ftd_value = int(payload.get("ftd") or 0)
+    campaign_count = int(payload.get("campaign_count") or 0)
+    try:
+        spend_value = Decimal(str(spend_raw)) if spend_raw is not None else Decimal("0")
+    except Exception:
+        spend_value = Decimal("0")
+    try:
+        revenue_value = Decimal(str(revenue_raw)) if revenue_raw is not None else Decimal("0")
+    except Exception:
+        revenue_value = Decimal("0")
+    roi_value = ((revenue_value - spend_value) / spend_value * Decimal(100)) if spend_value else None
+    lines: List[str] = []
+    lines.append(f"<b>{html.escape(account_name)}</b>")
+    lines.append("Флаг кабинета: " + html.escape(flag_label))
+    lines.append(
+        f"Spend {_fmt_money(spend_value)} | Rev {_fmt_money(revenue_value)} | ROI {_fmt_percent(roi_value)} | FTD {ftd_value} | Кампаний {campaign_count}"
+    )
+    campaign_lines = payload.get("campaign_lines") or []
+    if campaign_lines:
+        lines.append("")
+        lines.append("<b>Кампании:</b>")
+        lines.extend(str(item) for item in campaign_lines)
+    else:
+        lines.append("")
+        lines.append("Кампаний не найдено для этого кабинета в загрузке.")
+    message_text = "\n".join(lines)
+    target_chat = callback.message.chat.id if callback.message else callback.from_user.id
+    try:
+        await bot.send_message(target_chat, message_text, parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        logger.warning("Failed to send FB account detail", exc_info=exc)
+        await callback.answer("Не удалось отправить сообщение.", show_alert=True)
+        return
+    await callback.answer()
 @dp.message(CommandStart())
 async def on_start(message: Message):
     await db.upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
