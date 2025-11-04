@@ -19,6 +19,17 @@ from . import keitaro_sync
 from .keitaro import normalize_domain, parse_campaign_name
 from . import fb_csv
 
+_FLAG_CODE_LABELS = {
+    "GREEN": "🟢 Зелёный",
+    "YELLOW": "🟡 Жёлтый",
+    "RED": "🔴 Красный",
+}
+
+_FLAG_REASON_OVERRIDES = {
+    "Spend ≥ $200 и FTD = 0": "🟥 Красный флаг",
+    "CTR < 0.7%": "⚠️ Жёлтый флаг",
+}
+
 # Helper: resolve user reference to Telegram ID (supports numeric ID, @username, tg://user?id=...)
 async def _resolve_user_id(identifier: str) -> int:
     s = (identifier or "").strip()
@@ -89,7 +100,10 @@ def _as_decimal(value) -> Decimal:
         return Decimal("0")
 
 
-def _format_flag_label(flag_id, flags_by_id: dict[int, dict[str, Any]]) -> str:
+def _format_flag_label(
+    flag_id,
+    flags_by_id: dict[int, dict[str, Any]],
+) -> str:
     if flag_id is None:
         return "—"
     try:
@@ -99,7 +113,24 @@ def _format_flag_label(flag_id, flags_by_id: dict[int, dict[str, Any]]) -> str:
     row = flags_by_id.get(fid)
     if not row:
         return str(fid)
-    return row.get("title") or row.get("code") or str(fid)
+    code = (row.get("code") or "").upper()
+    if code and code in _FLAG_CODE_LABELS:
+        return _FLAG_CODE_LABELS[code]
+    title = row.get("title")
+    if title:
+        return str(title)
+    return code or str(fid)
+
+
+def _format_flag_decision(decision: Optional[fb_csv.FlagDecision]) -> str:
+    if not decision:
+        return "—"
+    label = _FLAG_REASON_OVERRIDES.get(decision.reason)
+    if not label:
+        label = _FLAG_CODE_LABELS.get(decision.code.upper(), decision.code)
+    if decision.reason:
+        return f"{label} ({decision.reason})"
+    return label
 
 
 def _format_buyer_label(buyer_id, users_by_id: dict[int, dict[str, Any]]) -> str:
@@ -886,6 +917,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
         flag_by_code = {row["code"].upper(): row for row in flag_rows}
         flag_id_to_title = {row["id"]: row["title"] for row in flag_rows}
         flag_id_to_code = {row["id"]: row["code"] for row in flag_rows}
+        flags_by_id = {int(row["id"]): row for row in flag_rows if row.get("id") is not None}
         state_map = await db.fetch_fb_campaign_state(parsed.campaign_names)
         latest_day = parsed.latest_day_by_campaign
         daily_stats = keitaro_stats.get("daily", {})
@@ -1226,11 +1258,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                     ftd_value,
                     account_name,
                 )
-                flag_label = (
-                    flag_id_to_title.get(info.get("flag_id"))
-                    or flag_id_to_code.get(info.get("flag_id"))
-                    or info["decision"].code
-                )
+                flag_label = _format_flag_decision(info.get("decision"))
                 roi_value = info.get("roi")
                 line = "• " + html.escape(str(name))
                 if account_name:
@@ -1278,11 +1306,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                     ftd_value,
                     account_name,
                 )
-                flag_label = (
-                    flag_id_to_title.get(info.get("flag_id"))
-                    or flag_id_to_code.get(info.get("flag_id"))
-                    or info["decision"].code
-                )
+                flag_label = _format_flag_decision(info.get("decision"))
                 line = "• " + html.escape(str(name))
                 if account_name:
                     line += f" ({html.escape(str(account_name))})"
@@ -1352,12 +1376,8 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                     }
                 )
             if new_flag_id != old_flag_id:
-                old_label = flag_id_to_title.get(old_flag_id) or flag_id_to_code.get(old_flag_id) or "—"
-                new_label = (
-                    flag_id_to_title.get(new_flag_id)
-                    or flag_id_to_code.get(new_flag_id)
-                    or info["decision"].code
-                )
+                old_label = _format_flag_label(old_flag_id, flags_by_id)
+                new_label = _format_flag_decision(info.get("decision"))
                 flag_changes.append(
                     {
                         "campaign": campaign,
@@ -2543,12 +2563,13 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
         if idx <= max_items:
             roi = ((revenue - spend) / spend * Decimal(100)) if spend else None
             ftd_rate = (Decimal(ftd) / Decimal(registrations) * Decimal(100)) if registrations else None
+            ctr = (Decimal(clicks) / Decimal(impressions) * Decimal(100)) if impressions else None
             campaign_name = html.escape(str(row.get("campaign_name") or "—"))
             account_name = html.escape(str(row.get("account_name") or "—"))
             buyer_label = _format_buyer_label(row.get("buyer_id"), users_by_id)
             prev_flag_label = html.escape(_format_flag_label(row.get("prev_flag_id"), flags_by_id))
-            curr_flag_id = row.get("curr_flag_id") or row.get("state_flag_id")
-            curr_flag_label = html.escape(_format_flag_label(curr_flag_id, flags_by_id))
+            decision = fb_csv.decide_flag(spend, ctr, roi, ftd)
+            curr_flag_label = html.escape(_format_flag_decision(decision))
             line = (
                 f"{idx}) <code>{campaign_name}</code> | Акк: <code>{account_name}</code> | "
                 f"Байер: {buyer_label} | Spend {_fmt_money(spend)} | FTD {ftd} | "
@@ -2671,6 +2692,20 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
                     entry["curr_flag_id"] = curr_flag_id
             except Exception:
                 pass
+    for info in accounts.values():
+        spend = info["spend"]
+        revenue = info["revenue"]
+        impressions = info["impressions"]
+        clicks = info["clicks"]
+        registrations = info["registrations"]
+        ctr_value = (
+            (Decimal(clicks) / Decimal(impressions) * Decimal(100))
+            if impressions
+            else None
+        )
+        roi_value = ((revenue - spend) / spend * Decimal(100)) if spend else None
+        decision = fb_csv.decide_flag(spend, ctr_value, roi_value, info["ftd"])
+        info["decision"] = decision
     sorted_accounts = sorted(accounts.items(), key=lambda item: item[1]["spend"], reverse=True)
     total_spend = sum((info["spend"] for _, info in sorted_accounts), Decimal("0"))
     total_revenue = sum((info["revenue"] for _, info in sorted_accounts), Decimal("0"))
@@ -2698,8 +2733,7 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
         else:
             buyers_text = "—"
         prev_flag_label = html.escape(_format_flag_label(info["prev_flag_id"], flags_by_id))
-        curr_flag_id = info["curr_flag_id"] or info["prev_flag_id"]
-        curr_flag_label = html.escape(_format_flag_label(curr_flag_id, flags_by_id))
+        curr_flag_label = html.escape(_format_flag_decision(info.get("decision")))
         account_name = html.escape(account_name_raw)
         line = (
             f"{idx}) <code>{account_name}</code> | Кампаний: {len(info['campaigns'])} | "
