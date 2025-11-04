@@ -1573,6 +1573,7 @@ async def fetch_keitaro_campaign_stats(
         return {"daily": {}, "totals": {}}
     start = min(period_start, period_end)
     end = max(period_start, period_end)
+    end_exclusive = end + timedelta(days=1)
     pool = await init_pool()
     placeholders_names = ",".join(["%s"] * len(names))
     sale_like = (
@@ -1589,33 +1590,20 @@ async def fetch_keitaro_campaign_stats(
     placeholders_status = ",".join(["%s"] * len(sale_like))
     query = f"""
         SELECT
-            t.campaign_name,
-            t.day_date,
+            DATE(fc.conversion_time_utc) AS day_date,
+            fc.sub_id_2 AS campaign_name,
             COUNT(*) AS ftd,
-            SUM(COALESCE(t.payout, 0)) AS revenue
-        FROM (
-            SELECT
-                DATE(created_at) AS day_date,
-                COALESCE(
-                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id_2')), ''),
-                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub2')), ''),
-                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.sub_id2')), ''),
-                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.campaign_name')), ''),
-                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.campaign')), ''),
-                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.campaignName')), ''),
-                    NULLIF(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.subid')), '')
-                ) AS campaign_name,
-                LOWER(TRIM(COALESCE(status, ''))) AS status_norm,
-                payout
-            FROM tg_events
-            WHERE created_at >= %s AND created_at < %s
-        ) AS t
-        WHERE t.campaign_name IS NOT NULL
-          AND t.campaign_name IN ({placeholders_names})
-          AND t.status_norm IN ({placeholders_status})
-        GROUP BY t.campaign_name, t.day_date
+            SUM(COALESCE(fc.revenue, 0)) AS revenue
+        FROM fact_conversions fc
+        WHERE fc.conversion_time_utc >= %s
+          AND fc.conversion_time_utc < %s
+          AND fc.sub_id_2 IS NOT NULL
+          AND fc.sub_id_2 <> ''
+          AND fc.sub_id_2 IN ({placeholders_names})
+          AND LOWER(fc.status) IN ({placeholders_status})
+        GROUP BY fc.sub_id_2, DATE(fc.conversion_time_utc)
     """
-    params: List[Any] = [start, end + timedelta(days=1)]
+    params: List[Any] = [start, end_exclusive]
     params.extend(names)
     params.extend(sale_like)
     daily: Dict[Tuple[str, date], Dict[str, Any]] = {}
