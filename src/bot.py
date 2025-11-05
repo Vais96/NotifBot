@@ -293,6 +293,9 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
 
     cookies_file = _resolve_youtube_cookies_file()
     youtube_headers = _build_youtube_headers()
+    client_order: List[str] = ["android", "web"]
+    if cookies_file or youtube_headers:
+        client_order = ["web", "android"]
 
     ffmpeg_path = shutil.which("ffmpeg")
     def _probe_info() -> dict[str, Any]:
@@ -307,8 +310,8 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             options["cookiefile"] = cookies_file
         options["extractor_args"] = {
             "youtube": {
-                # try standard web client first so logged-in cookies work; fall back to android for 480p progressive tracks
-                "player_client": ["web", "android"],
+                # prefer android client when unauthenticated; switch to web first only if we have cookies/headers
+                "player_client": client_order,
                 "skip": ["dash"],
             }
         }
@@ -363,8 +366,8 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             "no_color": True,
             "extractor_args": {
                 "youtube": {
-                    # keep same client order on actual download to stay consistent with authenticated cookies
-                    "player_client": ["web", "android"],
+                    # keep same client order on actual download
+                    "player_client": client_order,
                     "skip": ["dash"]
                 }
             },
