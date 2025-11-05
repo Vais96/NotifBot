@@ -31,6 +31,7 @@ from . import keitaro_sync
 from .keitaro import normalize_domain, parse_campaign_name
 from . import fb_csv
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
 _FLAG_CODE_LABELS = {
     "GREEN": "🟢 Зелёный",
@@ -204,28 +205,108 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
     normalized_url = _ensure_url_scheme(url)
     temp_dir = Path(tempfile.mkdtemp(prefix="ytbot-"))
 
-    def _invoke_download() -> tuple[dict[str, Any], str]:
-        options = {
+    ffmpeg_path = shutil.which("ffmpeg")
+    def _probe_info() -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "outtmpl": str(temp_dir / "probe"),
+            "noplaylist": True,
+            "quiet": True,
+            "no_color": True,
+            "skip_download": True,
+        }
+        with yt_dlp.YoutubeDL(options) as ydl:
+            return ydl.extract_info(normalized_url, download=False)
+
+    try:
+        probe = await asyncio.to_thread(_probe_info)
+    except Exception as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise YoutubeDownloadError(str(exc)) from exc
+
+    formats = probe.get("formats") or []
+    progressive_available = any(
+        (fmt.get("acodec") not in (None, "none")) and (fmt.get("vcodec") not in (None, "none"))
+        for fmt in formats
+    )
+    audio_available = any(fmt.get("acodec") not in (None, "none") for fmt in formats)
+    video_available = any(fmt.get("vcodec") not in (None, "none") for fmt in formats)
+    have_separate_streams = audio_available and video_available
+
+    format_candidates: List[str] = []
+    if ffmpeg_path and have_separate_streams:
+        format_candidates.extend([
+            "bv*[height<=480][ext=mp4]+ba[ext=m4a]/bv*[height<=480]+ba/bv*+ba/b",
+            "bv*+ba/b",
+        ])
+    if progressive_available:
+        format_candidates.extend([
+            "best[height<=480][acodec!=none][vcodec!=none]",
+            "best[acodec!=none][vcodec!=none]",
+        ])
+
+    if not format_candidates:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        if not ffmpeg_path and have_separate_streams:
+            raise YoutubeDownloadError("Для этого видео нужен установленный ffmpeg, т.к. YouTube выдаёт раздельные дорожки")
+        raise YoutubeDownloadError("Не удалось подобрать доступный формат видео")
+
+    last_error: Optional[Exception] = None
+
+    def _invoke_download(fmt: str) -> tuple[dict[str, Any], str]:
+        options: dict[str, Any] = {
             "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
             "noplaylist": True,
             "quiet": True,
-            "format": "best[height<=480][ext=mp4]/best[height<=480]/best",
+            "format": fmt,
+            "restrictfilenames": True,
+            "no_color": True,
         }
+        if ffmpeg_path:
+            options.update(
+                {
+                    "ffmpeg_location": ffmpeg_path,
+                    "merge_output_format": "mp4",
+                    "postprocessors": [
+                        {"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}
+                    ],
+                }
+            )
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(normalized_url, download=True)
             filepath = ydl.prepare_filename(info)
             requested = info.get("requested_downloads") or []
-            if requested:
-                candidate = requested[0].get("filepath")
+            for item in requested:
+                candidate = item.get("filepath")
                 if candidate:
                     filepath = candidate
+            final_path = info.get("_filename")
+            if final_path:
+                filepath = final_path
             return info, filepath
 
-    try:
-        info, filepath = await asyncio.to_thread(_invoke_download)
-    except Exception as exc:
+    info: Optional[dict[str, Any]] = None
+    filepath: Optional[str] = None
+    for fmt in format_candidates:
+        try:
+            info, filepath = await asyncio.to_thread(_invoke_download, fmt)
+            break
+        except DownloadError as exc:
+            last_error = exc
+            # если формат не найден или ffmpeg отсутствует, пробуем следующий
+            continue
+        except Exception as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise YoutubeDownloadError(str(exc)) from exc
+    else:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        raise YoutubeDownloadError(str(exc)) from exc
+        message = str(last_error) if last_error else "Не удалось подобрать формат"
+        if last_error and "ffmpeg" in message.lower() and not ffmpeg_path:
+            message = "Требуется установленный ffmpeg для склейки видео и аудио"
+        raise YoutubeDownloadError(message)
+
+    if not info or not filepath:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise YoutubeDownloadError("Не удалось скачать видео")
 
     file_path = Path(filepath)
     if not file_path.exists():
@@ -2588,6 +2669,9 @@ async def on_text_fallback(message: Message):
             except YoutubeDownloadError as exc:
                 logger.warning("Ошибка скачивания видео YouTube", error=str(exc))
                 response = "Не удалось скачать видео. Проверьте ссылку и попробуйте ещё раз либо отправьте '-' чтобы отменить."
+                detail = str(exc).strip()
+                if detail:
+                    response += f"\nПричина: {detail}"
                 if status_msg:
                     try:
                         await status_msg.edit_text(response)
