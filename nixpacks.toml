@@ -1,2 +1,2 @@
 [phases.setup]
-packages = ["ffmpeg"]
+nixPkgs = ["ffmpeg"]
