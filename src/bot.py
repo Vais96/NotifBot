@@ -1,16 +1,27 @@
+import asyncio
 import html
+import json
+import re
+import shutil
+import tempfile
 import traceback
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
-import json
-import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from aiogram import F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    FSInputFile,
+)
 from aiogram.enums.parse_mode import ParseMode
 from loguru import logger
 from .config import settings
@@ -19,6 +30,7 @@ from .dispatcher import bot, dp, ADMIN_IDS
 from . import keitaro_sync
 from .keitaro import normalize_domain, parse_campaign_name
 from . import fb_csv
+import yt_dlp
 
 _FLAG_CODE_LABELS = {
     "GREEN": "🟢 Зелёный",
@@ -151,6 +163,82 @@ _DOMAIN_SPLIT_RE = re.compile(r"[\s,;]+")
 MAX_DOMAINS_PER_REQUEST = 10
 MAX_CSV_FILE_SIZE_BYTES = 8 * 1024 * 1024
 CSV_ALLOWED_MIME_TYPES = {"text/csv", "application/vnd.ms-excel"}
+
+YOUTUBE_URL_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:m\.)?(?:youtube\.com|youtu\.be)/", re.IGNORECASE)
+TELEGRAM_MAX_VIDEO_BYTES = 48 * 1024 * 1024
+
+
+@dataclass
+class YoutubeDownloadResult:
+    file_path: Path
+    title: str
+    temp_dir: Path
+
+
+class YoutubeDownloadError(Exception):
+    """Base error for YouTube download flow."""
+
+
+class YoutubeVideoTooLarge(YoutubeDownloadError):
+    def __init__(self, size_bytes: int):
+        super().__init__("Video exceeds Telegram upload limit")
+        self.size_bytes = size_bytes
+
+
+def _is_youtube_url(value: str) -> bool:
+    if not value:
+        return False
+    return bool(YOUTUBE_URL_RE.match(value.strip()))
+
+
+def _ensure_url_scheme(value: str) -> str:
+    if not value:
+        return value
+    stripped = value.strip()
+    if not re.match(r"^https?://", stripped, re.IGNORECASE):
+        return "https://" + stripped
+    return stripped
+
+
+async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
+    normalized_url = _ensure_url_scheme(url)
+    temp_dir = Path(tempfile.mkdtemp(prefix="ytbot-"))
+
+    def _invoke_download() -> tuple[dict[str, Any], str]:
+        options = {
+            "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
+            "noplaylist": True,
+            "quiet": True,
+            "format": "best[height<=480][ext=mp4]/best[height<=480]/best",
+        }
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(normalized_url, download=True)
+            filepath = ydl.prepare_filename(info)
+            requested = info.get("requested_downloads") or []
+            if requested:
+                candidate = requested[0].get("filepath")
+                if candidate:
+                    filepath = candidate
+            return info, filepath
+
+    try:
+        info, filepath = await asyncio.to_thread(_invoke_download)
+    except Exception as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise YoutubeDownloadError(str(exc)) from exc
+
+    file_path = Path(filepath)
+    if not file_path.exists():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise YoutubeDownloadError("Downloaded file not found")
+
+    size = file_path.stat().st_size
+    if size > TELEGRAM_MAX_VIDEO_BYTES:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise YoutubeVideoTooLarge(size)
+
+    title = str(info.get("title") or file_path.stem)
+    return YoutubeDownloadResult(file_path=file_path, title=title, temp_dir=temp_dir)
 
 
 def _fmt_money(value: Decimal | float | int | None) -> str:
@@ -452,6 +540,7 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
     ]
     buttons.append([InlineKeyboardButton(text="Проверить домен", callback_data="menu:checkdomain")])
     buttons.append([InlineKeyboardButton(text="Загрузить CSV", callback_data="menu:uploadcsv")])
+    buttons.append([InlineKeyboardButton(text="Скачать видео", callback_data="menu:yt_download")])
     if is_admin:
         buttons += [
             [InlineKeyboardButton(text="Пользователи", callback_data="menu:listusers"), InlineKeyboardButton(text="Управление", callback_data="menu:manage")],
@@ -829,6 +918,13 @@ async def on_menu_click(call: CallbackQuery):
             "Пришлите CSV из Facebook Ads Manager.\n"
             "Файл должен содержать колонку 'День' с разбивкой по датам.\n"
             "Чтобы отменить ожидание, отправьте '-'"
+        )
+        return await call.answer()
+    if key == "yt_download":
+        await db.set_pending_action(call.from_user.id, "youtube:await_url", None)
+        await call.message.answer(
+            "Пришлите ссылку на видео YouTube.\n"
+            "Если передумаете, отправьте '-' чтобы отменить."
         )
         return await call.answer()
     if key == "refreshdomains":
@@ -2456,6 +2552,95 @@ async def on_text_fallback(message: Message):
                 return await message.answer("Готово. Проверка доменов завершена")
             result = await _lookup_domains_text(text)
             await message.answer(result + "\n\nОтправьте следующий домен или '-' чтобы завершить")
+            return
+        if action == "youtube:await_url":
+            text = (message.text or "").strip()
+            lowered = text.lower()
+            if lowered in ("-", "stop", "стоп"):
+                await db.clear_pending_action(message.from_user.id)
+                return await message.answer("Скачивание отменено")
+            if not _is_youtube_url(text):
+                return await message.answer("Это не похоже на ссылку YouTube. Пришлите корректный URL или '-' чтобы отменить ожидание")
+
+            status_msg: Optional[Message] = None
+            try:
+                status_msg = await message.answer("Скачиваю видео, подождите…")
+            except Exception as exc:
+                logger.warning("Не удалось отправить статусное сообщение о скачивании", error=str(exc))
+
+            download_result: Optional[YoutubeDownloadResult] = None
+            try:
+                download_result = await _download_youtube_video(text)
+            except YoutubeVideoTooLarge as exc:
+                size_mb = exc.size_bytes / (1024 * 1024)
+                response = (
+                    f"Видео слишком большое для отправки (~{size_mb:.1f} MB, лимит 48 MB). "
+                    "Попробуйте ссылку на более короткий ролик или '-' чтобы отменить."
+                )
+                if status_msg:
+                    try:
+                        await status_msg.edit_text(response)
+                    except Exception:
+                        await message.answer(response)
+                else:
+                    await message.answer(response)
+                return
+            except YoutubeDownloadError as exc:
+                logger.warning("Ошибка скачивания видео YouTube", error=str(exc))
+                response = "Не удалось скачать видео. Проверьте ссылку и попробуйте ещё раз либо отправьте '-' чтобы отменить."
+                if status_msg:
+                    try:
+                        await status_msg.edit_text(response)
+                    except Exception:
+                        await message.answer(response)
+                else:
+                    await message.answer(response)
+                return
+            except Exception as exc:
+                logger.exception("Непредвиденная ошибка при скачивании видео YouTube", exc_info=exc)
+                response = "Произошла ошибка при скачивании. Попробуйте позже или отправьте '-' чтобы отменить."
+                if status_msg:
+                    try:
+                        await status_msg.edit_text(response)
+                    except Exception:
+                        await message.answer(response)
+                else:
+                    await message.answer(response)
+                return
+
+            if download_result is None:
+                return
+
+            try:
+                if status_msg:
+                    try:
+                        await status_msg.edit_text("Отправляю видео…")
+                    except Exception:
+                        pass
+                caption = download_result.title[:1024] if download_result.title else None
+                input_file = FSInputFile(download_result.file_path, filename=download_result.file_path.name)
+                await message.answer_video(video=input_file, caption=caption)
+            except Exception as exc:
+                logger.exception("Не удалось отправить скачанное видео", exc_info=exc)
+                error_text = "Не удалось отправить видео. Попробуйте ещё раз позже или отправьте '-' чтобы отменить."
+                if status_msg:
+                    try:
+                        await status_msg.edit_text(error_text)
+                    except Exception:
+                        await message.answer(error_text)
+                else:
+                    await message.answer(error_text)
+                return
+            finally:
+                if download_result is not None:
+                    shutil.rmtree(download_result.temp_dir, ignore_errors=True)
+
+            await db.clear_pending_action(message.from_user.id)
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
             return
         if action.startswith("alias:setbuyer:"):
             alias = action.split(":", 2)[2]
