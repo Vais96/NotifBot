@@ -18,6 +18,8 @@ class Settings(BaseModel):
     youtube_cookies_path: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES_PATH")
     youtube_cookies_raw: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES")
     youtube_cookies_base64: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES_B64")
+    youtube_identity_token: Optional[str] = Field(default=None, validation_alias="YTDLP_IDENTITY_TOKEN")
+    youtube_auth_user: Optional[str] = Field(default=None, validation_alias="YTDLP_AUTH_USER")
 
     @classmethod
     def load(cls) -> "Settings":
@@ -44,6 +46,8 @@ class Settings(BaseModel):
             "YTDLP_COOKIES_PATH": os.getenv("YTDLP_COOKIES_PATH"),
             "YTDLP_COOKIES": os.getenv("YTDLP_COOKIES"),
             "YTDLP_COOKIES_B64": os.getenv("YTDLP_COOKIES_B64"),
+            "YTDLP_IDENTITY_TOKEN": os.getenv("YTDLP_IDENTITY_TOKEN"),
+            "YTDLP_AUTH_USER": os.getenv("YTDLP_AUTH_USER"),
         }
         return cls.model_validate(raw)
 

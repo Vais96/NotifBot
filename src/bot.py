@@ -205,6 +205,17 @@ def _ensure_url_scheme(value: str) -> str:
 _YOUTUBE_COOKIES_CACHE: Optional[Path] = None
 
 
+def _build_youtube_headers() -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    token = (settings.youtube_identity_token or "").strip()
+    if token:
+        headers["X-Youtube-Identity-Token"] = token
+    auth_user = (settings.youtube_auth_user or "").strip()
+    if auth_user:
+        headers["X-Goog-AuthUser"] = auth_user
+    return headers
+
+
 def _normalize_cookiefile_content(content: str) -> str:
     normalized: List[str] = []
     modified = False
@@ -281,6 +292,7 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
     temp_dir = Path(tempfile.mkdtemp(prefix="ytbot-"))
 
     cookies_file = _resolve_youtube_cookies_file()
+    youtube_headers = _build_youtube_headers()
 
     ffmpeg_path = shutil.which("ffmpeg")
     def _probe_info() -> dict[str, Any]:
@@ -301,6 +313,8 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             }
         }
         options["extractor_retries"] = 3
+        if youtube_headers:
+            options["http_headers"] = youtube_headers
         with yt_dlp.YoutubeDL(options) as ydl:
             return ydl.extract_info(normalized_url, download=False)
 
@@ -368,6 +382,8 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
                     ],
                 }
             )
+            if youtube_headers:
+                options["http_headers"] = youtube_headers
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(normalized_url, download=True)
             filepath = ydl.prepare_filename(info)
