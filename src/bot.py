@@ -219,11 +219,16 @@ def _resolve_youtube_cookies_file() -> Optional[str]:
 
     def _cache_content(content: str) -> str:
         global _YOUTUBE_COOKIES_CACHE
-        if _YOUTUBE_COOKIES_CACHE is None or not _YOUTUBE_COOKIES_CACHE.exists():
+        if _YOUTUBE_COOKIES_CACHE is None:
             temp_dir = Path(tempfile.mkdtemp(prefix="ytcookies-"))
-            dest = temp_dir / "cookies.txt"
-            dest.write_text(content, encoding="utf-8")
-            _YOUTUBE_COOKIES_CACHE = dest
+            _YOUTUBE_COOKIES_CACHE = temp_dir / "cookies.txt"
+        try:
+            assert _YOUTUBE_COOKIES_CACHE is not None
+            if not _YOUTUBE_COOKIES_CACHE.parent.exists():
+                _YOUTUBE_COOKIES_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            _YOUTUBE_COOKIES_CACHE.write_text(content, encoding="utf-8")
+        except Exception as exc:
+            logger.warning("Failed to write YouTube cookies cache", error=str(exc))
         return str(_YOUTUBE_COOKIES_CACHE)
 
     raw_cookies = settings.youtube_cookies_raw
