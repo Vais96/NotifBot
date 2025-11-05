@@ -205,6 +205,18 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
     normalized_url = _ensure_url_scheme(url)
     temp_dir = Path(tempfile.mkdtemp(prefix="ytbot-"))
 
+    cookies_file: Optional[str] = None
+    configured_cookies = settings.youtube_cookies_path
+    if configured_cookies:
+        try:
+            candidate = Path(configured_cookies).expanduser()
+            if candidate.exists():
+                cookies_file = str(candidate.resolve())
+            else:
+                logger.warning("Configured YouTube cookies file not found", path=str(candidate))
+        except Exception as exc:
+            logger.warning("Failed to resolve YouTube cookies path", error=str(exc))
+
     ffmpeg_path = shutil.which("ffmpeg")
     def _probe_info() -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -214,6 +226,15 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             "no_color": True,
             "skip_download": True,
         }
+        if cookies_file:
+            options["cookiefile"] = cookies_file
+        options["extractor_args"] = {
+            "youtube": {
+                "player_client": ["android"],
+                "skip": ["dash"],
+            }
+        }
+        options["extractor_retries"] = 3
         with yt_dlp.YoutubeDL(options) as ydl:
             return ydl.extract_info(normalized_url, download=False)
 
@@ -268,6 +289,8 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             },
             "extractor_retries": 3,
         }
+        if cookies_file:
+            options["cookiefile"] = cookies_file
         if ffmpeg_path:
             options.update(
                 {

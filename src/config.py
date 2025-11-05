@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 import os
 from dotenv import load_dotenv
-from typing import List
+from typing import List, Optional
 
 load_dotenv()
 
@@ -15,6 +15,7 @@ class Settings(BaseModel):
     postback_token: str = Field(default="", validation_alias="POSTBACK_TOKEN")
     keitaro_api_key: str = Field(default="", validation_alias="KEITARO_API_KEY")
     keitaro_base_url: str = Field(default="", validation_alias="KEITARO_BASE_URL")
+    youtube_cookies_path: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES_PATH")
 
     @classmethod
     def load(cls) -> "Settings":
@@ -38,6 +39,7 @@ class Settings(BaseModel):
             "POSTBACK_TOKEN": os.getenv("POSTBACK_TOKEN", ""),
             "KEITARO_API_KEY": os.getenv("KEITARO_API_KEY", ""),
             "KEITARO_BASE_URL": os.getenv("KEITARO_BASE_URL", ""),
+            "YTDLP_COOKIES_PATH": os.getenv("YTDLP_COOKIES_PATH"),
         }
         return cls.model_validate(raw)
 
