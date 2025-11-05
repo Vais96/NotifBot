@@ -16,7 +16,9 @@ A FastAPI + aiogram bot that receives Keitaro S2S postbacks and notifies the app
 - ADMINS: Comma-separated Telegram user IDs with admin rights
 - PORT: Port to listen on (Railway provides)
 - POSTBACK_TOKEN: Optional token to validate Keitaro postbacks via Authorization header
-- YTDLP_COOKIES_PATH: Optional path to cookies.txt in Netscape format for YouTube downloads (if missing, bot downloads only public videos)
+- YTDLP_COOKIES_PATH: Optional path to cookies.txt in Netscape format for YouTube downloads (если отсутствует — бот работает без авторизации)
+- YTDLP_COOKIES: Альтернатива YTDLP_COOKIES_PATH — содержимое файла cookies.txt (многострочная строка)
+- YTDLP_COOKIES_B64: То же, что YTDLP_COOKIES, но в base64 (удобно хранить в переменной окружения)
 
 ## Run locally (optional)
 1. Create virtualenv and install deps

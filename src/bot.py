@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import html
 import json
 import re
@@ -201,21 +202,53 @@ def _ensure_url_scheme(value: str) -> str:
     return stripped
 
 
+_YOUTUBE_COOKIES_CACHE: Optional[Path] = None
+
+
+def _resolve_youtube_cookies_file() -> Optional[str]:
+    global _YOUTUBE_COOKIES_CACHE
+    path_setting = settings.youtube_cookies_path
+    if path_setting:
+        try:
+            resolved = Path(path_setting).expanduser()
+            if resolved.exists():
+                return str(resolved.resolve())
+            logger.warning("Configured YouTube cookies file not found", path=str(resolved))
+        except Exception as exc:
+            logger.warning("Failed to resolve YouTube cookies path", error=str(exc))
+
+    def _cache_content(content: str) -> str:
+        global _YOUTUBE_COOKIES_CACHE
+        if _YOUTUBE_COOKIES_CACHE is None or not _YOUTUBE_COOKIES_CACHE.exists():
+            temp_dir = Path(tempfile.mkdtemp(prefix="ytcookies-"))
+            dest = temp_dir / "cookies.txt"
+            dest.write_text(content, encoding="utf-8")
+            _YOUTUBE_COOKIES_CACHE = dest
+        return str(_YOUTUBE_COOKIES_CACHE)
+
+    raw_cookies = settings.youtube_cookies_raw
+    if raw_cookies:
+        return _cache_content(raw_cookies)
+
+    encoded_cookies = settings.youtube_cookies_base64
+    if encoded_cookies:
+        try:
+            decoded = base64.b64decode(encoded_cookies).decode("utf-8")
+        except Exception as exc:
+            logger.warning("Failed to decode base64 YouTube cookies", error=str(exc))
+        else:
+            return _cache_content(decoded)
+
+    if _YOUTUBE_COOKIES_CACHE and _YOUTUBE_COOKIES_CACHE.exists():
+        return str(_YOUTUBE_COOKIES_CACHE)
+    return None
+
+
 async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
     normalized_url = _ensure_url_scheme(url)
     temp_dir = Path(tempfile.mkdtemp(prefix="ytbot-"))
 
-    cookies_file: Optional[str] = None
-    configured_cookies = settings.youtube_cookies_path
-    if configured_cookies:
-        try:
-            candidate = Path(configured_cookies).expanduser()
-            if candidate.exists():
-                cookies_file = str(candidate.resolve())
-            else:
-                logger.warning("Configured YouTube cookies file not found", path=str(candidate))
-        except Exception as exc:
-            logger.warning("Failed to resolve YouTube cookies path", error=str(exc))
+    cookies_file = _resolve_youtube_cookies_file()
 
     ffmpeg_path = shutil.which("ffmpeg")
     def _probe_info() -> dict[str, Any]:

@@ -16,6 +16,8 @@ class Settings(BaseModel):
     keitaro_api_key: str = Field(default="", validation_alias="KEITARO_API_KEY")
     keitaro_base_url: str = Field(default="", validation_alias="KEITARO_BASE_URL")
     youtube_cookies_path: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES_PATH")
+    youtube_cookies_raw: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES")
+    youtube_cookies_base64: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES_B64")
 
     @classmethod
     def load(cls) -> "Settings":
@@ -40,6 +42,8 @@ class Settings(BaseModel):
             "KEITARO_API_KEY": os.getenv("KEITARO_API_KEY", ""),
             "KEITARO_BASE_URL": os.getenv("KEITARO_BASE_URL", ""),
             "YTDLP_COOKIES_PATH": os.getenv("YTDLP_COOKIES_PATH"),
+            "YTDLP_COOKIES": os.getenv("YTDLP_COOKIES"),
+            "YTDLP_COOKIES_B64": os.getenv("YTDLP_COOKIES_B64"),
         }
         return cls.model_validate(raw)
 
