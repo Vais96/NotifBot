@@ -245,6 +245,10 @@ def _normalize_cookiefile_content(content: str) -> str:
 def _resolve_youtube_cookies_file() -> Optional[str]:
     global _YOUTUBE_COOKIES_CACHE
     path_setting = settings.youtube_cookies_path
+    raw_cookies = settings.youtube_cookies_raw
+    encoded_cookies = settings.youtube_cookies_base64
+    configured_cookies = bool(path_setting or raw_cookies or encoded_cookies)
+
     if path_setting:
         try:
             resolved = Path(path_setting).expanduser()
@@ -269,11 +273,9 @@ def _resolve_youtube_cookies_file() -> Optional[str]:
             logger.warning("Failed to write YouTube cookies cache", error=str(exc))
         return str(_YOUTUBE_COOKIES_CACHE)
 
-    raw_cookies = settings.youtube_cookies_raw
     if raw_cookies:
         return _cache_content(raw_cookies)
 
-    encoded_cookies = settings.youtube_cookies_base64
     if encoded_cookies:
         try:
             decoded = base64.b64decode(encoded_cookies).decode("utf-8")
@@ -281,6 +283,20 @@ def _resolve_youtube_cookies_file() -> Optional[str]:
             logger.warning("Failed to decode base64 YouTube cookies", error=str(exc))
         else:
             return _cache_content(decoded)
+
+    if not configured_cookies and _YOUTUBE_COOKIES_CACHE and _YOUTUBE_COOKIES_CACHE.exists():
+        try:
+            _YOUTUBE_COOKIES_CACHE.unlink(missing_ok=True)  # type: ignore[arg-type]
+        except Exception:
+            pass
+        try:
+            if _YOUTUBE_COOKIES_CACHE.parent.exists():
+                _YOUTUBE_COOKIES_CACHE.parent.rmdir()
+        except Exception:
+            pass
+        logger.debug("Cleared cached YouTube cookies because no configuration present")
+        _YOUTUBE_COOKIES_CACHE = None
+        return None
 
     if _YOUTUBE_COOKIES_CACHE and _YOUTUBE_COOKIES_CACHE.exists():
         return str(_YOUTUBE_COOKIES_CACHE)
