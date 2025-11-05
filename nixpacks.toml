@@ -1,2 +1,5 @@
 [phases.setup]
-aptPackages = ["ffmpeg"]
+cmds = [
+	"apt-get update",
+	"apt-get install -y --no-install-recommends ffmpeg"
+]
