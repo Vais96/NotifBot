@@ -295,7 +295,8 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             options["cookiefile"] = cookies_file
         options["extractor_args"] = {
             "youtube": {
-                "player_client": ["android"],
+                # try standard web client first so logged-in cookies work; fall back to android for 480p progressive tracks
+                "player_client": ["web", "android"],
                 "skip": ["dash"],
             }
         }
@@ -348,7 +349,8 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             "no_color": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android"],
+                    # keep same client order on actual download to stay consistent with authenticated cookies
+                    "player_client": ["web", "android"],
                     "skip": ["dash"]
                 }
             },
