@@ -309,16 +309,18 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
 
     cookies_file = _resolve_youtube_cookies_file()
     youtube_headers = _build_youtube_headers()
-    client_order: List[str] = ["android", "web"]
+
     if cookies_file or youtube_headers:
-        client_order = ["web", "android"]
-    logger.debug(
-        "Preparing YouTube download",
+        client_order: Optional[List[str]] = ["web", "android"]
+    else:
+        client_order = None
+
+    logger.bind(
         url=url,
         cookies_path=cookies_file,
         headers_present=bool(youtube_headers),
         client_order=client_order,
-    )
+    ).debug("Preparing YouTube download")
 
     ffmpeg_path = shutil.which("ffmpeg")
     def _probe_info() -> dict[str, Any]:
@@ -333,11 +335,12 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             options["cookiefile"] = cookies_file
         options["extractor_args"] = {
             "youtube": {
-                # prefer android client when unauthenticated; switch to web first only if we have cookies/headers
-                "player_client": client_order,
+                # skip DASH when possible to prefer progressive streams
                 "skip": ["dash"],
             }
         }
+        if client_order:
+            options["extractor_args"]["youtube"]["player_client"] = client_order
         options["extractor_retries"] = 3
         if youtube_headers:
             options["http_headers"] = youtube_headers
@@ -389,13 +392,13 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             "no_color": True,
             "extractor_args": {
                 "youtube": {
-                    # keep same client order on actual download
-                    "player_client": client_order,
                     "skip": ["dash"]
                 }
             },
             "extractor_retries": 3,
         }
+        if client_order:
+            options["extractor_args"]["youtube"]["player_client"] = client_order
         if cookies_file:
             options["cookiefile"] = cookies_file
         if ffmpeg_path:
