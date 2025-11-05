@@ -260,6 +260,13 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
             "format": fmt,
             "restrictfilenames": True,
             "no_color": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android"],
+                    "skip": ["dash"]
+                }
+            },
+            "extractor_retries": 3,
         }
         if ffmpeg_path:
             options.update(
