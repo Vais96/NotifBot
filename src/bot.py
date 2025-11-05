@@ -312,6 +312,13 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
     client_order: List[str] = ["android", "web"]
     if cookies_file or youtube_headers:
         client_order = ["web", "android"]
+    logger.debug(
+        "Preparing YouTube download",
+        url=url,
+        cookies_path=cookies_file,
+        headers_present=bool(youtube_headers),
+        client_order=client_order,
+    )
 
     ffmpeg_path = shutil.which("ffmpeg")
     def _probe_info() -> dict[str, Any]:
