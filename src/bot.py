@@ -365,13 +365,16 @@ async def _download_youtube_video(url: str) -> YoutubeDownloadResult:
     format_candidates: List[str] = []
     if ffmpeg_path and have_separate_streams:
         format_candidates.extend([
-            "bv*[height<=480][ext=mp4]+ba[ext=m4a]/bv*[height<=480]+ba/bv*+ba/b",
+            # при наличии ffmpeg пытаемся взять лучшие дорожки и склеить
             "bv*+ba/b",
+            "bestvideo*+bestaudio/best",
         ])
     if progressive_available:
         format_candidates.extend([
-            "best[height<=480][acodec!=none][vcodec!=none]",
             "best[acodec!=none][vcodec!=none]",
+            "best[height<=1080][acodec!=none][vcodec!=none]",
+            "best[height<=720][acodec!=none][vcodec!=none]",
+            "best[height<=480][acodec!=none][vcodec!=none]",
         ])
 
     if not format_candidates:
