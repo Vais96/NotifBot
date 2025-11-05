@@ -1,5 +1,6 @@
 [phases.setup]
-cmds = [
-	"apt-get update",
-	"apt-get install -y --no-install-recommends ffmpeg"
-]
+targets = ["python"]
+
+[phases.setup.commands]
+"01-update" = "apt-get update"
+"02-install-ffmpeg" = "apt-get install -y --no-install-recommends ffmpeg"
