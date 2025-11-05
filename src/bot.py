@@ -223,11 +223,13 @@ def _format_flag_label(
 def _format_flag_decision(decision: Optional[fb_csv.FlagDecision]) -> str:
     if not decision:
         return "—"
-    label = _FLAG_REASON_OVERRIDES.get(decision.reason)
+    reasons = decision.reasons or []
+    override_reason = next((reason for reason in reasons if reason in _FLAG_REASON_OVERRIDES), None)
+    label = _FLAG_REASON_OVERRIDES.get(override_reason)
     if not label:
-        label = _FLAG_CODE_LABELS.get(decision.code.upper(), decision.code)
-    if decision.reason:
-        return f"{label} ({decision.reason})"
+        label = _FLAG_CODE_LABELS.get((decision.code or "").upper(), decision.code)
+    if reasons:
+        return f"{label} ({'; '.join(reasons)})"
     return label
 
 
@@ -1283,6 +1285,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
             flag_decision = fb_csv.decide_flag(spend_value, ctr_value, roi_value, ftd_value)
             flag_row = flag_by_code.get(flag_decision.code.upper())
             new_flag_id = flag_row.get("id") if flag_row else None
+            reason_text = "; ".join(flag_decision.reasons)
             info = {
                 "decision": flag_decision,
                 "flag_id": new_flag_id,
@@ -1294,7 +1297,7 @@ async def _process_fb_csv_upload(message: Message, filename: str, parsed: fb_csv
                 "revenue": revenue_value,
                 "ctr": ctr_value,
                 "ftd_rate": ftd_rate_value,
-                "reason": flag_decision.reason,
+                "reason": reason_text,
                 "buyer_id": buyer_id,
                 "alias_key": alias_key,
                 "alias_lead_id": alias_lead_id,

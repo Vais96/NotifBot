@@ -1,6 +1,6 @@
 import csv
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Set
@@ -40,7 +40,13 @@ class ParsedFbCsv:
 @dataclass
 class FlagDecision:
     code: str
-    reason: str
+    reasons: List[str] = field(default_factory=list)
+
+    @property
+    def primary_reason(self) -> Optional[str]:
+        if not self.reasons:
+            return None
+        return self.reasons[0]
 
 
 def _normalize_header_name(name: Optional[str]) -> str:
@@ -201,23 +207,48 @@ def decide_flag(spend: Optional[Decimal], ctr: Optional[Decimal], roi: Optional[
     ctr_value = float(ctr) if ctr is not None else None
     roi_value = float(roi) if roi is not None else None
 
+    severity_rank = {"GREEN": 0, "YELLOW": 1, "RED": 2}
+    records: List[tuple[str, str]] = []
+    final_code = "GREEN"
+
+    def register(candidate_code: str, reason: Optional[str]) -> None:
+        nonlocal final_code
+        if not reason:
+            return
+        normalized_code = candidate_code.upper()
+        records.append((normalized_code, reason))
+        if severity_rank.get(normalized_code, 0) > severity_rank.get(final_code, 0):
+            final_code = normalized_code
+
     if spend_value >= 200 and ftd == 0:
-        return FlagDecision(code="RED", reason="Spend ≥ $200 и FTD = 0")
+        register("RED", "Spend ≥ $200 и FTD = 0")
 
     if roi_value is not None:
         if roi_value < -30:
-            base = FlagDecision(code="RED", reason="ROI < -30%")
+            register("RED", "ROI < -30%")
         elif roi_value > 30:
-            base = FlagDecision(code="GREEN", reason="ROI > 30%")
+            register("GREEN", "ROI > 30%")
         else:
-            base = FlagDecision(code="YELLOW", reason="ROI в диапазоне -30%…30%")
+            register("YELLOW", "ROI в диапазоне -30%…30%")
     else:
-        base = FlagDecision(code="GREEN", reason="ROI не рассчитан")
+        register("GREEN", "ROI не рассчитан")
 
-    if base.code != "RED" and ctr_value is not None and ctr_value < 0.7:
-        return FlagDecision(code="YELLOW", reason="CTR < 0.7%")
+    if ctr_value is not None and ctr_value < 0.7:
+        register("YELLOW", "CTR < 0.7%")
 
-    return base
+    if not records:
+        register("GREEN", "Показателей недостаточно")
+
+    records.sort(key=lambda item: severity_rank.get(item[0], 0), reverse=True)
+
+    ordered_reasons: List[str] = []
+    seen: Set[str] = set()
+    for _, reason in records:
+        if reason not in seen:
+            ordered_reasons.append(reason)
+            seen.add(reason)
+
+    return FlagDecision(code=final_code, reasons=ordered_reasons)
 
 
 def _normalize_str(value: Optional[str]) -> Optional[str]:
