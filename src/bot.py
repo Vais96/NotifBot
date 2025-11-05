@@ -205,6 +205,32 @@ def _ensure_url_scheme(value: str) -> str:
 _YOUTUBE_COOKIES_CACHE: Optional[Path] = None
 
 
+def _normalize_cookiefile_content(content: str) -> str:
+    normalized: List[str] = []
+    modified = False
+    for raw in content.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if not raw.strip():
+            normalized.append("")
+            continue
+        if raw.startswith("#"):
+            normalized.append(raw)
+            continue
+        if "\t" not in raw:
+            for idx in range(len(normalized) - 1, -1, -1):
+                if "\t" in normalized[idx]:
+                    normalized[idx] += raw.strip()
+                    modified = True
+                    break
+            else:
+                normalized.append(raw.strip())
+                modified = True
+            continue
+        normalized.append(raw)
+    if modified:
+        logger.debug("Normalized YouTube cookies text before caching")
+    return "\n".join(normalized)
+
+
 def _resolve_youtube_cookies_file() -> Optional[str]:
     global _YOUTUBE_COOKIES_CACHE
     path_setting = settings.youtube_cookies_path
@@ -226,7 +252,8 @@ def _resolve_youtube_cookies_file() -> Optional[str]:
             assert _YOUTUBE_COOKIES_CACHE is not None
             if not _YOUTUBE_COOKIES_CACHE.parent.exists():
                 _YOUTUBE_COOKIES_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            _YOUTUBE_COOKIES_CACHE.write_text(content, encoding="utf-8")
+            sanitized = _normalize_cookiefile_content(content)
+            _YOUTUBE_COOKIES_CACHE.write_text(sanitized, encoding="utf-8")
         except Exception as exc:
             logger.warning("Failed to write YouTube cookies cache", error=str(exc))
         return str(_YOUTUBE_COOKIES_CACHE)
