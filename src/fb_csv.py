@@ -11,7 +11,7 @@ HEADER_ALIASES: Dict[str, List[str]] = {
     "campaign_name": ["названиекампании", "campaignname", "campaign"],
     "adset_name": ["названиегруппыобъявлений", "adsetname", "группаобъявлений", "adset"],
     "ad_name": ["названиеобъявления", "adname", "объявление", "ad"],
-    "day_date": ["день", "date", "reportingstarts", "date_start"],
+    "day_date": ["day", "день", "date", "reportingstarts", "date_start"],
     "currency": ["валюта", "currency", "accountcurrency"],
     "spend": ["суммазатратusd", "суммазатрат", "amountspend", "amountspent", "amountspentusd", "spend"],
     "impressions": ["показы", "impressions"],
@@ -131,11 +131,14 @@ def parse_fb_csv(content: bytes) -> ParsedFbCsv:
             has_totals = True
             # Ignore pre-aggregated totals/averages rows (usually the second line) and derive aggregates ourselves.
             continue
+        if not campaign_name:
+            # региональные сводные строки иногда без названия кампании; пропускаем
+            continue
+
         if account_name:
             account_names.add(account_name)
-        if campaign_name:
-            campaign_names.add(campaign_name)
-        if day_date and campaign_name:
+        campaign_names.add(campaign_name)
+        if day_date:
             latest_day_value = latest_day.get(campaign_name)
             if latest_day_value is None or day_date > latest_day_value:
                 latest_day[campaign_name] = day_date
