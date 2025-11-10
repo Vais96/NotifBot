@@ -223,7 +223,6 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
     total_impressions = 0
     total_clicks = 0
     total_registrations = 0
-    max_items = 20
     lines: list[str] = []
     for idx, row in enumerate(rows, start=1):
         spend = _as_decimal(row.get("spend"))
@@ -238,22 +237,21 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
         total_impressions += impressions
         total_clicks += clicks
         total_registrations += registrations
-        if idx <= max_items:
-            roi = ((revenue - spend) / spend * Decimal(100)) if spend else None
-            ftd_rate = (Decimal(ftd) / Decimal(registrations) * Decimal(100)) if registrations else None
-            campaign_name = html.escape(str(row.get("campaign_name") or "—"))
-            account_name = html.escape(str(row.get("account_name") or "—"))
-            buyer_label = _format_buyer_label(row.get("buyer_id"), users_by_id)
-            prev_flag_label = html.escape(_format_flag_label(row.get("prev_flag_id"), flags_by_id))
-            curr_flag_id = row.get("curr_flag_id") or row.get("state_flag_id")
-            curr_flag_label = html.escape(_format_flag_label(curr_flag_id, flags_by_id))
-            line = (
-                f"{idx}) <code>{campaign_name}</code> | Акк: <code>{account_name}</code> | "
-                f"Байер: {buyer_label} | Spend {_fmt_money(spend)} | FTD {ftd} | "
-                f"Rev {_fmt_money(revenue)} | ROI {_fmt_percent(roi)} | FTD rate {_fmt_percent(ftd_rate)} | "
-                f"Флаг: {prev_flag_label} → {curr_flag_label}"
-            )
-            lines.append(line)
+        roi = ((revenue - spend) / spend * Decimal(100)) if spend else None
+        ftd_rate = (Decimal(ftd) / Decimal(registrations) * Decimal(100)) if registrations else None
+        campaign_name = html.escape(str(row.get("campaign_name") or "—"))
+        account_name = html.escape(str(row.get("account_name") or "—"))
+        buyer_label = _format_buyer_label(row.get("buyer_id"), users_by_id)
+        prev_flag_label = html.escape(_format_flag_label(row.get("prev_flag_id"), flags_by_id))
+        curr_flag_id = row.get("curr_flag_id") or row.get("state_flag_id")
+        curr_flag_label = html.escape(_format_flag_label(curr_flag_id, flags_by_id))
+        line = (
+            f"{idx}) <code>{campaign_name}</code> | Акк: <code>{account_name}</code> | "
+            f"Байер: {buyer_label} | Spend {_fmt_money(spend)} | FTD {ftd} | "
+            f"Rev {_fmt_money(revenue)} | ROI {_fmt_percent(roi)} | FTD rate {_fmt_percent(ftd_rate)} | "
+            f"Флаг: {prev_flag_label} → {curr_flag_label}"
+        )
+        lines.append(line)
     header_lines = [
         f"<b>FB кампании — {html.escape(_month_label_ru(month))}</b>",
         f"Кампаний с активностью: <b>{len(rows)}</b>",
@@ -268,12 +266,33 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
         header_lines.append(f"CTR: <b>{_fmt_percent(ctr)}</b> ({total_clicks}/{total_impressions})")
     if total_registrations:
         header_lines.append(f"Регистраций: <b>{total_registrations}</b>")
-    text = "\n".join(header_lines)
+    def _chunk_lines(all_lines: list[str], max_length: int = 3500) -> list[str]:
+        messages: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for raw_line in all_lines:
+            line = raw_line.rstrip()
+            additional = len(line) + 1
+            if current and current_len + additional > max_length:
+                messages.append("\n".join(current))
+                current = [line]
+                current_len = len(line) + 1
+            else:
+                current.append(line)
+                current_len += additional
+        if current:
+            messages.append("\n".join(current))
+        return messages or [""]
+
+    all_lines: list[str] = header_lines.copy()
     if lines:
-        text += "\n\n" + "\n".join(lines)
-    if len(rows) > max_items:
-        text += f"\n\nПоказаны первые {max_items} кампаний из {len(rows)}."
-    await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+        all_lines.append("")
+        all_lines.extend(lines)
+    chunks = _chunk_lines(all_lines)
+    first_chunk, *rest_chunks = chunks
+    await bot.send_message(chat_id, first_chunk, parse_mode=ParseMode.HTML)
+    for chunk in rest_chunks:
+        await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
 
 
 async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
