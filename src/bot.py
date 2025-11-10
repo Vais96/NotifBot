@@ -3315,8 +3315,6 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
     total_impressions = 0
     total_clicks = 0
     total_registrations = 0
-    max_items = 20
-    display_count = min(max_items, len(rows))
     lines: list[str] = []
     for idx, row in enumerate(rows, start=1):
         spend = _as_decimal(row.get("spend"))
@@ -3331,25 +3329,23 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
         total_impressions += impressions
         total_clicks += clicks
         total_registrations += registrations
-        if idx <= max_items:
-            roi = ((revenue - spend) / spend * Decimal(100)) if spend else None
-            ftd_rate = (Decimal(ftd) / Decimal(registrations) * Decimal(100)) if registrations else None
-            ctr = (Decimal(clicks) / Decimal(impressions) * Decimal(100)) if impressions else None
-            campaign_name = html.escape(str(row.get("campaign_name") or "—"))
-            account_name = html.escape(str(row.get("account_name") or "—"))
-            buyer_label = _format_buyer_label(row.get("buyer_id"), users_by_id)
-            prev_flag_label = html.escape(_format_flag_label(row.get("prev_flag_id"), flags_by_id))
-            decision = fb_csv.decide_flag(spend, ctr, roi, ftd)
-            curr_flag_label = html.escape(_format_flag_decision(decision))
-            line = (
-                f"{idx}) <code>{campaign_name}</code> | Акк: <code>{account_name}</code> | "
-                f"Байер: {buyer_label} | Spend {_fmt_money(spend)} | FTD {ftd} | "
-                f"Rev {_fmt_money(revenue)} | ROI {_fmt_percent(roi)} | FTD rate {_fmt_percent(ftd_rate)} | "
-                f"Флаг: {prev_flag_label} → {curr_flag_label}"
-            )
-            lines.append(line)
-            if idx < display_count:
-                lines.append("")
+        roi = ((revenue - spend) / spend * Decimal(100)) if spend else None
+        ftd_rate = (Decimal(ftd) / Decimal(registrations) * Decimal(100)) if registrations else None
+        ctr = (Decimal(clicks) / Decimal(impressions) * Decimal(100)) if impressions else None
+        campaign_name = html.escape(str(row.get("campaign_name") or "—"))
+        account_name = html.escape(str(row.get("account_name") or "—"))
+        buyer_label = _format_buyer_label(row.get("buyer_id"), users_by_id)
+        prev_flag_label = html.escape(_format_flag_label(row.get("prev_flag_id"), flags_by_id))
+        decision = fb_csv.decide_flag(spend, ctr, roi, ftd)
+        curr_flag_label = html.escape(_format_flag_decision(decision))
+        line = (
+            f"{idx}) <code>{campaign_name}</code> | Акк: <code>{account_name}</code> | "
+            f"Байер: {buyer_label} | Spend {_fmt_money(spend)} | FTD {ftd} | "
+            f"Rev {_fmt_money(revenue)} | ROI {_fmt_percent(roi)} | FTD rate {_fmt_percent(ftd_rate)} | "
+            f"Флаг: {prev_flag_label} → {curr_flag_label}"
+        )
+        lines.append(line)
+        lines.append("")
     header_lines = [
         f"<b>FB кампании — {html.escape(_month_label_ru(month))}</b>",
         f"Кампаний с активностью: <b>{len(rows)}</b>",
@@ -3367,12 +3363,10 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
     all_lines: List[str] = header_lines[:]
     if lines:
         all_lines.append("")
+        # remove trailing blank line for nicer formatting
+        while lines and lines[-1] == "":
+            lines.pop()
         all_lines.extend(lines)
-        if len(rows) > max_items:
-            all_lines.append("")
-            all_lines.append(f"Показаны первые {max_items} кампаний из {len(rows)}.")
-    if len(rows) > max_items:
-        pass
     chunks = _chunk_lines(all_lines)
     for chunk in chunks:
         await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
