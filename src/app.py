@@ -1,3 +1,7 @@
+import asyncio
+from datetime import datetime, timezone, date
+from typing import Dict, Tuple
+
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -33,6 +37,34 @@ MEANINGFUL_KEYS = (
     "status", "conversion_status", "conversion.status", "status_name", "state", "action",
     "country", "geo", "source", "traffic_source_name", "traffic_source", "affiliate",
 )
+
+_daily_counter_lock = asyncio.Lock()
+_daily_counter_cache: Dict[int, Tuple[date, int]] = {}
+
+
+async def _resolve_daily_counter(user_id: int, db_value: int | None) -> int:
+    """Stabilize daily deposit counter so it never goes backwards even if DB lagged."""
+    today = datetime.now(timezone.utc).date()
+    base_value = db_value or 0
+    async with _daily_counter_lock:
+        cached = _daily_counter_cache.get(user_id)
+        if not cached or cached[0] != today:
+            display = base_value if base_value > 0 else 1
+        else:
+            _, last_value = cached
+            if base_value > last_value:
+                display = base_value
+            else:
+                display = last_value + 1
+        _daily_counter_cache[user_id] = (today, display)
+    if base_value and base_value < display:
+        logger.debug(
+            "Daily counter adjusted due to stale DB value",
+            user_id=user_id,
+            db_value=base_value,
+            display_value=display,
+        )
+    return display
 
 def _has_meaningful_postback_fields(data: dict) -> bool:
     if not data:
@@ -398,10 +430,16 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     daily_count: int | None = None
     kpi_daily_goal: int | None = None
     if is_sale and stats_user_id is not None:
+        db_daily_count: int | None = None
         try:
-            daily_count = await db.count_today_user_sales(stats_user_id)
+            db_daily_count = await db.count_today_user_sales(stats_user_id)
         except Exception as e:
             logger.warning(f"Failed to get daily count: {e}")
+        try:
+            daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
+        except Exception as e:
+            logger.warning(f"Failed to adjust daily counter: {e}")
+            daily_count = db_daily_count
         try:
             kpi = await db.get_kpi(stats_user_id)
             kpi_daily_goal = kpi.get("daily_goal")
@@ -580,10 +618,16 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         daily_count: int | None = None
         kpi_daily_goal: int | None = None
         if is_sale and stats_user_id is not None:
+            db_daily_count: int | None = None
             try:
-                daily_count = await db.count_today_user_sales(stats_user_id)
+                db_daily_count = await db.count_today_user_sales(stats_user_id)
             except Exception as e:
                 logger.warning(f"Failed to get daily count: {e}")
+            try:
+                daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
+            except Exception as e:
+                logger.warning(f"Failed to adjust daily counter: {e}")
+                daily_count = db_daily_count
             try:
                 kpi = await db.get_kpi(stats_user_id)
                 kpi_daily_goal = kpi.get("daily_goal")
