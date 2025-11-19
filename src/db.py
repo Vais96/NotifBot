@@ -308,6 +308,41 @@ async def set_user_active(telegram_id: int, is_active: bool) -> None:
         async with conn.cursor() as cur:
             await cur.execute("UPDATE tg_users SET is_active=%s WHERE telegram_id=%s", (1 if is_active else 0, telegram_id))
 
+
+async def fetch_users_by_usernames(usernames: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    normalized = []
+    for raw in usernames:
+        if not raw:
+            continue
+        handle = raw.strip().lstrip("@").lower()
+        if handle:
+            normalized.append(handle)
+    if not normalized:
+        return {}
+    pool = await init_pool()
+    placeholders = ",".join(["%s"] * len(normalized))
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                f"SELECT telegram_id, username, full_name FROM tg_users WHERE LOWER(username) IN ({placeholders})",
+                tuple(normalized),
+            )
+            rows = await cur.fetchall()
+    result: Dict[str, Dict[str, Any]] = {}
+    for row in rows or []:
+        username = (row.get("username") or "").strip().lstrip("@").lower()
+        if username:
+            result[username] = row
+    return result
+
+
+async def find_user_by_username(username: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not username:
+        return None
+    users = await fetch_users_by_usernames([username])
+    key = username.strip().lstrip("@").lower()
+    return users.get(key)
+
 async def create_team(name: str) -> int:
     pool = await init_pool()
     async with pool.acquire() as conn:
