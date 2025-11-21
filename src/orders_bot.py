@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 from loguru import logger
 
 from .config import settings
@@ -16,6 +16,17 @@ orders_bot = Bot(
 )
 orders_dp = Dispatcher()
 
+MENU_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="/menu"),
+            KeyboardButton(text="/adminstatus"),
+        ]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False,
+)
+
 
 @orders_dp.message(CommandStart())
 async def on_orders_start(message: Message) -> None:
@@ -23,7 +34,8 @@ async def on_orders_start(message: Message) -> None:
     user = message.from_user
     await db.upsert_user(user.id, user.username, user.full_name)
     await message.answer(
-        "Привет! Ты зарегистрирован в боте заказов. Ищу все невручённые заказы…"
+        "Привет! Ты зарегистрирован в боте заказов. Ищу все невручённые заказы…",
+        reply_markup=MENU_KEYBOARD,
     )
     try:
         stats = await underdog.notify_ready_orders(
@@ -70,7 +82,7 @@ async def show_orders_menu(message: Message) -> None:
         lines.append(
             "\n⚠️ Чтобы получать служебные уведомления, сначала нажмите /start и разрешите боту писать вам."
         )
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines), reply_markup=MENU_KEYBOARD)
 
 
 @orders_dp.message(Command("adminstatus"))

@@ -262,6 +262,17 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"Failed to set bot commands: {e}")
 
+    orders_commands = [
+        BotCommand(command="start", description="Получить невручённые заказы"),
+        BotCommand(command="menu", description="Меню бота заказов"),
+        BotCommand(command="help", description="Помощь"),
+        BotCommand(command="adminstatus", description="Проверить статус админа"),
+    ]
+    try:
+        await orders_bot.set_my_commands(orders_commands)
+    except Exception as e:
+        logger.warning(f"Failed to set orders bot commands: {e}")
+
 @app.on_event("shutdown")
 async def on_shutdown():
     await db.close_pool()
