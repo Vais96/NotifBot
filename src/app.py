@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime, timezone, date
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
@@ -8,14 +8,20 @@ from loguru import logger
 import json
 from .config import settings
 from .dispatcher import dp, bot, notify_buyer
+from .orders_bot import orders_dp, orders_bot
 from . import handlers  # noqa: F401 ensure handlers are registered
-from . import db
+from . import db, underdog
 from aiogram.types import Update, BotCommand
+from pydantic import BaseModel, Field
 
 # Sanitize webhook path for route decorator
 WEBHOOK_PATH = settings.webhook_secret_path.strip()
 if not WEBHOOK_PATH.startswith("/"):
     WEBHOOK_PATH = "/" + WEBHOOK_PATH
+
+ORDERS_WEBHOOK_PATH = settings.orders_webhook_path.strip()
+if not ORDERS_WEBHOOK_PATH.startswith("/"):
+    ORDERS_WEBHOOK_PATH = "/" + ORDERS_WEBHOOK_PATH
 
 app = FastAPI(title="Keitaro Telegram Notifier")
 
@@ -37,6 +43,26 @@ MEANINGFUL_KEYS = (
     "status", "conversion_status", "conversion.status", "status_name", "state", "action",
     "country", "geo", "source", "traffic_source_name", "traffic_source", "affiliate",
 )
+
+
+class DomainNotifyRequest(BaseModel):
+    days: int = Field(default=30, ge=0, le=365)
+    dry_run: bool = Field(default=True)
+    token: Optional[str] = None
+
+
+def _require_internal_token(authorization: str | None, inline_token: Optional[str] = None) -> None:
+    if not settings.postback_token:
+        return
+    supplied = None
+    if authorization and authorization.startswith("Bearer "):
+        supplied = authorization.split(" ", 1)[1].strip()
+    if not supplied:
+        supplied = inline_token.strip() if inline_token else None
+    if not supplied:
+        raise HTTPException(401, "Unauthorized")
+    if supplied != settings.postback_token:
+        raise HTTPException(403, "Forbidden")
 
 _daily_counter_lock = asyncio.Lock()
 _daily_counter_cache: Dict[int, Tuple[date, int]] = {}
@@ -203,6 +229,15 @@ async def on_startup():
         logger.info(f"Webhook set to {url}")
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
+
+    orders_token = settings.orders_bot_token
+    if orders_token and orders_token != settings.telegram_bot_token:
+        orders_url = settings.base_url.rstrip("/") + ORDERS_WEBHOOK_PATH
+        try:
+            await orders_bot.set_webhook(orders_url)
+            logger.info(f"Orders webhook set to {orders_url}")
+        except Exception as e:
+            logger.error(f"Failed to set orders webhook: {e}")
     # Set command menu for the bot (helps users discover commands)
     try:
         await bot.set_my_commands([
@@ -694,6 +729,21 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         logger.exception(f"GET postback handler failed: {e}")
         return {"ok": True}
 
+
+@app.post("/underdog/domains/notify")
+async def notify_expiring_domains_endpoint(
+    payload: DomainNotifyRequest,
+    authorization: str | None = Header(default=None),
+):
+    _require_internal_token(authorization, payload.token)
+    stats = await underdog.notify_expiring_domains(
+        dry_run=payload.dry_run,
+        days=payload.days,
+        bot_instance=orders_bot,
+    )
+    return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
+
+
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     try:
@@ -704,4 +754,18 @@ async def telegram_webhook(request: Request):
     except Exception as e:
         # Never 500 to Telegram: log and ACK to avoid retries blocking updates
         logger.exception(f"Webhook update handling failed: {e}")
+        return JSONResponse({"ok": True})
+
+
+@app.post(ORDERS_WEBHOOK_PATH)
+async def orders_telegram_webhook(request: Request):
+    if not settings.orders_bot_token or settings.orders_bot_token == settings.telegram_bot_token:
+        return JSONResponse({"ok": True})
+    try:
+        payload = await request.json()
+        update = Update.model_validate(payload)
+        await orders_dp.feed_update(orders_bot, update)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        logger.exception(f"Orders webhook handling failed: {e}")
         return JSONResponse({"ok": True})

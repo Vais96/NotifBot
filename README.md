@@ -9,7 +9,9 @@ A FastAPI + aiogram bot that receives Keitaro S2S postbacks and notifies the app
 - Roles and teams (buyer/lead/head/admin) with role-based visibility
 
 ## Env vars (.env)
-- TELEGRAM_BOT_TOKEN: Telegram bot token
+- TELEGRAM_BOT_TOKEN: Telegram bot token for the main bot (deposits, admin commands)
+- ORDERS_BOT_TOKEN: Optional separate Telegram bot token used only for order notifications (falls back to TELEGRAM_BOT_TOKEN)
+- ORDERS_WEBHOOK_PATH: HTTP path for the orders bot webhook (default `/telegram/orders-webhook`)
 - DATABASE_URL: MySQL connection URL (mysql://user:pass@host:3306/dbname?charset=utf8mb4)
 - BASE_URL: Public HTTPS URL of your deployed app (Railway)
 - WEBHOOK_SECRET_PATH: Secret path for Telegram webhook (e.g. /telegram/secret)
@@ -21,6 +23,37 @@ A FastAPI + aiogram bot that receives Keitaro S2S postbacks and notifies the app
 - YTDLP_COOKIES_B64: То же, что YTDLP_COOKIES, но в base64 (удобно хранить в переменной окружения)
 - YTDLP_IDENTITY_TOKEN: (опционально) значение заголовка `X-Youtube-Identity-Token` для аккаунта, если YouTube требует дополнительное подтверждение
 - YTDLP_AUTH_USER: (опционально) значение заголовка `X-Goog-AuthUser` — чаще всего `0`, если используется основной профиль
+
+## Orders bot setup
+1. Create a second Telegram bot via BotFather and set its token in `ORDERS_BOT_TOKEN`.
+2. Decide on a webhook path (or keep the default) and set `ORDERS_WEBHOOK_PATH`.
+3. Deploy/restart the app so it registers both webhooks. The orders bot will now handle `/start`, store the user via `tg_users`, and immediately send any pending orders fetched from Underdog.
+4. When buyers send `/start` in the orders bot, their username is saved and matched automatically, so future Underdog notifications are delivered privately instead of going to the deposits/admin bot.
+
+## Domain expiry notifications
+Trigger Underdog domain reminders (expiring domains with `telegram_notified=0`) via the internal endpoint:
+
+```
+POST https://<your-app>/underdog/domains/notify
+Authorization: Bearer <POSTBACK_TOKEN>
+Content-Type: application/json
+
+{
+	"days": 30,        // optional horizon, default 30
+	"dry_run": true,   // set false to actually message and mark telegram_sent
+	"token": "..."     // optional fallback if you cannot send Authorization header
+}
+```
+
+The endpoint reuses `POSTBACK_TOKEN` for auth. When `dry_run` is false it sends formatted alerts via the orders bot and PATCH-es each domain as `telegram_notified` in Underdog.
+
+For quick CLI checks you can also run:
+
+```
+python -m src.underdog --notify-domains --days 14 --apply
+```
+
+Without `--apply` the script prints stats without messaging buyers.
 
 ## Run locally (optional)
 1. Create virtualenv and install deps
