@@ -51,6 +51,12 @@ class DomainNotifyRequest(BaseModel):
     token: Optional[str] = None
 
 
+class IPNotifyRequest(BaseModel):
+    days: int = Field(default=7, ge=0, le=365)
+    dry_run: bool = Field(default=True)
+    token: Optional[str] = None
+
+
 def _require_internal_token(authorization: str | None, inline_token: Optional[str] = None) -> None:
     if not settings.postback_token:
         return
@@ -737,6 +743,20 @@ async def notify_expiring_domains_endpoint(
 ):
     _require_internal_token(authorization, payload.token)
     stats = await underdog.notify_expiring_domains(
+        dry_run=payload.dry_run,
+        days=payload.days,
+        bot_instance=orders_bot,
+    )
+    return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
+
+
+@app.post("/underdog/ip/notify")
+async def notify_expiring_ips_endpoint(
+    payload: IPNotifyRequest,
+    authorization: str | None = Header(default=None),
+):
+    _require_internal_token(authorization, payload.token)
+    stats = await underdog.notify_expiring_ips(
         dry_run=payload.dry_run,
         days=payload.days,
         bot_instance=orders_bot,

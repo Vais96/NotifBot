@@ -55,6 +55,29 @@ python -m src.underdog --notify-domains --days 14 --apply
 
 Without `--apply` the script prints stats without messaging buyers.
 
+## IP expiry notifications
+Triggered similarly via:
+
+```
+POST https://<your-app>/underdog/ip/notify
+Authorization: Bearer <POSTBACK_TOKEN>
+Content-Type: application/json
+
+{
+	"days": 7,        // optional horizon, default 7
+	"dry_run": true,   // set false to actually message and mark telegram_sent
+	"token": "..."     // optional fallback if you cannot send Authorization header
+}
+```
+
+The helper fetches `/api/v2/ip`, filters records with `expires_at <= today + days` and `telegram_sent=0`, notifies matching buyers, then PATCH-es `/api/v2/ip/{id}/telegram-sent`.
+
+CLI example:
+
+```
+python -m src.underdog --notify-ips --ip-days 7 --apply
+```
+
 ## Run locally (optional)
 1. Create virtualenv and install deps
 2. Copy `.env.example` to `.env` and fill values

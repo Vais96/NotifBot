@@ -23,6 +23,7 @@ from .config import settings
 LOGIN_PATH = "/api/login"
 ORDERS_PATH = "/api/v2/orders"
 DOMAINS_PATH = "/api/v2/domains"
+IPS_PATH = "/api/v2/ip"
 DEFAULT_TIMEOUT = (30.0, 15.0)
 
 
@@ -97,6 +98,23 @@ def _extract_domains(payload: Any) -> List[Dict[str, Any]]:
     raise UnderdogAPIError("Unexpected domains response shape")
 
 
+def _extract_ips(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("items", "ips"):
+                items = data.get(key)
+                if isinstance(items, list):
+                    return items
+        if isinstance(payload.get("ips"), list):
+            return payload["ips"]
+    raise UnderdogAPIError("Unexpected IP response shape")
+
+
 def _normalize_handle(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -104,6 +122,19 @@ def _normalize_handle(value: Optional[str]) -> Optional[str]:
     if not trimmed:
         return None
     return trimmed.lstrip("@").lower()
+
+
+def _resolve_owner_fields(record: Dict[str, Any]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    owner = record.get("owner") or {}
+    raw_handle = (
+        owner.get("telegram")
+        or owner.get("telegram_handle")
+        or record.get("telegram")
+        or record.get("telegram_handle")
+    )
+    normalized = _normalize_handle(raw_handle)
+    owner_name = owner.get("name")
+    return normalized, raw_handle, owner_name
 
 
 def _build_order_message(order: Dict[str, Any]) -> str:
@@ -313,6 +344,14 @@ class UnderdogClient:
         if last_error:
             raise last_error
 
+    async def fetch_ips(self) -> List[Dict[str, Any]]:
+        resp = await self.request("GET", IPS_PATH)
+        return _extract_ips(resp.json())
+
+    async def mark_ip_telegram_sent(self, ip_id: int) -> None:
+        path = f"{IPS_PATH}/{ip_id}/telegram-sent"
+        await self.request("PATCH", path)
+
     @classmethod
     def from_settings(cls) -> "UnderdogClient":
         return cls(
@@ -367,6 +406,33 @@ class DomainNotifierStats:
             "matched_users": self.matched_users,
             "notified_users": self.notified_users,
             "notified_domains": self.notified_domains,
+            "missing_contact": self.missing_contact,
+            "unknown_user": self.unknown_user,
+            "errors": self.errors,
+            "unknown_items": self.unknown_items,
+        }
+        if dry_run is not None:
+            payload["dry_run"] = dry_run
+        return payload
+
+
+@dataclass(slots=True)
+class IPNotifierStats:
+    total_ips: int = 0
+    matched_users: int = 0
+    notified_users: int = 0
+    notified_ips: int = 0
+    missing_contact: int = 0
+    unknown_user: int = 0
+    errors: int = 0
+    unknown_items: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self, *, dry_run: Optional[bool] = None) -> Dict[str, Any]:
+        payload = {
+            "total_ips": self.total_ips,
+            "matched_users": self.matched_users,
+            "notified_users": self.notified_users,
+            "notified_ips": self.notified_ips,
             "missing_contact": self.missing_contact,
             "unknown_user": self.unknown_user,
             "errors": self.errors,
@@ -460,6 +526,7 @@ class OrderNotifier:
                     order_id=order.get("id"),
                     error=str(exc),
                 )
+                await self._notify_admins_delivery_error(order=order, error_text=str(exc))
             except Exception as exc:  # pragma: no cover
                 stats.errors += 1
                 logger.exception(
@@ -467,6 +534,7 @@ class OrderNotifier:
                     order_id=order.get("id"),
                     error=str(exc),
                 )
+                await self._notify_admins_delivery_error(order=order, error_text=str(exc))
 
         if stats.unknown_user > 0 and not dry_run:
             await self._alert_admins(stats.unknown_orders)
@@ -506,19 +574,14 @@ class DomainNotifier:
             if not expires_at or expires_at > cutoff:
                 continue
             stats.expiring_domains += 1
-            handle = _normalize_handle(
-                (domain.get("owner") or {}).get("telegram")
-                or (domain.get("owner") or {}).get("telegram_handle")
-                or domain.get("telegram")
-                or domain.get("telegram_handle")
-            )
+            handle, raw_handle, owner_name = _resolve_owner_fields(domain)
             if not handle:
                 stats.missing_contact += 1
                 stats.unknown_items.append(
                     {
                         "domain": domain.get("domain") or domain.get("name"),
                         "expires_at": expires_at.isoformat() if expires_at else None,
-                        "owner": (domain.get("owner") or {}).get("name"),
+                        "owner": owner_name,
                     }
                 )
                 await self._notify_admins_missing_user(
@@ -530,6 +593,8 @@ class DomainNotifier:
             per_handle[handle].append({
                 "raw": domain,
                 "expires_at": expires_at,
+                "display_handle": raw_handle,
+                "owner_name": owner_name,
             })
 
         if not per_handle:
@@ -661,6 +726,193 @@ class DomainNotifier:
                 )
 
 
+@dataclass(slots=True)
+class IPNotifier:
+    underdog: UnderdogClient
+    bot: Bot
+    admin_ids: Sequence[int]
+
+    async def notify_expiring_ips(self, *, dry_run: bool = True, days: int = 7) -> IPNotifierStats:
+        ips = await self.underdog.fetch_ips()
+        stats = IPNotifierStats(total_ips=len(ips))
+        if not ips:
+            return stats
+
+        per_handle: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        today = datetime.now(timezone.utc).date()
+        cutoff = today + timedelta(days=max(0, int(days)))
+
+        for ip_entry in ips:
+            if _is_ip_sent(ip_entry):
+                continue
+            handle, raw_handle, owner_name = _resolve_owner_fields(ip_entry)
+            expires_at = _parse_date(
+                ip_entry.get("expires_at")
+                or ip_entry.get("expires")
+                or ip_entry.get("expiration")
+            )
+            if not expires_at:
+                continue
+            if expires_at > cutoff:
+                continue
+            if not handle:
+                stats.missing_contact += 1
+                stats.unknown_items.append(
+                    {
+                        "ip": ip_entry.get("ip") or ip_entry.get("address"),
+                        "expires_at": expires_at.isoformat() if expires_at else None,
+                        "owner": owner_name,
+                    }
+                )
+                await self._notify_admins_missing_ip(
+                    handle=None,
+                    entries=[{
+                        "raw": ip_entry,
+                        "expires_at": expires_at,
+                        "days_left": (expires_at - today).days if expires_at else None,
+                        "display_handle": raw_handle,
+                        "owner_name": owner_name,
+                    }],
+                    dry_run=dry_run,
+                )
+                continue
+            per_handle[handle].append(
+                {
+                    "raw": ip_entry,
+                    "expires_at": expires_at,
+                    "days_left": (expires_at - today).days if expires_at else None,
+                    "display_handle": raw_handle,
+                    "owner_name": owner_name,
+                }
+            )
+
+        if not per_handle:
+            return stats
+
+        user_map = await db.fetch_users_by_usernames(list(per_handle.keys()))
+
+        for handle, ip_entries in per_handle.items():
+            user = user_map.get(handle)
+            if not user:
+                stats.unknown_user += len(ip_entries)
+                stats.unknown_items.extend(
+                    {
+                        "ip": entry["raw"].get("ip") or entry["raw"].get("address"),
+                        "expires_at": entry["expires_at"].isoformat() if entry["expires_at"] else None,
+                        "handle": handle,
+                    }
+                    for entry in ip_entries
+                )
+                await self._notify_admins_missing_ip(
+                    handle=handle,
+                    entries=ip_entries,
+                    dry_run=dry_run,
+                )
+                continue
+
+            stats.matched_users += 1
+            text = _build_ip_notification(ip_entries)
+            if dry_run:
+                logger.info(
+                    "Dry-run: would notify about expiring IPs",
+                    handle=handle,
+                    telegram_id=user.get("telegram_id"),
+                )
+                stats.notified_users += 1
+                stats.notified_ips += len(ip_entries)
+                continue
+
+            try:
+                await self.bot.send_message(int(user["telegram_id"]), text)
+                stats.notified_users += 1
+                stats.notified_ips += len(ip_entries)
+                for entry in ip_entries:
+                    ip_id = entry["raw"].get("id")
+                    if ip_id is None:
+                        continue
+                    try:
+                        await self.underdog.mark_ip_telegram_sent(int(ip_id))
+                    except Exception as exc:  # pragma: no cover
+                        stats.errors += 1
+                        logger.warning(
+                            "Failed to mark IP telegram_sent",
+                            ip_id=ip_id,
+                            error=str(exc),
+                        )
+            except Exception as exc:  # pragma: no cover
+                stats.errors += 1
+                logger.warning(
+                    "Failed to send IP expiration message",
+                    handle=handle,
+                    error=str(exc),
+                )
+
+        if stats.unknown_items and dry_run:
+            await self._alert_admins(stats.unknown_items)
+
+        return stats
+
+    async def _notify_admins_missing_ip(
+        self,
+        *,
+        handle: Optional[str],
+        entries: List[Dict[str, Any]],
+        dry_run: bool,
+    ) -> None:
+        if not self.admin_ids or not entries:
+            return
+        header_lines = [
+            "⚠️ Не удалось доставить уведомление об IP пользователю.",
+        ]
+        owner_name = entries[0].get("owner_name")
+        if owner_name:
+            header_lines.append(f"Владелец: {owner_name}")
+        header_lines.append(f"Username: @{handle}" if handle else "Username: (не указан)")
+        header_lines.append("")
+        header_lines.append(_build_ip_notification(entries))
+        text = "\n".join(header_lines)
+        if dry_run:
+            logger.info(
+                "Dry-run: would alert admins about unknown IP recipient",
+                handle=handle,
+                owner=owner_name,
+            )
+            return
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about missing IP recipient",
+                    admin_id=admin_id,
+                    handle=handle,
+                    error=str(exc),
+                )
+
+    async def _alert_admins(self, unknown_items: List[Dict[str, Any]]) -> None:
+        if not self.admin_ids or not unknown_items:
+            return
+        lines = [
+            "⚠️ Не удалось отправить уведомление по IP:",
+            "",
+        ]
+        for item in unknown_items[:20]:
+            lines.append(
+                f"{item.get('ip') or '—'} (до {item.get('expires_at') or '—'}) — @{item.get('handle') or '—'}"
+            )
+        if len(unknown_items) > 20:
+            lines.append(f"… и ещё {len(unknown_items) - 20} IP")
+        text = "\n".join(lines)
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about IPs",
+                    admin_id=admin_id,
+                    error=str(exc),
+                )
+
 def _is_domain_sent(domain: Dict[str, Any]) -> bool:
     for key in ("telegram_sent", "telegram_notified", "telegramSent", "telegramNotified"):
         value = domain.get(key)
@@ -694,6 +946,69 @@ def _build_domain_notification(entries: List[Dict[str, Any]]) -> str:
     )
     return "\n".join(lines)
 
+
+def _build_ip_notification(entries: List[Dict[str, Any]]) -> str:
+    sorted_entries = sorted(
+        entries,
+        key=lambda item: item.get("expires_at") or date.max,
+    )
+    lines: List[str] = ["⏳ Срок действия следующих IP скоро истекает:", ""]
+    for entry in sorted_entries:
+        ip_value = entry["raw"].get("ip") or entry["raw"].get("address") or "—"
+        expires_at = entry.get("expires_at")
+        days_left = entry.get("days_left")
+        if expires_at:
+            expires_text = expires_at.strftime("%d.%m.%Y")
+        else:
+            expires_text = "неизвестно"
+        if isinstance(days_left, int):
+            if days_left >= 0:
+                suffix = f" (осталось {days_left} д.)"
+            else:
+                suffix = f" (просрочено {abs(days_left)} д.)"
+        else:
+            suffix = ""
+        owner_display = entry.get("display_handle") or entry.get("owner_name") or "—"
+        if owner_display and isinstance(owner_display, str) and not owner_display.startswith("@"):
+            normalized_owner = _normalize_handle(owner_display)
+            if normalized_owner:
+                owner_display = f"@{normalized_owner}"
+        lines.extend(
+            [
+                f"🖥 IP: {ip_value}",
+                "",
+                f"📅 Истекает: {expires_text}{suffix}",
+                "",
+                f"👤 Владелец: {owner_display}",
+                "",
+                "──────────────────",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "Продлить ip: https://dashboard.underdog.click/managers/ips",
+        ]
+    )
+    return "\n".join(lines).rstrip()
+
+
+def _is_ip_sent(item: Dict[str, Any]) -> bool:
+    for key in ("telegram_sent", "telegram_notified", "telegramSent", "telegramNotified"):
+        value = item.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            if value:
+                return True
+            continue
+        try:
+            if int(value) == 1:
+                return True
+        except Exception:
+            continue
+    return False
+
     async def _alert_admins(self, unknown_orders: Iterable[Dict[str, Any]]) -> None:
         orders = list(unknown_orders)
         if not self.admin_ids or not orders:
@@ -715,6 +1030,35 @@ def _build_domain_notification(entries: List[Dict[str, Any]]) -> str:
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about unknown orders",
+                    admin_id=admin_id,
+                    error=str(exc),
+                )
+
+    async def _notify_admins_delivery_error(
+        self,
+        *,
+        order: Dict[str, Any],
+        error_text: str,
+    ) -> None:
+        if not self.admin_ids:
+            return
+        owner = order.get("owner") or {}
+        normalized_handle = _normalize_handle(owner.get("telegram") or owner.get("telegram_handle"))
+        lines = [
+            "⚠️ Ошибка отправки уведомления о заказе",
+            f"ID: {order.get('id')}",
+            f"Покупатель: {owner.get('name') or '—'}",
+            f"Username: @{normalized_handle}" if normalized_handle else "Username: (не указан)",
+            f"Сумма: {order.get('total') or order.get('price') or '0'}",
+            f"Ошибка: {error_text}",
+        ]
+        text = "\n".join(lines)
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(chat_id=int(admin_id), text=text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about delivery error",
                     admin_id=admin_id,
                     error=str(exc),
                 )
@@ -772,12 +1116,31 @@ async def notify_expiring_domains(
             return stats.to_dict(dry_run=dry_run)
 
 
+async def notify_expiring_ips(
+    *,
+    dry_run: bool = True,
+    days: int = 7,
+    bot_instance: Optional[Bot] = None,
+) -> Dict[str, Any]:
+    async with UnderdogClient.from_settings() as client:
+        if bot_instance is not None:
+            notifier = IPNotifier(client, bot_instance, settings.admins)
+            stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
+            return stats.to_dict(dry_run=dry_run)
+        async with _create_bot() as owned_bot:
+            notifier = IPNotifier(client, owned_bot, settings.admins)
+            stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
+            return stats.to_dict(dry_run=dry_run)
+
+
 async def _amain() -> None:
     parser = ArgumentParser(description="Interact with the Underdog admin API")
     parser.add_argument("--orders", action="store_true", help="Fetch yesterday's pending telegram orders")
     parser.add_argument("--notify", action="store_true", help="Send Telegram notifications for ready orders")
     parser.add_argument("--domains", action="store_true", help="Fetch all domains from Underdog")
     parser.add_argument("--notify-domains", action="store_true", help="Notify Telegram users about expiring domains")
+    parser.add_argument("--ips", action="store_true", help="Fetch expiring IPs from Underdog")
+    parser.add_argument("--notify-ips", action="store_true", help="Notify Telegram users about expiring IPs")
     parser.add_argument(
         "--apply",
         action="store_true",
@@ -788,6 +1151,12 @@ async def _amain() -> None:
         type=int,
         default=30,
         help="Horizon in days for --notify-domains (default: 30)",
+    )
+    parser.add_argument(
+        "--ip-days",
+        type=int,
+        default=7,
+        help="Horizon in days for --notify-ips (default: 7)",
     )
     parser.add_argument("--raw-token", action="store_true", help="Print only the bearer token")
     args = parser.parse_args()
@@ -816,6 +1185,20 @@ async def _amain() -> None:
             async with _create_bot() as bot_instance:
                 notifier = DomainNotifier(client, bot_instance, settings.admins)
                 stats = await notifier.notify_expiring_domains(dry_run=dry_run, days=max(0, args.days))
+            print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
+            return
+
+        if args.ips:
+            ips = await client.fetch_ips()
+            print(json.dumps({"count": len(ips), "ips": ips}, ensure_ascii=False, indent=2))
+            return
+
+        if args.notify_ips:
+            dry_run = not args.apply
+            horizon = max(0, args.ip_days)
+            async with _create_bot() as bot_instance:
+                notifier = IPNotifier(client, bot_instance, settings.admins)
+                stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=horizon)
             print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
             return
 
