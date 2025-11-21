@@ -658,6 +658,12 @@ class DomainNotifier:
                     handle=handle,
                     error=str(exc),
                 )
+                await self._notify_admins_domain_delivery_error(
+                    handle=handle,
+                    entries=domain_entries,
+                    error_text=str(exc),
+                    dry_run=dry_run,
+                )
 
         if stats.unknown_items and dry_run:
             await self._alert_admins(stats.unknown_items)
@@ -720,6 +726,42 @@ class DomainNotifier:
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about missing domain recipient",
+                    admin_id=admin_id,
+                    handle=handle,
+                    error=str(exc),
+                )
+
+    async def _notify_admins_domain_delivery_error(
+        self,
+        *,
+        handle: Optional[str],
+        entries: List[Dict[str, Any]],
+        error_text: str,
+        dry_run: bool,
+    ) -> None:
+        if not self.admin_ids or not entries:
+            return
+        lines = [
+            "⚠️ Ошибка отправки уведомления о доменах",
+            f"Username: @{handle}" if handle else "Username: (не указан)",
+            f"Ошибка: {error_text}",
+            "",
+            _build_domain_notification(entries),
+        ]
+        text = "\n".join(lines)
+        if dry_run:
+            logger.info(
+                "Dry-run: would alert admins about domain delivery error",
+                handle=handle,
+                error=error_text,
+            )
+            return
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about domain delivery error",
                     admin_id=admin_id,
                     handle=handle,
                     error=str(exc),
@@ -846,6 +888,12 @@ class IPNotifier:
                     handle=handle,
                     error=str(exc),
                 )
+                await self._notify_admins_ip_delivery_error(
+                    handle=handle,
+                    entries=ip_entries,
+                    error_text=str(exc),
+                    dry_run=dry_run,
+                )
 
         if stats.unknown_items and dry_run:
             await self._alert_admins(stats.unknown_items)
@@ -884,6 +932,42 @@ class IPNotifier:
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about missing IP recipient",
+                    admin_id=admin_id,
+                    handle=handle,
+                    error=str(exc),
+                )
+
+    async def _notify_admins_ip_delivery_error(
+        self,
+        *,
+        handle: Optional[str],
+        entries: List[Dict[str, Any]],
+        error_text: str,
+        dry_run: bool,
+    ) -> None:
+        if not self.admin_ids or not entries:
+            return
+        lines = [
+            "⚠️ Ошибка отправки уведомления об IP",
+            f"Username: @{handle}" if handle else "Username: (не указан)",
+            f"Ошибка: {error_text}",
+            "",
+            _build_ip_notification(entries),
+        ]
+        text = "\n".join(lines)
+        if dry_run:
+            logger.info(
+                "Dry-run: would alert admins about IP delivery error",
+                handle=handle,
+                error=error_text,
+            )
+            return
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:  # pragma: no cover
+                logger.warning(
+                    "Failed to notify admin about IP delivery error",
                     admin_id=admin_id,
                     handle=handle,
                     error=str(exc),
