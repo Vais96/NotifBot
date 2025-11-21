@@ -541,6 +541,60 @@ class OrderNotifier:
 
         return stats
 
+    async def _alert_admins(self, unknown_orders: Iterable[Dict[str, Any]]) -> None:
+        orders = list(unknown_orders)
+        if not self.admin_ids or not orders:
+            return
+        lines = [
+            "⚠️ Не смог найти пользователей в боте для заказов:",
+            "",
+        ]
+        for item in orders[:20]:
+            lines.append(
+                f"ID {item.get('order_id')}: @{item.get('handle')} ({item.get('owner')}) — {item.get('name')} на {item.get('total')}"
+            )
+        if len(orders) > 20:
+            lines.append(f"… и ещё {len(orders) - 20} заказов")
+        text = "\n".join(lines)
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(chat_id=int(admin_id), text=text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about unknown orders",
+                    admin_id=admin_id,
+                    error=str(exc),
+                )
+
+    async def _notify_admins_delivery_error(
+        self,
+        *,
+        order: Dict[str, Any],
+        error_text: str,
+    ) -> None:
+        if not self.admin_ids:
+            return
+        owner = order.get("owner") or {}
+        normalized_handle = _normalize_handle(owner.get("telegram") or owner.get("telegram_handle"))
+        lines = [
+            "⚠️ Ошибка отправки уведомления о заказе",
+            f"ID: {order.get('id')}",
+            f"Покупатель: {owner.get('name') or '—'}",
+            f"Username: @{normalized_handle}" if normalized_handle else "Username: (не указан)",
+            f"Сумма: {order.get('total') or order.get('price') or '0'}",
+            f"Ошибка: {error_text}",
+        ]
+        text = "\n".join(lines)
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(chat_id=int(admin_id), text=text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about delivery error",
+                    admin_id=admin_id,
+                    error=str(exc),
+                )
+
 
 @dataclass(slots=True)
 class DomainNotifier:
@@ -1092,60 +1146,6 @@ def _is_ip_sent(item: Dict[str, Any]) -> bool:
         except Exception:
             continue
     return False
-
-    async def _alert_admins(self, unknown_orders: Iterable[Dict[str, Any]]) -> None:
-        orders = list(unknown_orders)
-        if not self.admin_ids or not orders:
-            return
-        lines = [
-            "⚠️ Не смог найти пользователей в боте для заказов:",
-            "",
-        ]
-        for item in orders[:20]:
-            lines.append(
-                f"ID {item.get('order_id')}: @{item.get('handle')} ({item.get('owner')}) — {item.get('name')} на {item.get('total')}"
-            )
-        if len(orders) > 20:
-            lines.append(f"… и ещё {len(orders) - 20} заказов")
-        text = "\n".join(lines)
-        for admin_id in self.admin_ids:
-            try:
-                await self.bot.send_message(chat_id=int(admin_id), text=text)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to notify admin about unknown orders",
-                    admin_id=admin_id,
-                    error=str(exc),
-                )
-
-    async def _notify_admins_delivery_error(
-        self,
-        *,
-        order: Dict[str, Any],
-        error_text: str,
-    ) -> None:
-        if not self.admin_ids:
-            return
-        owner = order.get("owner") or {}
-        normalized_handle = _normalize_handle(owner.get("telegram") or owner.get("telegram_handle"))
-        lines = [
-            "⚠️ Ошибка отправки уведомления о заказе",
-            f"ID: {order.get('id')}",
-            f"Покупатель: {owner.get('name') or '—'}",
-            f"Username: @{normalized_handle}" if normalized_handle else "Username: (не указан)",
-            f"Сумма: {order.get('total') or order.get('price') or '0'}",
-            f"Ошибка: {error_text}",
-        ]
-        text = "\n".join(lines)
-        for admin_id in self.admin_ids:
-            try:
-                await self.bot.send_message(chat_id=int(admin_id), text=text)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to notify admin about delivery error",
-                    admin_id=admin_id,
-                    error=str(exc),
-                )
 
 
 def _create_bot() -> Bot:
