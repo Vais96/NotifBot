@@ -3,7 +3,7 @@
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 from loguru import logger
 
@@ -53,4 +53,32 @@ async def on_orders_start(message: Message) -> None:
     if unknown > 0:
         await message.answer(
             "Есть заказы, где не нашли твой username. Проверь, что он указан в Telegram, и напиши админу."
+        )
+
+
+@orders_dp.message(Command(commands=["menu", "help"]))
+async def show_orders_menu(message: Message) -> None:
+    is_admin = message.from_user.id in settings.admins
+    lines = [
+        "📋 <b>Меню бота заказов</b>",
+        "\n",
+        "• /start — зарегистрироваться и получить невручённые заказы",
+        "• /menu — показать это меню",
+        "• /adminstatus — проверить, видит ли бот вас как админа",
+    ]
+    if not is_admin:
+        lines.append(
+            "\n⚠️ Чтобы получать служебные уведомления, сначала нажмите /start и разрешите боту писать вам."
+        )
+    await message.answer("\n".join(lines))
+
+
+@orders_dp.message(Command("adminstatus"))
+async def show_admin_status(message: Message) -> None:
+    is_admin = message.from_user.id in settings.admins
+    if is_admin:
+        await message.answer("✅ Ты в списке админов. Служебные уведомления будут приходить сюда.")
+    else:
+        await message.answer(
+            "❌ Этого аккаунта нет в списке ADMINS. Обнови переменную окружения или обратись к администратору."
         )
