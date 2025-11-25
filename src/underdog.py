@@ -463,9 +463,16 @@ class OrderNotifier:
         if not orders:
             return stats
 
-        handles = [_normalize_handle((order.get("owner") or {}).get("telegram")) for order in orders]
-        valid_handles = [handle for handle in handles if handle]
-        user_map = await db.fetch_users_by_usernames(valid_handles)
+        # Сопоставляем только по Telegram username из заказа и только с активными пользователями
+        handles = []
+        for order in orders:
+            owner = order.get("owner") or {}
+            handle = _normalize_handle(owner.get("telegram"))
+            handles.append(handle)
+
+        # Получаем только активных пользователей
+        all_users = await db.list_users()
+        active_users = { (u.get("username") or "").strip().lstrip("@").lower(): u for u in all_users if int(u.get("is_active") or 0) == 1 and u.get("username") }
 
         for order, handle in zip(orders, handles):
             if not handle:
@@ -473,23 +480,9 @@ class OrderNotifier:
                 logger.warning("Order lacks Telegram handle", order_id=order.get("id"))
                 continue
 
-            user = user_map.get(handle)
+            user = active_users.get(handle)
             if not user:
-                stats.unknown_user += 1
-                stats.unknown_orders.append(
-                    {
-                        "order_id": order.get("id"),
-                        "owner": (order.get("owner") or {}).get("name"),
-                        "handle": handle,
-                        "total": order.get("total"),
-                        "name": order.get("name"),
-                    }
-                )
-                logger.warning(
-                    "Telegram handle not found among bot users",
-                    handle=handle,
-                    order_id=order.get("id"),
-                )
+                # Не найден активный пользователь с таким username — пропускаем
                 continue
 
             try:
@@ -535,9 +528,6 @@ class OrderNotifier:
                     error=str(exc),
                 )
                 await self._notify_admins_delivery_error(order=order, error_text=str(exc))
-
-        if stats.unknown_user > 0 and not dry_run:
-            await self._alert_admins(stats.unknown_orders)
 
         return stats
 
