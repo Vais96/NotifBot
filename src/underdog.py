@@ -463,16 +463,9 @@ class OrderNotifier:
         if not orders:
             return stats
 
-        # Сопоставляем только по Telegram username из заказа и только с активными пользователями
-        handles = []
-        for order in orders:
-            owner = order.get("owner") or {}
-            handle = _normalize_handle(owner.get("telegram"))
-            handles.append(handle)
-
-        # Получаем только активных пользователей
-        all_users = await db.list_users()
-        active_users = { (u.get("username") or "").strip().lstrip("@").lower(): u for u in all_users if int(u.get("is_active") or 0) == 1 and u.get("username") }
+        handles = [_normalize_handle((order.get("owner") or {}).get("telegram")) for order in orders]
+        valid_handles = [handle for handle in handles if handle]
+        user_map = await db.fetch_users_by_usernames(valid_handles)
 
         for order, handle in zip(orders, handles):
             if not handle:
@@ -480,9 +473,23 @@ class OrderNotifier:
                 logger.warning("Order lacks Telegram handle", order_id=order.get("id"))
                 continue
 
-            user = active_users.get(handle)
+            user = user_map.get(handle)
             if not user:
-                # Не найден активный пользователь с таким username — пропускаем
+                stats.unknown_user += 1
+                stats.unknown_orders.append(
+                    {
+                        "order_id": order.get("id"),
+                        "owner": (order.get("owner") or {}).get("name"),
+                        "handle": handle,
+                        "total": order.get("total"),
+                        "name": order.get("name"),
+                    }
+                )
+                logger.warning(
+                    "Telegram handle not found among bot users",
+                    handle=handle,
+                    order_id=order.get("id"),
+                )
                 continue
 
             try:
@@ -528,6 +535,9 @@ class OrderNotifier:
                     error=str(exc),
                 )
                 await self._notify_admins_delivery_error(order=order, error_text=str(exc))
+
+        if stats.unknown_user > 0 and not dry_run:
+            await self._alert_admins(stats.unknown_orders)
 
         return stats
 
@@ -615,7 +625,9 @@ class DomainNotifier:
                 or domain.get("expiration")
             )
             expires_at = _parse_date(expires_raw)
-            if not expires_at or expires_at > cutoff:
+            # API уже отдает только expiring<=30д; если даты нет — всё равно включаем,
+            # иначе фильтруем по горизонту.
+            if expires_at is not None and expires_at > cutoff:
                 continue
             stats.expiring_domains += 1
             handle, raw_handle, owner_name = _resolve_owner_fields(domain)
@@ -682,6 +694,8 @@ class DomainNotifier:
                 await self.bot.send_message(int(user["telegram_id"]), text)
                 stats.notified_users += 1
                 stats.notified_domains += len(domain_entries)
+                # Дублируем отправленное сообщение всем админам для контроля.
+                await self._notify_admins_copy(text)
                 for entry in domain_entries:
                     domain_id = entry["raw"].get("id")
                     if domain_id is None:
@@ -713,6 +727,19 @@ class DomainNotifier:
             await self._alert_admins(stats.unknown_items)
 
         return stats
+
+    async def _notify_admins_copy(self, text: str) -> None:
+        if not self.admin_ids:
+            return
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to send admin copy for domains",
+                    admin_id=admin_id,
+                    error=str(exc),
+                )
 
     async def _alert_admins(self, unknown_items: List[Dict[str, Any]]) -> None:
         if not self.admin_ids or not unknown_items:
