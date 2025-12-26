@@ -87,7 +87,10 @@ async def _resolve_daily_counter(user_id: int, db_value: int | None) -> int:
             if base_value > last_value:
                 display = base_value
             else:
-                display = last_value + 1
+                # If DB value is equal or less than the last displayed value,
+                # keep the last value to avoid showing a lower number.
+                # Do NOT increment when equal — that caused off-by-one duplicates.
+                display = last_value
         _daily_counter_cache[user_id] = (today, display)
     if base_value and base_value < display:
         logger.debug(
