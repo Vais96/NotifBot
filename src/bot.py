@@ -860,7 +860,7 @@ async def _send_aliases(chat_id: int, actor_id: int):
     if not rows:
         await bot.send_message(chat_id, "Алиасов пока нет.")
     else:
-        for r in rows[:25]:
+        for r in rows:
             text = f"<b>{r['alias']}</b> → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}"
             await bot.send_message(chat_id, text, reply_markup=alias_row_controls(r['alias'], r['buyer_id'], r['lead_id']))
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Добавить алиас", callback_data="alias:new")]])
@@ -1492,7 +1492,7 @@ async def on_aliases(message: Message):
     if not rows:
         await message.answer("Алиасов пока нет.")
     else:
-        for r in rows[:25]:
+        for r in rows:
             text = f"<b>{r['alias']}</b> → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}"
             await message.answer(text, reply_markup=alias_row_controls(r['alias'], r['buyer_id'], r['lead_id']))
     # кнопка для создания нового алиаса
