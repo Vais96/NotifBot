@@ -711,29 +711,34 @@ async def _render_domain_block(
         return f"Кампании для домена <code>{domain}</code>:\n\nНе найдено."
     lines: list[str] = []
     for row in rows[:20]:
-        # Получаем alias_key из базы или извлекаем из названия кампании
-        alias_key = row.get("alias_key")
-        if not alias_key:
-            # Пытаемся извлечь алиас из названия кампании (часть до первого _)
-            campaign_name = row.get("name") or ""
-            if "_" in campaign_name:
-                alias_key = campaign_name.split("_", 1)[0].strip()
-            elif campaign_name:
-                alias_key = campaign_name.strip()
+        # Всегда пытаемся извлечь алиас из названия кампании (часть до первого _)
+        # Это более надежно, чем полагаться на alias_key из базы данных
+        campaign_name = row.get("name") or ""
+        alias_key = None
+        if "_" in campaign_name:
+            alias_key = campaign_name.split("_", 1)[0].strip()
+        elif campaign_name:
+            # Если нет подчеркивания, используем весь name как алиас
+            alias_key = campaign_name.strip()
         
-        # Нормализуем алиас
+        # Если не удалось извлечь из названия, используем alias_key из базы
+        if not alias_key:
+            alias_key = row.get("alias_key")
+        
+        # Нормализуем алиас (уже в нижнем регистре)
         alias_key = _canonical_alias_key(alias_key) if alias_key else None
-        alias_key_lower = alias_key.lower() if alias_key else ""
         
         prefix = row.get("prefix") or alias_key or (row.get("name") or "-")
         alias_info = None
         if alias_key:
-            if alias_key_lower not in alias_cache:
-                alias_cache[alias_key_lower] = await db.find_alias(alias_key_lower)
-            alias_info = alias_cache[alias_key_lower]
+            # alias_key уже нормализован и в нижнем регистре
+            if alias_key not in alias_cache:
+                alias_cache[alias_key] = await db.find_alias(alias_key)
+            alias_info = alias_cache[alias_key]
         mention = None
         if alias_info:
-            target_id = alias_info.get("lead_id") or alias_info.get("buyer_id")
+            # Используем buyer_id в первую очередь, так как это основной владелец кампании
+            target_id = alias_info.get("buyer_id") or alias_info.get("lead_id")
             if target_id:
                 tid = int(target_id)
                 if tid not in user_cache:
