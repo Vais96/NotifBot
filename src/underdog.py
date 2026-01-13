@@ -1175,7 +1175,8 @@ class TicketNotifier:
                 )
 
         if not valid_tickets:
-            if stats.unknown_items and dry_run:
+            # Уведомляем админов о проблемах (и в dry_run, и в реальном режиме)
+            if stats.unknown_items:
                 await self._alert_admins(stats.unknown_items)
             return stats
 
@@ -1244,6 +1245,13 @@ class TicketNotifier:
                             ticket_id=ticket_id,
                             error=str(exc),
                         )
+                        # Уведомляем админов об ошибке пометки тикета
+                        await self._notify_admins_mark_error(
+                            ticket_id=ticket_id,
+                            handle=handle,
+                            error_text=str(exc),
+                            dry_run=dry_run,
+                        )
             except Exception as exc:
                 stats.errors += 1
                 logger.warning(
@@ -1259,7 +1267,8 @@ class TicketNotifier:
                     dry_run=dry_run,
                 )
 
-        if stats.unknown_items and dry_run:
+        # Уведомляем админов о проблемах (и в dry_run, и в реальном режиме)
+        if stats.unknown_items:
             await self._alert_admins(stats.unknown_items)
 
         return stats
@@ -1314,6 +1323,45 @@ class TicketNotifier:
                     "Failed to notify admin about missing ticket recipient",
                     admin_id=admin_id,
                     handle=handle,
+                    error=str(exc),
+                )
+
+    async def _notify_admins_mark_error(
+        self,
+        *,
+        ticket_id: int,
+        handle: Optional[str],
+        error_text: str,
+        dry_run: bool,
+    ) -> None:
+        """Уведомляет админов об ошибке пометки тикета как отправленного."""
+        if not self.admin_ids:
+            return
+        lines = [
+            "⚠️ Ошибка пометки тикета как отправленного",
+            f"Тикет ID: {ticket_id}",
+            f"Username: @{handle}" if handle else "Username: (не указан)",
+            f"Ошибка: {error_text}",
+            "",
+            "Тикет был отправлен пользователю, но не был помечен как отправленный в системе.",
+        ]
+        text = "\n".join(lines)
+        if dry_run:
+            logger.info(
+                "Dry-run: would alert admins about ticket mark error",
+                ticket_id=ticket_id,
+                handle=handle,
+                error=error_text,
+            )
+            return
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about ticket mark error",
+                    admin_id=admin_id,
+                    ticket_id=ticket_id,
                     error=str(exc),
                 )
 
