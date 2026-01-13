@@ -24,6 +24,7 @@ LOGIN_PATH = "/api/login"
 ORDERS_PATH = "/api/v2/orders"
 DOMAINS_PATH = "/api/v2/domains"
 IPS_PATH = "/api/v2/ip"
+TICKETS_PATH = "/api/v2/tickets"
 DEFAULT_TIMEOUT = (30.0, 15.0)
 
 
@@ -113,6 +114,23 @@ def _extract_ips(payload: Any) -> List[Dict[str, Any]]:
         if isinstance(payload.get("ips"), list):
             return payload["ips"]
     raise UnderdogAPIError("Unexpected IP response shape")
+
+
+def _extract_tickets(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("items", "tickets"):
+                items = data.get(key)
+                if isinstance(items, list):
+                    return items
+        if isinstance(payload.get("tickets"), list):
+            return payload["tickets"]
+    raise UnderdogAPIError("Unexpected tickets response shape")
 
 
 def _normalize_handle(value: Optional[str]) -> Optional[str]:
@@ -352,6 +370,14 @@ class UnderdogClient:
         path = f"{IPS_PATH}/{ip_id}/telegram-sent"
         await self.request("PATCH", path)
 
+    async def fetch_tickets(self) -> List[Dict[str, Any]]:
+        resp = await self.request("GET", TICKETS_PATH)
+        return _extract_tickets(resp.json())
+
+    async def mark_ticket_telegram_sent(self, ticket_id: int) -> None:
+        path = f"{TICKETS_PATH}/{ticket_id}/telegram-sent"
+        await self.request("PATCH", path)
+
     @classmethod
     def from_settings(cls) -> "UnderdogClient":
         return cls(
@@ -433,6 +459,35 @@ class IPNotifierStats:
             "matched_users": self.matched_users,
             "notified_users": self.notified_users,
             "notified_ips": self.notified_ips,
+            "missing_contact": self.missing_contact,
+            "unknown_user": self.unknown_user,
+            "errors": self.errors,
+            "unknown_items": self.unknown_items,
+        }
+        if dry_run is not None:
+            payload["dry_run"] = dry_run
+        return payload
+
+
+@dataclass(slots=True)
+class TicketNotifierStats:
+    total_tickets: int = 0
+    completed_tickets: int = 0
+    matched_users: int = 0
+    notified_users: int = 0
+    notified_tickets: int = 0
+    missing_contact: int = 0
+    unknown_user: int = 0
+    errors: int = 0
+    unknown_items: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self, *, dry_run: Optional[bool] = None) -> Dict[str, Any]:
+        payload = {
+            "total_tickets": self.total_tickets,
+            "completed_tickets": self.completed_tickets,
+            "matched_users": self.matched_users,
+            "notified_users": self.notified_users,
+            "notified_tickets": self.notified_tickets,
             "missing_contact": self.missing_contact,
             "unknown_user": self.unknown_user,
             "errors": self.errors,
@@ -1068,6 +1123,256 @@ class IPNotifier:
                     error=str(exc),
                 )
 
+
+@dataclass(slots=True)
+class TicketNotifier:
+    underdog: UnderdogClient
+    bot: Bot
+    admin_ids: Sequence[int]
+
+    async def notify_completed_tickets(self, *, dry_run: bool = True) -> TicketNotifierStats:
+        # Получаем список тикетов
+        tickets = await self.underdog.fetch_tickets()
+        stats = TicketNotifierStats(total_tickets=len(tickets))
+        if not tickets:
+            return stats
+
+        # Собираем все уникальные handles для предварительной загрузки пользователей
+        handles_to_fetch = set()
+        valid_tickets = []
+        
+        for ticket in tickets:
+            # Фильтруем только завершенные тикеты, которые еще не были отправлены
+            status = ticket.get("status")
+            if status != "completed":
+                continue
+            
+            if _is_ticket_sent(ticket):
+                continue
+            
+            handle, raw_handle, owner_name = _resolve_owner_fields(ticket)
+            if handle:
+                handles_to_fetch.add(handle)
+                valid_tickets.append({
+                    "ticket": ticket,
+                    "handle": handle,
+                    "raw_handle": raw_handle,
+                    "owner_name": owner_name,
+                })
+            else:
+                stats.missing_contact += 1
+                stats.unknown_items.append(
+                    {
+                        "ticket_id": ticket.get("id"),
+                        "type": ticket.get("type") or ticket.get("ticket_type"),
+                        "owner": owner_name,
+                    }
+                )
+                await self._notify_admins_missing_user(
+                    handle=None,
+                    entries=[{"raw": ticket}],
+                    dry_run=dry_run,
+                )
+
+        if not valid_tickets:
+            if stats.unknown_items and dry_run:
+                await self._alert_admins(stats.unknown_items)
+            return stats
+
+        # Загружаем всех пользователей один раз
+        user_map = await db.fetch_users_by_usernames(list(handles_to_fetch))
+
+        # Обрабатываем каждый тикет индивидуально: получили -> отправили -> пометили
+        for entry in valid_tickets:
+            ticket = entry["ticket"]
+            handle = entry["handle"]
+            ticket_id = ticket.get("id")
+            stats.completed_tickets += 1
+            
+            # Получаем пользователя из кэша
+            user = user_map.get(handle)
+            
+            if not user:
+                stats.unknown_user += 1
+                stats.unknown_items.append(
+                    {
+                        "ticket_id": ticket_id,
+                        "type": ticket.get("type") or ticket.get("ticket_type"),
+                        "handle": handle,
+                    }
+                )
+                await self._notify_admins_missing_user(
+                    handle=handle,
+                    entries=[{"raw": ticket}],
+                    dry_run=dry_run,
+                )
+                continue
+
+            # Формируем сообщение для одного тикета
+            stats.matched_users += 1
+            text = _build_ticket_notification([{"raw": ticket}])
+            
+            if dry_run:
+                logger.info(
+                    "Dry-run: would notify about completed ticket",
+                    handle=handle,
+                    ticket_id=ticket_id,
+                    telegram_id=user.get("telegram_id"),
+                )
+                stats.notified_users += 1
+                stats.notified_tickets += 1
+                continue
+
+            # Отправляем уведомление
+            try:
+                await self.bot.send_message(int(user["telegram_id"]), text)
+                stats.notified_users += 1
+                stats.notified_tickets += 1
+                # Дублируем отправленное сообщение всем админам для контроля
+                await self._notify_admins_copy(text)
+                
+                # Сразу помечаем тикет как отправленный после успешной отправки
+                if ticket_id is not None:
+                    try:
+                        await self.underdog.mark_ticket_telegram_sent(int(ticket_id))
+                    except Exception as exc:
+                        stats.errors += 1
+                        logger.warning(
+                            "Failed to mark ticket telegram_sent",
+                            ticket_id=ticket_id,
+                            error=str(exc),
+                        )
+            except Exception as exc:
+                stats.errors += 1
+                logger.warning(
+                    "Failed to send ticket notification message",
+                    handle=handle,
+                    ticket_id=ticket_id,
+                    error=str(exc),
+                )
+                await self._notify_admins_ticket_delivery_error(
+                    handle=handle,
+                    entries=[{"raw": ticket}],
+                    error_text=str(exc),
+                    dry_run=dry_run,
+                )
+
+        if stats.unknown_items and dry_run:
+            await self._alert_admins(stats.unknown_items)
+
+        return stats
+
+    async def _notify_admins_copy(self, text: str) -> None:
+        if not self.admin_ids:
+            return
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to send admin copy for tickets",
+                    admin_id=admin_id,
+                    error=str(exc),
+                )
+
+    async def _notify_admins_missing_user(
+        self,
+        *,
+        handle: Optional[str],
+        entries: List[Dict[str, Any]],
+        dry_run: bool,
+    ) -> None:
+        if not self.admin_ids or not entries:
+            return
+        owner_name = (entries[0]["raw"].get("owner") or {}).get("name") if entries else None
+        header_lines = [
+            "⚠️ Не удалось доставить уведомление о тикете покупателю.",
+        ]
+        if owner_name:
+            header_lines.append(f"Владелец: {owner_name}")
+        header_lines.append(f"Username: @{handle}" if handle else "Username: (не указан)")
+        header_lines.append("")
+        header_lines.append(_build_ticket_notification(entries))
+        text = "\n".join(header_lines)
+        if dry_run:
+            logger.info(
+                "Dry-run: would alert admins about unknown ticket recipient",
+                handle=handle,
+                owner=owner_name,
+            )
+            return
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about missing ticket recipient",
+                    admin_id=admin_id,
+                    handle=handle,
+                    error=str(exc),
+                )
+
+    async def _notify_admins_ticket_delivery_error(
+        self,
+        *,
+        handle: Optional[str],
+        entries: List[Dict[str, Any]],
+        error_text: str,
+        dry_run: bool,
+    ) -> None:
+        if not self.admin_ids or not entries:
+            return
+        lines = [
+            "⚠️ Ошибка отправки уведомления о тикете",
+            f"Username: @{handle}" if handle else "Username: (не указан)",
+            f"Ошибка: {error_text}",
+            "",
+            _build_ticket_notification(entries),
+        ]
+        text = "\n".join(lines)
+        if dry_run:
+            logger.info(
+                "Dry-run: would alert admins about ticket delivery error",
+                handle=handle,
+                error=error_text,
+            )
+            return
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about ticket delivery error",
+                    admin_id=admin_id,
+                    handle=handle,
+                    error=str(exc),
+                )
+
+    async def _alert_admins(self, unknown_items: List[Dict[str, Any]]) -> None:
+        if not self.admin_ids or not unknown_items:
+            return
+        lines = [
+            "⚠️ Не удалось отправить уведомление по тикетам:",
+            "",
+        ]
+        for item in unknown_items[:20]:
+            lines.append(
+                f"Тикет #{item.get('ticket_id') or '—'} ({item.get('type') or '—'}) — @{item.get('handle') or '—'}"
+            )
+        if len(unknown_items) > 20:
+            lines.append(f"… и ещё {len(unknown_items) - 20} тикетов")
+        text = "\n".join(lines)
+        for admin_id in self.admin_ids:
+            try:
+                await self.bot.send_message(int(admin_id), text)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about tickets",
+                    admin_id=admin_id,
+                    error=str(exc),
+                )
+
+
 def _is_domain_sent(domain: Dict[str, Any]) -> bool:
     for key in ("telegram_sent", "telegram_notified", "telegramSent", "telegramNotified"):
         value = domain.get(key)
@@ -1165,6 +1470,67 @@ def _is_ip_sent(item: Dict[str, Any]) -> bool:
     return False
 
 
+def _get_ticket_type_name(ticket_type: Optional[str]) -> str:
+    """Расшифровка типов тикетов."""
+    type_map = {
+        "transfer_accounts": "Перенос аккаунтов",
+        "account_errors": "Ошибки аккаунтов",
+        "withdraw_funds": "Вывод средств",
+        "topup_nachonacho": "Пополнение Nacho",
+        "proxy_issues": "Проблемы с прокси",
+        "general_question": "Общий вопрос",
+    }
+    if not ticket_type:
+        return "Неизвестный тип"
+    return type_map.get(ticket_type, ticket_type)
+
+
+def _is_ticket_sent(ticket: Dict[str, Any]) -> bool:
+    """Проверяет, был ли тикет уже отправлен."""
+    for key in ("telegram_sent", "telegram_notified", "telegramSent", "telegramNotified"):
+        value = ticket.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            if value:
+                return True
+            continue
+        try:
+            if int(value) == 1:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _build_ticket_notification(entries: List[Dict[str, Any]]) -> str:
+    """Формирует сообщение о завершенных тикетах."""
+    if len(entries) == 1:
+        lines: List[str] = ["✅ Ваш тикет выполнен:", ""]
+    else:
+        lines: List[str] = [f"✅ Выполнено тикетов: {len(entries)}", ""]
+    
+    for entry in entries:
+        ticket = entry["raw"]
+        ticket_id = ticket.get("id") or "—"
+        ticket_type = ticket.get("type") or ticket.get("ticket_type")
+        type_name = _get_ticket_type_name(ticket_type)
+        description = ticket.get("description") or ticket.get("message") or ticket.get("text") or "—"
+        
+        if len(entries) > 1:
+            lines.append(f"🎫 Тикет #{ticket_id}")
+        lines.extend(
+            [
+                f"📋 Тип: {type_name}",
+                f"💬 Описание: {description}",
+            ]
+        )
+        if len(entries) > 1:
+            lines.extend(["", "──────────────────", ""])
+    
+    return "\n".join(lines).rstrip()
+
+
 def _create_bot() -> Bot:
     token = settings.orders_bot_token or settings.telegram_bot_token
     return Bot(
@@ -1234,6 +1600,22 @@ async def notify_expiring_ips(
             return stats.to_dict(dry_run=dry_run)
 
 
+async def notify_completed_tickets(
+    *,
+    dry_run: bool = True,
+    bot_instance: Optional[Bot] = None,
+) -> Dict[str, Any]:
+    async with UnderdogClient.from_settings() as client:
+        if bot_instance is not None:
+            notifier = TicketNotifier(client, bot_instance, settings.admins)
+            stats = await notifier.notify_completed_tickets(dry_run=dry_run)
+            return stats.to_dict(dry_run=dry_run)
+        async with _create_bot() as owned_bot:
+            notifier = TicketNotifier(client, owned_bot, settings.admins)
+            stats = await notifier.notify_completed_tickets(dry_run=dry_run)
+            return stats.to_dict(dry_run=dry_run)
+
+
 async def _amain() -> None:
     parser = ArgumentParser(description="Interact with the Underdog admin API")
     parser.add_argument("--orders", action="store_true", help="Fetch yesterday's pending telegram orders")
@@ -1242,6 +1624,8 @@ async def _amain() -> None:
     parser.add_argument("--notify-domains", action="store_true", help="Notify Telegram users about expiring domains")
     parser.add_argument("--ips", action="store_true", help="Fetch expiring IPs from Underdog")
     parser.add_argument("--notify-ips", action="store_true", help="Notify Telegram users about expiring IPs")
+    parser.add_argument("--tickets", action="store_true", help="Fetch all tickets from Underdog")
+    parser.add_argument("--notify-tickets", action="store_true", help="Notify Telegram users about completed tickets")
     parser.add_argument(
         "--apply",
         action="store_true",
@@ -1300,6 +1684,19 @@ async def _amain() -> None:
             async with _create_bot() as bot_instance:
                 notifier = IPNotifier(client, bot_instance, settings.admins)
                 stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=horizon)
+            print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
+            return
+
+        if args.tickets:
+            tickets = await client.fetch_tickets()
+            print(json.dumps({"count": len(tickets), "tickets": tickets}, ensure_ascii=False, indent=2))
+            return
+
+        if args.notify_tickets:
+            dry_run = not args.apply
+            async with _create_bot() as bot_instance:
+                notifier = TicketNotifier(client, bot_instance, settings.admins)
+                stats = await notifier.notify_completed_tickets(dry_run=dry_run)
             print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
             return
 

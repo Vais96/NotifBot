@@ -78,6 +78,51 @@ CLI example:
 python -m src.underdog --notify-ips --ip-days 7 --apply
 ```
 
+## Ticket completion notifications
+Triggered via:
+
+```
+POST https://<your-app>/underdog/tickets/notify
+Authorization: Bearer <POSTBACK_TOKEN>
+Content-Type: application/json
+
+{
+	"dry_run": true,   // set false to actually message and mark telegram_sent
+	"token": "..."     // optional fallback if you cannot send Authorization header
+}
+```
+
+The helper fetches `/api/v2/tickets`, filters records with `status='completed'` and `telegram_sent=false`, notifies matching buyers, then PATCH-es `/api/v2/tickets/{id}/telegram-sent`.
+
+CLI example:
+
+```
+python -m src.underdog --notify-tickets --apply
+python -m src.underdog --notify-tickets  # dry-run режим
+python -m src.underdog --tickets  # получить список всех тикетов
+```
+
+Or use the script:
+
+```
+python scripts/notify_tickets.py
+python scripts/notify_tickets.py --dry-run  # для тестирования
+```
+
+For Railway scheduled task (every 5 minutes):
+
+1. **Using Railway Scheduler** (recommended):
+   - Create a new service in Railway
+   - Select "Scheduler" as the service type
+   - Set the command: `python -m src.underdog --notify-tickets --apply`
+   - Configure schedule: `*/5 * * * *` (every 5 minutes)
+
+2. **Alternative**: Use the script:
+   - Command: `python scripts/notify_tickets.py`
+   - Schedule: `*/5 * * * *` (every 5 minutes)
+
+Note: The `tickets` process in Procfile is for a persistent worker, not for scheduled tasks. Use Railway Scheduler for cron-like behavior.
+
 ## Run locally (optional)
 1. Create virtualenv and install deps
 2. Copy `.env.example` to `.env` and fill values
