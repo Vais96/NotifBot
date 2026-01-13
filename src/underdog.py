@@ -1506,27 +1506,32 @@ def _is_ticket_sent(ticket: Dict[str, Any]) -> bool:
 def _build_ticket_notification(entries: List[Dict[str, Any]]) -> str:
     """Формирует сообщение о завершенных тикетах."""
     if len(entries) == 1:
-        lines: List[str] = ["✅ Ваш тикет выполнен:", ""]
-    else:
-        lines: List[str] = [f"✅ Выполнено тикетов: {len(entries)}", ""]
-    
-    for entry in entries:
-        ticket = entry["raw"]
+        ticket = entries[0]["raw"]
         ticket_id = ticket.get("id") or "—"
         ticket_type = ticket.get("type") or ticket.get("ticket_type")
         type_name = _get_ticket_type_name(ticket_type)
-        description = ticket.get("description") or ticket.get("message") or ticket.get("text") or "—"
-        
-        if len(entries) > 1:
-            lines.append(f"🎫 Тикет #{ticket_id}")
-        lines.extend(
-            [
-                f"📋 Тип: {type_name}",
-                f"💬 Описание: {description}",
-            ]
-        )
-        if len(entries) > 1:
-            lines.extend(["", "──────────────────", ""])
+        lines: List[str] = [
+            f"✅ Ваш тикет ({ticket_id}) выполнен:",
+            "",
+            f"📋 Тип: {type_name}",
+        ]
+    else:
+        lines: List[str] = [f"✅ Выполнено тикетов: {len(entries)}", ""]
+        for entry in entries:
+            ticket = entry["raw"]
+            ticket_id = ticket.get("id") or "—"
+            ticket_type = ticket.get("type") or ticket.get("ticket_type")
+            type_name = _get_ticket_type_name(ticket_type)
+            lines.extend(
+                [
+                    f"✅ Ваш тикет ({ticket_id}) выполнен:",
+                    "",
+                    f"📋 Тип: {type_name}",
+                    "",
+                    "──────────────────",
+                    "",
+                ]
+            )
     
     return "\n".join(lines).rstrip()
 
