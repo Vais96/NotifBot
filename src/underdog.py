@@ -1225,11 +1225,13 @@ class TicketNotifier:
 
             # Отправляем уведомление
             try:
-                await self.bot.send_message(int(user["telegram_id"]), text)
+                user_telegram_id = int(user["telegram_id"])
+                await self.bot.send_message(user_telegram_id, text)
                 stats.notified_users += 1
                 stats.notified_tickets += 1
                 # Дублируем отправленное сообщение всем админам для контроля
-                await self._notify_admins_copy(text)
+                # (но не самому пользователю, если он админ)
+                await self._notify_admins_copy(text, exclude_user_id=user_telegram_id)
                 
                 # Сразу помечаем тикет как отправленный после успешной отправки
                 if ticket_id is not None:
@@ -1262,10 +1264,13 @@ class TicketNotifier:
 
         return stats
 
-    async def _notify_admins_copy(self, text: str) -> None:
+    async def _notify_admins_copy(self, text: str, exclude_user_id: Optional[int] = None) -> None:
         if not self.admin_ids:
             return
         for admin_id in self.admin_ids:
+            # Пропускаем пользователя, если он админ (чтобы не дублировать сообщение)
+            if exclude_user_id is not None and int(admin_id) == exclude_user_id:
+                continue
             try:
                 await self.bot.send_message(int(admin_id), text)
             except Exception as exc:
