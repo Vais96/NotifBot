@@ -161,21 +161,34 @@ async def download_youtube_video(url: str) -> YoutubeDownloadResult:
     cookies_file = _resolve_youtube_cookies_file()
     youtube_headers = _build_youtube_headers()
 
+    ffmpeg_path = shutil.which("ffmpeg")
+
+    # Список клиентов для попыток (в порядке приоритета)
+    # ios и android клиенты лучше обходят возрастные ограничения
+    client_orders_to_try: List[Optional[List[str]]] = []
     if cookies_file or youtube_headers:
-        client_order: Optional[List[str]] = ["web", "android"]
+        # Если есть cookies/headers, пробуем разные клиенты
+        client_orders_to_try = [
+            ["ios", "android"],  # iOS клиент часто лучше работает с возрастными ограничениями
+            ["android", "web"],
+            ["web", "android"],
+            ["tv_embedded", "web"],  # TV embedded может обойти некоторые ограничения
+        ]
     else:
-        client_order = None
+        # Без авторизации пробуем стандартные клиенты
+        client_orders_to_try = [
+            ["android", "web"],
+            ["web", "android"],
+        ]
 
     logger.bind(
         url=url,
         cookies_path=cookies_file,
         headers_present=bool(youtube_headers),
-        client_order=client_order,
+        client_orders_count=len(client_orders_to_try),
     ).debug("Preparing YouTube download")
 
-    ffmpeg_path = shutil.which("ffmpeg")
-
-    def _probe_info() -> dict[str, Any]:
+    def _probe_info(client_order: Optional[List[str]]) -> dict[str, Any]:
         options: dict[str, Any] = {
             "outtmpl": str(temp_dir / "probe"),
             "noplaylist": True,
@@ -198,11 +211,67 @@ async def download_youtube_video(url: str) -> YoutubeDownloadResult:
         with yt_dlp.YoutubeDL(options) as ydl:
             return ydl.extract_info(normalized_url, download=False)
 
-    try:
-        probe = await asyncio.to_thread(_probe_info)
-    except Exception as exc:
+    # Пробуем разные клиенты при ошибках
+    probe: Optional[dict[str, Any]] = None
+    last_error: Optional[Exception] = None
+    used_client_order: Optional[List[str]] = None
+    
+    for client_order in client_orders_to_try:
+        try:
+            probe = await asyncio.to_thread(_probe_info, client_order)
+            used_client_order = client_order
+            logger.debug("Successfully probed video info", client_order=client_order)
+            break
+        except Exception as exc:
+            error_str = str(exc).lower()
+            # Проверяем, является ли это ошибкой возрастного ограничения или проверки на бота
+            is_age_restriction = any(keyword in error_str for keyword in [
+                "age", "restricted", "confirm you're not a bot", "sign in to confirm",
+                "verify", "verification required"
+            ])
+            
+            if is_age_restriction and client_order != client_orders_to_try[-1]:
+                # Если это возрастное ограничение и есть еще клиенты для попытки, продолжаем
+                logger.debug(
+                    "Age restriction or bot check detected, trying next client",
+                    client_order=client_order,
+                    error=str(exc)[:200]
+                )
+                last_error = exc
+                continue
+            elif client_order != client_orders_to_try[-1]:
+                # Для других ошибок тоже пробуем следующий клиент
+                logger.debug(
+                    "Error with client, trying next",
+                    client_order=client_order,
+                    error=str(exc)[:200]
+                )
+                last_error = exc
+                continue
+            else:
+                # Последняя попытка не удалась
+                last_error = exc
+                break
+
+    if probe is None:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        raise YoutubeDownloadError(str(exc)) from exc
+        error_msg = str(last_error) if last_error else "Не удалось получить информацию о видео"
+        
+        # Улучшаем сообщение об ошибке для возрастных ограничений
+        if last_error:
+            error_str = str(last_error).lower()
+            if any(keyword in error_str for keyword in [
+                "age", "restricted", "confirm you're not a bot", "sign in to confirm"
+            ]):
+                error_msg = (
+                    "Видео недоступно из-за возрастных ограничений или требует подтверждения. "
+                    "Попробуйте:\n"
+                    "1. Убедиться, что cookies YouTube настроены правильно\n"
+                    "2. Проверить, что аккаунт имеет доступ к этому видео\n"
+                    "3. Попробовать другую ссылку"
+                )
+        
+        raise YoutubeDownloadError(error_msg) from last_error
 
     formats = probe.get("formats") or []
     progressive_available = any(
@@ -235,7 +304,7 @@ async def download_youtube_video(url: str) -> YoutubeDownloadResult:
 
     last_error: Optional[Exception] = None
 
-    def _invoke_download(fmt: str) -> tuple[dict[str, Any], str]:
+    def _invoke_download(fmt: str, client_order: Optional[List[str]]) -> tuple[dict[str, Any], str]:
         options: dict[str, Any] = {
             "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
             "noplaylist": True,
@@ -279,11 +348,14 @@ async def download_youtube_video(url: str) -> YoutubeDownloadResult:
                 filepath = final_path
             return info, filepath
 
+    # Используем тот же клиент, который успешно получил информацию
+    client_order_for_download = used_client_order
+    
     info: Optional[dict[str, Any]] = None
     filepath: Optional[str] = None
     for fmt in format_candidates:
         try:
-            info, filepath = await asyncio.to_thread(_invoke_download, fmt)
+            info, filepath = await asyncio.to_thread(_invoke_download, fmt, client_order_for_download)
             break
         except DownloadError as exc:
             last_error = exc
