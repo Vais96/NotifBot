@@ -163,11 +163,15 @@ async def download_youtube_video(url: str) -> YoutubeDownloadResult:
 
     ffmpeg_path = shutil.which("ffmpeg")
 
+    # Всегда используем cookies и headers, если они настроены
+    # Это важно для авторизованного доступа к видео с ограничениями
+    has_auth = bool(cookies_file or youtube_headers)
+    
     # Список клиентов для попыток (в порядке приоритета)
     # ios и android клиенты лучше обходят возрастные ограничения
     client_orders_to_try: List[Optional[List[str]]] = []
-    if cookies_file or youtube_headers:
-        # Если есть cookies/headers, пробуем разные клиенты
+    if has_auth:
+        # Если есть cookies/headers, пробуем разные клиенты с авторизацией
         client_orders_to_try = [
             ["ios", "android"],  # iOS клиент часто лучше работает с возрастными ограничениями
             ["android", "web"],
@@ -184,9 +188,11 @@ async def download_youtube_video(url: str) -> YoutubeDownloadResult:
     logger.bind(
         url=url,
         cookies_path=cookies_file,
+        cookies_present=bool(cookies_file),
         headers_present=bool(youtube_headers),
+        has_auth=has_auth,
         client_orders_count=len(client_orders_to_try),
-    ).debug("Preparing YouTube download")
+    ).info("Preparing YouTube download")
 
     def _probe_info(client_order: Optional[List[str]]) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -263,13 +269,24 @@ async def download_youtube_video(url: str) -> YoutubeDownloadResult:
             if any(keyword in error_str for keyword in [
                 "age", "restricted", "confirm you're not a bot", "sign in to confirm"
             ]):
-                error_msg = (
-                    "Видео недоступно из-за возрастных ограничений или требует подтверждения. "
-                    "Попробуйте:\n"
-                    "1. Убедиться, что cookies YouTube настроены правильно\n"
-                    "2. Проверить, что аккаунт имеет доступ к этому видео\n"
-                    "3. Попробовать другую ссылку"
-                )
+                if not has_auth:
+                    error_msg = (
+                        "Видео недоступно из-за возрастных ограничений или требует подтверждения. "
+                        "⚠️ Cookies YouTube не настроены - бот работает как неавторизованный пользователь.\n\n"
+                        "Для скачивания таких видео необходимо:\n"
+                        "1. Настроить cookies YouTube (YTDLP_COOKIES или YTDLP_COOKIES_PATH)\n"
+                        "2. Убедиться, что аккаунт имеет доступ к этому видео\n"
+                        "3. Проверить настройки YTDLP_IDENTITY_TOKEN и YTDLP_AUTH_USER"
+                    )
+                else:
+                    error_msg = (
+                        "Видео недоступно из-за возрастных ограничений или требует подтверждения. "
+                        "Попробуйте:\n"
+                        "1. Убедиться, что cookies YouTube настроены правильно и актуальны\n"
+                        "2. Проверить, что аккаунт имеет доступ к этому видео\n"
+                        "3. Обновить cookies, если они устарели\n"
+                        "4. Попробовать другую ссылку"
+                    )
         
         raise YoutubeDownloadError(error_msg) from last_error
 
@@ -321,8 +338,12 @@ async def download_youtube_video(url: str) -> YoutubeDownloadResult:
         }
         if client_order:
             options["extractor_args"]["youtube"]["player_client"] = client_order
+        # ВАЖНО: Всегда применяем cookies и headers, если они есть
+        # Это необходимо для авторизованного доступа
         if cookies_file:
             options["cookiefile"] = cookies_file
+        if youtube_headers:
+            options["http_headers"] = youtube_headers
         if ffmpeg_path:
             options.update(
                 {
