@@ -351,7 +351,7 @@ async def on_text_fallback(message: Message):
             return
         if action == "youtube:await_url":
             if await handle_youtube_download(message):
-                return
+            return
         if action.startswith("alias:setbuyer:"):
             alias = action.split(":", 2)[2]
             v = message.text.strip()
@@ -1004,99 +1004,99 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
     from datetime import datetime, timezone, timedelta
     try:
         logger.info(f"Building report: title={title}, days={days}, yesterday={yesterday}, actor_id={actor_id}, chat_id={chat_id}")
-        users = await db.list_users()
+    users = await db.list_users()
         logger.info(f"Got {len(users)} users")
         if not users:
             logger.warning("No users found in database")
-        user_ids = await _resolve_scope_user_ids(actor_id)
+    user_ids = await _resolve_scope_user_ids(actor_id)
         logger.info(f"Resolved {len(user_ids)} user_ids: {user_ids[:5] if user_ids else []}")
         if not user_ids:
             logger.warning(f"No user_ids resolved for actor_id={actor_id}, sending empty report")
-        now = datetime.now(timezone.utc)
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-        if yesterday:
-            end = start
-            start = end - timedelta(days=1)
-        if days is not None:
-            start = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days-1))
-            end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    if yesterday:
+        end = start
+        start = end - timedelta(days=1)
+    if days is not None:
+        start = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days-1))
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         logger.info(f"Time range: {start} to {end}")
-        filt = await db.get_report_filter(actor_id)
+    filt = await db.get_report_filter(actor_id)
         logger.info(f"Filters: {filt}")
-        filter_user_ids: list[int] | None = None
-        if filt.get('buyer_id') or filt.get('team_id'):
-            me = next((u for u in users if u["telegram_id"] == actor_id), None)
-            role = (me or {}).get("role", "buyer")
-            if actor_id in ADMIN_IDS:
-                role = "admin"
-            allowed_ids = set(user_ids)
-            if filt.get('buyer_id'):
-                bid = int(filt['buyer_id'])
-                filter_user_ids = [bid] if bid in allowed_ids else []
-            elif filt.get('team_id'):
-                tid = int(filt['team_id'])
-                team_ids = [int(u['telegram_id']) for u in users if u.get('team_id') == tid and u.get('is_active')]
-                filter_user_ids = [uid for uid in team_ids if uid in allowed_ids]
+    filter_user_ids: list[int] | None = None
+    if filt.get('buyer_id') or filt.get('team_id'):
+        me = next((u for u in users if u["telegram_id"] == actor_id), None)
+        role = (me or {}).get("role", "buyer")
+        if actor_id in ADMIN_IDS:
+            role = "admin"
+        allowed_ids = set(user_ids)
+        if filt.get('buyer_id'):
+            bid = int(filt['buyer_id'])
+            filter_user_ids = [bid] if bid in allowed_ids else []
+        elif filt.get('team_id'):
+            tid = int(filt['team_id'])
+            team_ids = [int(u['telegram_id']) for u in users if u.get('team_id') == tid and u.get('is_active')]
+            filter_user_ids = [uid for uid in team_ids if uid in allowed_ids]
         logger.info(f"Calling aggregate_sales with {len(user_ids)} user_ids, start={start}, end={end}")
         try:
-            agg = await db.aggregate_sales(user_ids, start, end, offer=filt.get('offer'), creative=filt.get('creative'), filter_user_ids=filter_user_ids)
+    agg = await db.aggregate_sales(user_ids, start, end, offer=filt.get('offer'), creative=filt.get('creative'), filter_user_ids=filter_user_ids)
             logger.info(f"Aggregate result: count={agg.get('count')}, profit={agg.get('profit')}, top_offer={agg.get('top_offer')}")
         except Exception as agg_err:
             logger.exception(f"Error in aggregate_sales: {agg_err}", exc_info=agg_err)
             raise
-        text = _report_text(title, agg)
+    text = _report_text(title, agg)
         logger.info("Report text generated")
-        # Append buyer breakdown if available
-        buyer_dist = agg.get('buyer_dist') or {}
-        if buyer_dist:
-            # If team filter set, limit to that team (already limited in query by filter_user_ids, but double-check)
-            team_filter = filt.get('team_id')
-            buyers_map: dict[int, dict] = {int(u['telegram_id']): u for u in users}
-            # Order by count desc
-            items = sorted(buyer_dist.items(), key=lambda kv: kv[1], reverse=True)
-            lines = []
-            for uid, cnt in items:
-                u = buyers_map.get(int(uid))
-                if team_filter:
-                    try:
-                        if not (u and u.get('team_id') and int(u.get('team_id')) == int(team_filter)):
-                            continue
-                    except Exception:
+    # Append buyer breakdown if available
+    buyer_dist = agg.get('buyer_dist') or {}
+    if buyer_dist:
+        # If team filter set, limit to that team (already limited in query by filter_user_ids, but double-check)
+        team_filter = filt.get('team_id')
+        buyers_map: dict[int, dict] = {int(u['telegram_id']): u for u in users}
+        # Order by count desc
+        items = sorted(buyer_dist.items(), key=lambda kv: kv[1], reverse=True)
+        lines = []
+        for uid, cnt in items:
+            u = buyers_map.get(int(uid))
+            if team_filter:
+                try:
+                    if not (u and u.get('team_id') and int(u.get('team_id')) == int(team_filter)):
                         continue
-                if not u:
-                    label = f"<code>{uid}</code>"
-                else:
-                    label = f"@{u['username']}" if u.get('username') else (u.get('full_name') or f"<code>{uid}</code>")
-                lines.append(f"{label}: <b>{cnt}</b>")
-            if lines:
-                text += "\n\n" + "\n".join(lines)
-        if days == 7 and not yesterday:
+                except Exception:
+                    continue
+            if not u:
+                label = f"<code>{uid}</code>"
+            else:
+                label = f"@{u['username']}" if u.get('username') else (u.get('full_name') or f"<code>{uid}</code>")
+            lines.append(f"{label}: <b>{cnt}</b>")
+        if lines:
+            text += "\n\n" + "\n".join(lines)
+    if days == 7 and not yesterday:
             logger.info("Fetching trend data")
-            trend = await db.trend_daily_sales(user_ids, days=7)
-            if trend:
-                tline = ", ".join(f"{d.split('-')[-1]}:{c}" for d, c in trend)
-                text += f"\n📅 Тренд (7д): {tline}"
-        if filt.get('offer') or filt.get('creative') or filt.get('buyer_id') or filt.get('team_id'):
-            teams = await db.list_teams()
-            fparts: list[str] = []
-            if filt.get('offer'):
-                fparts.append(f"offer=<code>{filt['offer']}</code>")
-            if filt.get('creative'):
-                fparts.append(f"creative=<code>{filt['creative']}</code>")
-            if filt.get('buyer_id'):
-                bid = int(filt['buyer_id'])
-                bu = next((u for u in users if int(u['telegram_id']) == bid), None)
-                if bu and (bu.get('username') or bu.get('full_name')):
-                    cap = f"@{bu['username']}" if bu.get('username') else (bu.get('full_name') or str(bid))
-                else:
-                    cap = str(bid)
-                fparts.append(f"buyer=<code>{cap}</code>")
-            if filt.get('team_id'):
-                tid = int(filt['team_id'])
-                tn = next((t['name'] for t in teams if int(t['id']) == tid), str(tid))
-                fparts.append(f"team=<code>{tn}</code>")
-            text += "\n🔎 Фильтры: " + ", ".join(fparts)
+        trend = await db.trend_daily_sales(user_ids, days=7)
+        if trend:
+            tline = ", ".join(f"{d.split('-')[-1]}:{c}" for d, c in trend)
+            text += f"\n📅 Тренд (7д): {tline}"
+    if filt.get('offer') or filt.get('creative') or filt.get('buyer_id') or filt.get('team_id'):
+        teams = await db.list_teams()
+        fparts: list[str] = []
+        if filt.get('offer'):
+            fparts.append(f"offer=<code>{filt['offer']}</code>")
+        if filt.get('creative'):
+            fparts.append(f"creative=<code>{filt['creative']}</code>")
+        if filt.get('buyer_id'):
+            bid = int(filt['buyer_id'])
+            bu = next((u for u in users if int(u['telegram_id']) == bid), None)
+            if bu and (bu.get('username') or bu.get('full_name')):
+                cap = f"@{bu['username']}" if bu.get('username') else (bu.get('full_name') or str(bid))
+            else:
+                cap = str(bid)
+            fparts.append(f"buyer=<code>{cap}</code>")
+        if filt.get('team_id'):
+            tid = int(filt['team_id'])
+            tn = next((t['name'] for t in teams if int(t['id']) == tid), str(tid))
+            fparts.append(f"team=<code>{tn}</code>")
+        text += "\n🔎 Фильтры: " + ", ".join(fparts)
         logger.info(f"Sending report message (length={len(text)})")
         await bot.send_message(chat_id, text, reply_markup=_reports_menu(actor_id), parse_mode=ParseMode.HTML)
         logger.info("Report sent successfully")
