@@ -5,10 +5,24 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .. import db
 from ..keitaro import normalize_domain, parse_campaign_name
-from ..services.campaigns import canonical_alias_key
 
 _DOMAIN_SPLIT_RE = re.compile(r"[\s,;]+")
 MAX_DOMAINS_PER_REQUEST = 10
+
+# Alias overrides - moved from services/campaigns.py to avoid circular import
+ALIAS_OVERRIDES = {
+    "ars": "arseny",
+}
+
+
+def canonical_alias_key(value: Optional[str]) -> Optional[str]:
+    """Normalize alias key with overrides."""
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    return ALIAS_OVERRIDES.get(normalized, normalized)
 
 
 def extract_domains(raw_text: str) -> tuple[list[str], list[str]]:

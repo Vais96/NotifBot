@@ -19,21 +19,12 @@ FLAG_REASON_OVERRIDES = {
     "CTR < 0.7%": "⚠️ Жёлтый флаг",
 }
 
-ALIAS_OVERRIDES = {
-    "ars": "arseny",
-}
+# ALIAS_OVERRIDES and canonical_alias_key moved to utils/domain.py to avoid circular import
+# Re-export for backward compatibility
+from ..utils.domain import ALIAS_OVERRIDES, canonical_alias_key
 
 _DOMAIN_SPLIT_RE = re.compile(r"[\s,;]+")
 MAX_DOMAINS_PER_REQUEST = 10
-
-
-def canonical_alias_key(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-    normalized = value.strip().lower()
-    if not normalized:
-        return None
-    return ALIAS_OVERRIDES.get(normalized, normalized)
 
 
 def format_flag_label(flag_id: Any, flags_by_id: Dict[int, Dict[str, Any]]) -> str:
@@ -86,8 +77,7 @@ def _lookup_inferred_buyer(
 
 
 # resolve_campaign_assignments moved to utils/domain.py
-# Re-export for backward compatibility
-from ..utils.domain import resolve_campaign_assignments
+# Import moved to avoid circular dependency - use direct import from utils.domain where needed
 
 
 def extract_domains(raw_text: str, *, limit: int = MAX_DOMAINS_PER_REQUEST) -> Tuple[List[str], List[str]]:
@@ -114,9 +104,9 @@ __all__ = [
     "FLAG_CODE_LABELS",
     "FLAG_REASON_OVERRIDES",
     "MAX_DOMAINS_PER_REQUEST",
-    "canonical_alias_key",
+    "canonical_alias_key",  # Re-exported from utils.domain
     "extract_domains",
     "format_flag_decision",
     "format_flag_label",
-    "resolve_campaign_assignments",
+    # resolve_campaign_assignments moved to utils.domain - import directly from there
 ]

@@ -34,7 +34,7 @@ from .services.fb_uploads import (
     MAX_CSV_FILE_SIZE_BYTES,
     process_fb_csv_upload,
 )
-from .services.campaigns import canonical_alias_key
+from .utils.domain import canonical_alias_key
 from .handlers.youtube import handle_youtube_download
 from .utils.domain import lookup_domains_text, resolve_campaign_assignments, extract_domains, render_domain_block, MAX_DOMAINS_PER_REQUEST
 from .utils.formatting import (

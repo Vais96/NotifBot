@@ -6,7 +6,6 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from ..dispatcher import ADMIN_IDS, bot, dp
 from .. import db, keitaro_sync
-from ..handlers import commands, users, aliases, teams, mentors, domains, youtube, reports
 from ..handlers.users import _send_whoami, _send_list_users, _send_list_routes, _send_manage
 from ..handlers.aliases import _send_aliases
 from ..handlers.teams import _send_teams, _send_myteam
