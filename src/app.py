@@ -57,11 +57,6 @@ class IPNotifyRequest(BaseModel):
     token: Optional[str] = None
 
 
-class TicketNotifyRequest(BaseModel):
-    dry_run: bool = Field(default=True)
-    token: Optional[str] = None
-
-
 def _require_internal_token(authorization: str | None, inline_token: Optional[str] = None) -> None:
     if not settings.postback_token:
         return
@@ -778,19 +773,6 @@ async def notify_expiring_ips_endpoint(
     stats = await underdog.notify_expiring_ips(
         dry_run=payload.dry_run,
         days=payload.days,
-        bot_instance=orders_bot,
-    )
-    return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
-
-
-@app.post("/underdog/tickets/notify")
-async def notify_completed_tickets_endpoint(
-    payload: TicketNotifyRequest,
-    authorization: str | None = Header(default=None),
-):
-    _require_internal_token(authorization, payload.token)
-    stats = await underdog.notify_completed_tickets(
-        dry_run=payload.dry_run,
         bot_instance=orders_bot,
     )
     return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
