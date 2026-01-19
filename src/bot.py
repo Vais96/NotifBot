@@ -1047,9 +1047,9 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
             raise
         text = _report_text(title, agg)
         logger.info("Report text generated")
-    # Append buyer breakdown if available
-    buyer_dist = agg.get('buyer_dist') or {}
-    if buyer_dist:
+        # Append buyer breakdown if available
+        buyer_dist = agg.get('buyer_dist') or {}
+        if buyer_dist:
         # If team filter set, limit to that team (already limited in query by filter_user_ids, but double-check)
         team_filter = filt.get('team_id')
         buyers_map: dict[int, dict] = {int(u['telegram_id']): u for u in users}
