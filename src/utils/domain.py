@@ -1,7 +1,7 @@
 """Domain-related utilities."""
 
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .. import db
 from ..keitaro import normalize_domain, parse_campaign_name
