@@ -1159,54 +1159,78 @@ async def cb_report_fb_month(call: CallbackQuery):
 
 @dp.callback_query(F.data == "report:today")
 async def cb_report_today(call: CallbackQuery):
+    await call.answer()  # Remove loading indicator immediately
     try:
-        await call.message.answer("Готовлю отчёт…")
+        status_msg = await call.message.answer("Готовлю отчёт…")
     except Exception:
-        pass
+        status_msg = None
     try:
         await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня", None, False)
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
     except Exception as e:
-        logger.exception(e)
-        await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
-    finally:
-        try:
-            await call.answer()
-        except Exception:
-            pass
+        logger.exception("Failed to build report", exc_info=e)
+        error_text = f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>"
+        if status_msg:
+            try:
+                await status_msg.edit_text(error_text, parse_mode=ParseMode.HTML)
+            except Exception:
+                await call.message.answer(error_text, parse_mode=ParseMode.HTML)
+        else:
+            await call.message.answer(error_text, parse_mode=ParseMode.HTML)
 
 @dp.callback_query(F.data == "report:yesterday")
 async def cb_report_yesterday(call: CallbackQuery):
+    await call.answer()  # Remove loading indicator immediately
     try:
-        await call.message.answer("Готовлю отчёт…")
+        status_msg = await call.message.answer("Готовлю отчёт…")
     except Exception:
-        pass
+        status_msg = None
     try:
         await _send_period_report(call.message.chat.id, call.from_user.id, "Вчера", None, True)
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
     except Exception as e:
-        logger.exception(e)
-        await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
-    finally:
-        try:
-            await call.answer()
-        except Exception:
-            pass
+        logger.exception("Failed to build report", exc_info=e)
+        error_text = f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>"
+        if status_msg:
+            try:
+                await status_msg.edit_text(error_text, parse_mode=ParseMode.HTML)
+            except Exception:
+                await call.message.answer(error_text, parse_mode=ParseMode.HTML)
+        else:
+            await call.message.answer(error_text, parse_mode=ParseMode.HTML)
 
 @dp.callback_query(F.data == "report:week")
 async def cb_report_week(call: CallbackQuery):
+    await call.answer()  # Remove loading indicator immediately
     try:
-        await call.message.answer("Готовлю отчёт…")
+        status_msg = await call.message.answer("Готовлю отчёт…")
     except Exception:
-        pass
+        status_msg = None
     try:
         await _send_period_report(call.message.chat.id, call.from_user.id, "Последние 7 дней", 7, False)
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
     except Exception as e:
-        logger.exception(e)
-        await call.message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
-    finally:
-        try:
-            await call.answer()
-        except Exception:
-            pass
+        logger.exception("Failed to build report", exc_info=e)
+        error_text = f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>"
+        if status_msg:
+            try:
+                await status_msg.edit_text(error_text, parse_mode=ParseMode.HTML)
+            except Exception:
+                await call.message.answer(error_text, parse_mode=ParseMode.HTML)
+        else:
+            await call.message.answer(error_text, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("today"))
 async def on_today(message: Message):
