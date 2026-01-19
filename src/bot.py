@@ -1004,27 +1004,27 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
     from datetime import datetime, timezone, timedelta
     try:
         logger.info(f"Building report: title={title}, days={days}, yesterday={yesterday}, actor_id={actor_id}, chat_id={chat_id}")
-    users = await db.list_users()
+        users = await db.list_users()
         logger.info(f"Got {len(users)} users")
         if not users:
             logger.warning("No users found in database")
-    user_ids = await _resolve_scope_user_ids(actor_id)
+        user_ids = await _resolve_scope_user_ids(actor_id)
         logger.info(f"Resolved {len(user_ids)} user_ids: {user_ids[:5] if user_ids else []}")
         if not user_ids:
             logger.warning(f"No user_ids resolved for actor_id={actor_id}, sending empty report")
-    now = datetime.now(timezone.utc)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
-    if yesterday:
-        end = start
-        start = end - timedelta(days=1)
-    if days is not None:
-        start = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days-1))
-        end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        now = datetime.now(timezone.utc)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        if yesterday:
+            end = start
+            start = end - timedelta(days=1)
+        if days is not None:
+            start = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days-1))
+            end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         logger.info(f"Time range: {start} to {end}")
-    filt = await db.get_report_filter(actor_id)
+        filt = await db.get_report_filter(actor_id)
         logger.info(f"Filters: {filt}")
-    filter_user_ids: list[int] | None = None
+        filter_user_ids: list[int] | None = None
     if filt.get('buyer_id') or filt.get('team_id'):
         me = next((u for u in users if u["telegram_id"] == actor_id), None)
         role = (me or {}).get("role", "buyer")
@@ -1040,16 +1040,16 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
             filter_user_ids = [uid for uid in team_ids if uid in allowed_ids]
         logger.info(f"Calling aggregate_sales with {len(user_ids)} user_ids, start={start}, end={end}")
         try:
-    agg = await db.aggregate_sales(user_ids, start, end, offer=filt.get('offer'), creative=filt.get('creative'), filter_user_ids=filter_user_ids)
+            agg = await db.aggregate_sales(user_ids, start, end, offer=filt.get('offer'), creative=filt.get('creative'), filter_user_ids=filter_user_ids)
             logger.info(f"Aggregate result: count={agg.get('count')}, profit={agg.get('profit')}, top_offer={agg.get('top_offer')}")
         except Exception as agg_err:
             logger.exception(f"Error in aggregate_sales: {agg_err}", exc_info=agg_err)
             raise
-    text = _report_text(title, agg)
+        text = _report_text(title, agg)
         logger.info("Report text generated")
-    # Append buyer breakdown if available
-    buyer_dist = agg.get('buyer_dist') or {}
-    if buyer_dist:
+        # Append buyer breakdown if available
+        buyer_dist = agg.get('buyer_dist') or {}
+        if buyer_dist:
         # If team filter set, limit to that team (already limited in query by filter_user_ids, but double-check)
         team_filter = filt.get('team_id')
         buyers_map: dict[int, dict] = {int(u['telegram_id']): u for u in users}
@@ -1069,15 +1069,15 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
             else:
                 label = f"@{u['username']}" if u.get('username') else (u.get('full_name') or f"<code>{uid}</code>")
             lines.append(f"{label}: <b>{cnt}</b>")
-        if lines:
-            text += "\n\n" + "\n".join(lines)
-    if days == 7 and not yesterday:
+            if lines:
+                text += "\n\n" + "\n".join(lines)
+        if days == 7 and not yesterday:
             logger.info("Fetching trend data")
-        trend = await db.trend_daily_sales(user_ids, days=7)
-        if trend:
-            tline = ", ".join(f"{d.split('-')[-1]}:{c}" for d, c in trend)
-            text += f"\n📅 Тренд (7д): {tline}"
-    if filt.get('offer') or filt.get('creative') or filt.get('buyer_id') or filt.get('team_id'):
+            trend = await db.trend_daily_sales(user_ids, days=7)
+            if trend:
+                tline = ", ".join(f"{d.split('-')[-1]}:{c}" for d, c in trend)
+                text += f"\n📅 Тренд (7д): {tline}"
+        if filt.get('offer') or filt.get('creative') or filt.get('buyer_id') or filt.get('team_id'):
         teams = await db.list_teams()
         fparts: list[str] = []
         if filt.get('offer'):
