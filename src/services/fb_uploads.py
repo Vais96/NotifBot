@@ -13,7 +13,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from loguru import logger
 
 from .. import db, fb_csv
-from .campaigns import format_flag_decision, format_flag_label, resolve_campaign_assignments
+from .campaigns import format_flag_decision, format_flag_label
+from ..utils.domain import resolve_campaign_assignments
 from .formatting import fmt_money, fmt_percent, month_label_ru
 
 NotifyAdminsFunc = Callable[[str, Exception, Optional[List[str]]], Awaitable[None]]
