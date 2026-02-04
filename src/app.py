@@ -73,6 +73,17 @@ def _require_internal_token(authorization: str | None, inline_token: Optional[st
 _daily_counter_lock = asyncio.Lock()
 _daily_counter_cache: Dict[int, Tuple[date, int]] = {}
 
+# Per-user locks so concurrent postbacks for the same buyer get correct sequential daily counts
+_user_locks: Dict[int, asyncio.Lock] = {}
+_user_locks_guard = asyncio.Lock()
+
+
+def _lock_for_user(user_id: int) -> asyncio.Lock:
+    """Return a lock for the given user (creates on first use). Caller must hold _user_locks_guard when mutating."""
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
+
 
 async def _resolve_daily_counter(user_id: int, db_value: int | None) -> int:
     """Stabilize daily deposit counter so it never goes backwards even if DB lagged."""
@@ -482,19 +493,23 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     sale_time_fmt = _format_sale_time(sale_time)
 
     # Build text via unified formatter (with optional daily deposits count)
+    # Serialize by user_id so concurrent postbacks for the same buyer get correct sequential daily counts
     daily_count: int | None = None
     kpi_daily_goal: int | None = None
     if is_sale and stats_user_id is not None:
         db_daily_count: int | None = None
-        try:
-            db_daily_count = await db.count_today_user_sales(stats_user_id)
-        except Exception as e:
-            logger.warning(f"Failed to get daily count: {e}")
-        try:
-            daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
-        except Exception as e:
-            logger.warning(f"Failed to adjust daily counter: {e}")
-            daily_count = db_daily_count
+        async with _user_locks_guard:
+            user_lock = _lock_for_user(stats_user_id)
+        async with user_lock:
+            try:
+                db_daily_count = await db.count_today_user_sales(stats_user_id)
+            except Exception as e:
+                logger.warning(f"Failed to get daily count: {e}")
+            try:
+                daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
+            except Exception as e:
+                logger.warning(f"Failed to adjust daily counter: {e}")
+                daily_count = db_daily_count
         try:
             kpi = await db.get_kpi(stats_user_id)
             kpi_daily_goal = kpi.get("daily_goal")
@@ -674,15 +689,18 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         kpi_daily_goal: int | None = None
         if is_sale and stats_user_id is not None:
             db_daily_count: int | None = None
-            try:
-                db_daily_count = await db.count_today_user_sales(stats_user_id)
-            except Exception as e:
-                logger.warning(f"Failed to get daily count: {e}")
-            try:
-                daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
-            except Exception as e:
-                logger.warning(f"Failed to adjust daily counter: {e}")
-                daily_count = db_daily_count
+            async with _user_locks_guard:
+                user_lock = _lock_for_user(stats_user_id)
+            async with user_lock:
+                try:
+                    db_daily_count = await db.count_today_user_sales(stats_user_id)
+                except Exception as e:
+                    logger.warning(f"Failed to get daily count: {e}")
+                try:
+                    daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
+                except Exception as e:
+                    logger.warning(f"Failed to adjust daily counter: {e}")
+                    daily_count = db_daily_count
             try:
                 kpi = await db.get_kpi(stats_user_id)
                 kpi_daily_goal = kpi.get("daily_goal")
