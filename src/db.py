@@ -1,3 +1,4 @@
+import asyncio
 import aiomysql
 from typing import Optional, List, Dict, Any, Tuple, Iterable
 from datetime import date, timedelta, datetime
@@ -212,7 +213,31 @@ async def init_pool() -> aiomysql.Pool:
     if _pool is None:
         logger.info("Creating MySQL pool")
         params = _parse_mysql_dsn(settings.database_url)
-        _pool = await aiomysql.create_pool(**params, minsize=1, maxsize=10)
+        last_error: Optional[Exception] = None
+        for attempt in range(1, 6):
+            try:
+                _pool = await aiomysql.create_pool(**params, minsize=1, maxsize=10)
+                async with _pool.acquire() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("SELECT 1")
+                break
+            except Exception as e:
+                last_error = e
+                if _pool is not None:
+                    try:
+                        _pool.close()
+                        await _pool.wait_closed()
+                    except Exception:
+                        pass
+                    _pool = None
+                logger.warning(
+                    f"MySQL connection attempt {attempt}/5 failed: {e}. Retrying in {attempt * 2}s..."
+                )
+                if attempt < 5:
+                    await asyncio.sleep(attempt * 2)
+        if _pool is None:
+            assert last_error is not None
+            raise last_error
         async with _pool.acquire() as conn:
             async with conn.cursor() as cur:
                 for i, stmt in enumerate(SCHEMA_SQL, start=1):
