@@ -290,6 +290,14 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await db.close_pool()
+    # Close aiogram bot aiohttp sessions to avoid "Unclosed client session" warnings
+    for bot_instance in (bot, orders_bot):
+        try:
+            session = getattr(bot_instance, "session", None)
+            if session is not None and hasattr(session, "close"):
+                await session.close()
+        except Exception as e:
+            logger.warning(f"Failed to close bot session: {e}")
 
 @app.get("/health")
 async def health():
