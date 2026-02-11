@@ -7,3 +7,5 @@ aiomysql==0.2.0
 loguru==0.7.2
 httpx==0.27.2
 yt-dlp==2024.10.22
+# Needed by aiomysql for MySQL 8+/9+ auth plugins (sha256_password / caching_sha2_password)
+cryptography
