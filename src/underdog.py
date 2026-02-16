@@ -820,6 +820,11 @@ class DesignAssignmentNotifier:
         if not orders:
             return stats
 
+        logger.info(
+            "Design notify: orders=%s, admin_ids=%s",
+            len(orders),
+            list(self.admin_ids) if self.admin_ids else "[] (set ADMINS env for admin copies)",
+        )
         subscribers = await db.list_design_bot_subscribers()
 
         for order in orders:
@@ -827,6 +832,7 @@ class DesignAssignmentNotifier:
             if order_id is None:
                 continue
             if await db.is_design_assignment_sent(int(order_id)):
+                logger.debug("Design order already sent, skipping", order_id=order_id)
                 continue
 
             contractor = order.get("contractor") or {}
@@ -899,6 +905,7 @@ class DesignAssignmentNotifier:
                 for admin_id in self.admin_ids:
                     try:
                         await self.bot.send_message(chat_id=int(admin_id), text=admin_message)
+                        logger.info("Sent design assignment copy to admin", admin_id=admin_id, order_id=order_id)
                     except (TelegramForbiddenError, TelegramBadRequest) as exc:
                         logger.warning(
                             "Failed to send design assignment copy to admin (admin must /start the design bot first): admin_id=%s, order_id=%s, error=%s",
@@ -913,6 +920,8 @@ class DesignAssignmentNotifier:
                             order_id=order_id,
                             error=str(exc),
                         )
+            else:
+                logger.warning("No admin_ids configured (ADMINS env): admin copy not sent", order_id=order_id)
 
             try:
                 if designer_telegram_id is not None and designer_telegram_id not in subscribers:
