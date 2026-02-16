@@ -142,6 +142,23 @@ def _normalize_handle(value: Optional[str]) -> Optional[str]:
     return trimmed.lstrip("@").lower()
 
 
+def _parse_telegram_id(person: Dict[str, Any]) -> Optional[int]:
+    """Из объекта owner/contractor из API достать telegram_id (число), если API отдаёт."""
+    if not person:
+        return None
+    for key in ("telegram_id", "telegram_Id", "telegramId"):
+        raw = person.get(key)
+        if raw is None:
+            continue
+        try:
+            uid = int(raw)
+            if uid > 0:
+                return uid
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _resolve_owner_fields(record: Dict[str, Any]) -> tuple[Optional[str], Optional[str], Optional[str]]:
     owner = record.get("owner") or {}
     raw_handle = (
@@ -648,39 +665,43 @@ class OrderNotifier:
         if not orders:
             return stats
 
-        handles = [_normalize_handle((order.get("owner") or {}).get("telegram")) for order in orders]
-        valid_handles = [handle for handle in handles if handle]
+        handles = [_normalize_handle((order.get("owner") or {}).get("telegram") or (order.get("owner") or {}).get("telegram_handle")) for order in orders]
+        valid_handles = [h for h in handles if h]
         user_map = await db.fetch_users_by_usernames(valid_handles)
 
         for order, handle in zip(orders, handles):
-            if not handle:
-                stats.missing_contact += 1
-                logger.warning("Order lacks Telegram handle", order_id=order.get("id"))
-                continue
-
-            user = user_map.get(handle)
-            if not user:
-                stats.unknown_user += 1
-                stats.unknown_orders.append(
-                    {
-                        "order_id": order.get("id"),
-                        "owner": (order.get("owner") or {}).get("name"),
-                        "handle": handle,
-                        "total": order.get("total"),
-                        "name": order.get("name"),
-                    }
-                )
-                logger.warning(
-                    "Telegram handle not found among bot users",
-                    handle=handle,
-                    order_id=order.get("id"),
-                )
-                continue
-
-            try:
-                user_telegram_id = int(user.get("telegram_id"))
-            except Exception:
-                user_telegram_id = None
+            owner = order.get("owner") or {}
+            # Если API отдаёт telegram_id у owner — используем его, иначе ищем по нику в БД
+            user_telegram_id: Optional[int] = _parse_telegram_id(owner)
+            if user_telegram_id is not None:
+                user = {"telegram_id": user_telegram_id, "username": handle or owner.get("telegram") or owner.get("telegram_handle") or ""}
+            else:
+                if not handle:
+                    stats.missing_contact += 1
+                    logger.warning("Order lacks Telegram handle", order_id=order.get("id"))
+                    continue
+                user = user_map.get(handle)
+                if not user:
+                    stats.unknown_user += 1
+                    stats.unknown_orders.append(
+                        {
+                            "order_id": order.get("id"),
+                            "owner": owner.get("name"),
+                            "handle": handle,
+                            "total": order.get("total"),
+                            "name": order.get("name"),
+                        }
+                    )
+                    logger.warning(
+                        "Telegram handle not found among bot users",
+                        handle=handle,
+                        order_id=order.get("id"),
+                    )
+                    continue
+                try:
+                    user_telegram_id = int(user.get("telegram_id"))
+                except Exception:
+                    user_telegram_id = None
 
             if limit_set is not None and (user_telegram_id not in limit_set):
                 continue
@@ -813,10 +834,11 @@ class DesignAssignmentNotifier:
             if contractor_id is not None:
                 contractor_id = str(contractor_id).strip()
             telegram_from_order = (contractor.get("telegram") or contractor.get("telegram_handle") or "").strip().lstrip("@")
-            designer_telegram_id: Optional[int] = None
             designer_name: Optional[str] = contractor.get("name")
 
-            if telegram_from_order:
+            # Сначала берём telegram_id из API (если добавили), иначе — по нику из БД, потом по contractor_id
+            designer_telegram_id: Optional[int] = _parse_telegram_id(contractor)
+            if designer_telegram_id is None and telegram_from_order:
                 user = await db.find_user_by_username(telegram_from_order)
                 if user:
                     designer_telegram_id = int(user.get("telegram_id"))
@@ -829,7 +851,8 @@ class DesignAssignmentNotifier:
                 assigned_to_display = None
             else:
                 assigned_to_mention_html = None
-                assigned_to_display = f"contractor_id {contractor_id}" if contractor_id else "—"
+                # Ник из API (приходит без @) — показываем как имя дизайнера в TG
+                assigned_to_display = f"@{telegram_from_order}" if telegram_from_order else (f"contractor_id {contractor_id}" if contractor_id else "—")
             message_for_broadcast = _build_design_assignment_message(
                 order,
                 designer_name=designer_name,
@@ -876,6 +899,13 @@ class DesignAssignmentNotifier:
                 for admin_id in self.admin_ids:
                     try:
                         await self.bot.send_message(chat_id=int(admin_id), text=admin_message)
+                    except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                        logger.warning(
+                            "Failed to send design assignment copy to admin (admin must /start the design bot first): admin_id=%s, order_id=%s, error=%s",
+                            admin_id,
+                            order_id,
+                            exc,
+                        )
                     except Exception as exc:
                         logger.warning(
                             "Failed to send design assignment copy to admin",
