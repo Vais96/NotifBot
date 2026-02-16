@@ -821,9 +821,10 @@ class DesignAssignmentNotifier:
             return stats
 
         logger.info(
-            "Design notify: orders=%s, admin_ids=%s",
-            len(orders),
-            list(self.admin_ids) if self.admin_ids else "[] (set ADMINS env for admin copies)",
+            "Design notify",
+            orders=len(orders),
+            admin_ids=list(self.admin_ids) if self.admin_ids else "[] (set ADMINS env for admin copies)",
+            design_bot_token_set=bool(settings.design_bot_token),
         )
         subscribers = await db.list_design_bot_subscribers()
 
@@ -835,6 +836,12 @@ class DesignAssignmentNotifier:
                 logger.debug("Design order already sent, skipping", order_id=order_id)
                 continue
 
+            logger.info(
+                "Design notify: processing order",
+                order_id=order_id,
+                subscribers_count=len(subscribers),
+                admin_ids_count=len(self.admin_ids),
+            )
             contractor = order.get("contractor") or {}
             contractor_id = order.get("contractor_id")
             if contractor_id is not None:
@@ -908,10 +915,10 @@ class DesignAssignmentNotifier:
                         logger.info("Sent design assignment copy to admin", admin_id=admin_id, order_id=order_id)
                     except (TelegramForbiddenError, TelegramBadRequest) as exc:
                         logger.warning(
-                            "Failed to send design assignment copy to admin (admin must /start the design bot first): admin_id=%s, order_id=%s, error=%s",
-                            admin_id,
-                            order_id,
-                            exc,
+                            "Failed to send design assignment copy to admin (admin must /start the bot that sends: DesignBot if DESIGN_BOT_TOKEN set, else main bot)",
+                            admin_id=admin_id,
+                            order_id=order_id,
+                            error=str(exc),
                         )
                     except Exception as exc:
                         logger.warning(
@@ -1884,6 +1891,11 @@ def _create_bot() -> Bot:
 
 def _create_design_bot() -> Bot:
     token = settings.design_bot_token or settings.telegram_bot_token
+    if not settings.design_bot_token:
+        logger.warning(
+            "DESIGN_BOT_TOKEN not set: design notify will send via main bot (TELEGRAM_BOT_TOKEN). "
+            "Admin copy will arrive in main bot, not DesignBot. Set DESIGN_BOT_TOKEN in cron env for DesignBot.",
+        )
     return Bot(
         token=token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
