@@ -804,11 +804,12 @@ class OrderNotifier:
 
 @dataclass(slots=True)
 class DesignAssignmentNotifier:
-    """Уведомление дизайнеру, когда ему ставят таск (order_status=0). Отправляем тому, на кого назначен (contractor)."""
+    """Уведомление о назначении таска (order_status=0). Рассылка: broadcast-чаты, подписчики, админы."""
 
     underdog: UnderdogClient
     bot: Bot
     admin_ids: Sequence[int]
+    broadcast_chat_ids: Sequence[int] = ()  # DESIGN_BROADCAST_CHAT_IDS — группа/канал, видят все
 
     async def notify_design_assignments(
         self,
@@ -820,13 +821,20 @@ class DesignAssignmentNotifier:
         if not orders:
             return stats
 
+        subscribers = await db.list_design_bot_subscribers()
         logger.info(
             "Design notify",
             orders=len(orders),
             admin_ids=list(self.admin_ids) if self.admin_ids else "[] (set ADMINS env for admin copies)",
             design_bot_token_set=bool(settings.design_bot_token),
+            broadcast_chats=len(self.broadcast_chat_ids),
+            subscribers_count=len(subscribers),
         )
-        subscribers = await db.list_design_bot_subscribers()
+        if not subscribers:
+            logger.warning(
+                "Design notify: подписчиков нет (tg_design_bot_chats пуста). Уведомления получат только админы. "
+                "Чтобы приходило всем: каждый должен открыть DesignBot и нажать /start (вебхук DesignBot должен быть настроен в приложении).",
+            )
 
         for order in orders:
             order_id = order.get("id")
@@ -889,10 +897,22 @@ class DesignAssignmentNotifier:
 
             if dry_run:
                 stats.matched_users += 1
-                stats.notified += len(subscribers) + len(self.admin_ids)
+                stats.notified += len(self.broadcast_chat_ids) + len(subscribers) + len(self.admin_ids)
                 continue
 
-            # Рассылка только подписчикам (и админам ниже). Личное сообщение дизайнеру не шлём — достаточно «Таск назначен на: @username», ТГ сам уведомит.
+            # 1) В broadcast-чаты (группа/канал) — видят все участники
+            for chat_id in self.broadcast_chat_ids:
+                try:
+                    await self.bot.send_message(chat_id=int(chat_id), text=message_for_broadcast)
+                    stats.notified += 1
+                except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                    stats.errors += 1
+                    logger.warning("Failed to send design assignment to broadcast chat", order_id=order_id, chat_id=chat_id, error=str(exc))
+                except Exception as exc:
+                    stats.errors += 1
+                    logger.exception("Unexpected error sending to broadcast chat", order_id=order_id, chat_id=chat_id)
+
+            # 2) Подписчикам (кто нажал /start в DesignBot)
             for chat_id in subscribers:
                 text = message_for_designer if (designer_telegram_id is not None and chat_id == designer_telegram_id) else message_for_broadcast
                 try:
@@ -1925,11 +1945,11 @@ async def notify_design_assignments(
     """Уведомлять дизайнера, когда ему ставят таск (order_status=0). Результат по contractor_id -> telegram."""
     async with UnderdogClient.from_settings() as client:
         if bot_instance is not None:
-            notifier = DesignAssignmentNotifier(client, bot_instance, settings.admins)
+            notifier = DesignAssignmentNotifier(client, bot_instance, settings.admins, settings.design_broadcast_chat_ids)
             stats = await notifier.notify_design_assignments(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
         async with _create_design_bot() as owned_bot:
-            notifier = DesignAssignmentNotifier(client, owned_bot, settings.admins)
+            notifier = DesignAssignmentNotifier(client, owned_bot, settings.admins, settings.design_broadcast_chat_ids)
             stats = await notifier.notify_design_assignments(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
 
@@ -2048,7 +2068,7 @@ async def _amain() -> None:
         if args.notify_design:
             dry_run = not args.apply
             async with _create_design_bot() as bot_instance:
-                notifier = DesignAssignmentNotifier(client, bot_instance, settings.admins)
+                notifier = DesignAssignmentNotifier(client, bot_instance, settings.admins, settings.design_broadcast_chat_ids)
                 stats = await notifier.notify_design_assignments(dry_run=dry_run)
             print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
             return

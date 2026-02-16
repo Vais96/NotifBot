@@ -33,6 +33,8 @@ class Settings(BaseModel):
     underdog_email: str = Field(default="", validation_alias="UNDERDOG_EMAIL")
     underdog_password: str = Field(default="", validation_alias="UNDERDOG_PASSWORD")
     underdog_token_ttl: int = Field(default=3600, validation_alias="UNDERDOG_TOKEN_TTL")
+    # Чат(ы) для рассылки design-уведомлений (группа/канал). Все участники видят сообщение. Через запятую: -100123, -100456
+    design_broadcast_chat_ids: List[int] = Field(default_factory=list, validation_alias="DESIGN_BROADCAST_CHAT_IDS")
 
     @classmethod
     def load(cls) -> "Settings":
@@ -44,6 +46,16 @@ class Settings(BaseModel):
                 if part:
                     try:
                         admins.append(int(part))
+                    except ValueError:
+                        pass
+        design_broadcast = []
+        broadcast_env = os.getenv("DESIGN_BROADCAST_CHAT_IDS", "").strip()
+        if broadcast_env:
+            for part in broadcast_env.split(","):
+                part = part.strip()
+                if part:
+                    try:
+                        design_broadcast.append(int(part))
                     except ValueError:
                         pass
         raw = {
@@ -69,6 +81,7 @@ class Settings(BaseModel):
             "UNDERDOG_EMAIL": os.getenv("UNDERDOG_EMAIL", ""),
             "UNDERDOG_PASSWORD": os.getenv("UNDERDOG_PASSWORD", ""),
             "UNDERDOG_TOKEN_TTL": int(os.getenv("UNDERDOG_TOKEN_TTL", "3600")),
+            "DESIGN_BROADCAST_CHAT_IDS": design_broadcast,
         }
         return cls.model_validate(raw)
 

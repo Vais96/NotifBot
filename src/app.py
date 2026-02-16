@@ -824,6 +824,25 @@ async def notify_expiring_ips_endpoint(
     return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
 
 
+@app.get("/underdog/design/subscribers")
+async def design_subscribers(
+    authorization: str | None = Header(default=None),
+):
+    """Кто в рассылке DesignBot: список chat_id из tg_design_bot_chats (кто нажал /start в DesignBot)."""
+    if settings.postback_token:
+        supplied = (authorization or "").strip()
+        if supplied.startswith("Bearer "):
+            supplied = supplied[7:].strip()
+        if supplied != settings.postback_token:
+            raise HTTPException(403, "Forbidden")
+    try:
+        chat_ids = await db.list_design_bot_subscribers()
+        return {"subscribers_count": len(chat_ids), "subscriber_chat_ids": chat_ids}
+    except Exception as e:
+        logger.exception("Failed to list design subscribers: %s", e)
+        raise HTTPException(500, str(e))
+
+
 @app.post("/underdog/design/notify")
 async def notify_design_endpoint(
     payload: DomainNotifyRequest,

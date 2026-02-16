@@ -124,7 +124,7 @@ For Railway scheduled task (every 5 minutes):
 Note: The `tickets` process in Procfile is for a persistent worker, not for scheduled tasks. Use Railway Scheduler for cron-like behavior.
 
 ## Design bot (таски на дизайн и креативы)
-Отдельный бот (`DESIGN_BOT_TOKEN`) уведомляет **дизайнеров о постановке таска**: когда в Underdog создают заказ (pwaDesign/creative) с `order_status=0`, назначенному исполнителю (contractor) уходит сообщение в личку: «Вам поставлен таск», заказчик, ID, «Таск назначен на: вас».
+Отдельный бот (`DESIGN_BOT_TOKEN` / `DESIGNBOT_TOKEN`) уведомляет о постановке таска: когда в Underdog создают заказ (pwaDesign/creative) с `order_status=0`, сообщение уходит **всем, кто подписан** (нажал /start в DesignBot), плюс копия админам. **Чтобы получать уведомления, нужно открыть DesignBot в Telegram и нажать /start** — иначе в рассылку не попадёте.
 
 **Маппинг contractor → Telegram:** таблица `tg_underdog_contractor_telegram` (contractor_id, telegram_username или telegram_id). Если в ответе API по заказу приходит объект `contractor` с полем `telegram`, он тоже используется.
 
@@ -137,6 +137,8 @@ python -m src.underdog --notify-design --apply
 **Проверка API:** `python -m src.underdog --orders-design-new` — список новых тасков (order_status=0).
 
 **HTTP:** `POST /underdog/design/notify` (как у domains: `dry_run`, Bearer POSTBACK_TOKEN или `token` в body).
+
+**Опционально — рассылка в группу:** если нужна одна общая лента в группе/канале, задайте **DESIGN_BROADCAST_CHAT_IDS** (ID чата через запятую). Добавьте DesignBot в группу; тогда каждое уведомление дублируется туда. Основная рассылка — личные сообщения всем, кто нажал /start в DesignBot.
 
 ## Run locally (optional)
 1. Create virtualenv and install deps
