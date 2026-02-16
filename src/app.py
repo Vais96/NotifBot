@@ -9,6 +9,7 @@ import json
 from .config import settings
 from .dispatcher import dp, bot, notify_buyer
 from .orders_bot import orders_dp, orders_bot
+from .design_bot import design_dp, design_bot
 from . import handlers  # noqa: F401 ensure handlers are registered
 from . import db, underdog
 from aiogram.types import Update, BotCommand
@@ -22,6 +23,10 @@ if not WEBHOOK_PATH.startswith("/"):
 ORDERS_WEBHOOK_PATH = settings.orders_webhook_path.strip()
 if not ORDERS_WEBHOOK_PATH.startswith("/"):
     ORDERS_WEBHOOK_PATH = "/" + ORDERS_WEBHOOK_PATH
+
+DESIGN_WEBHOOK_PATH = settings.design_webhook_path.strip()
+if not DESIGN_WEBHOOK_PATH.startswith("/"):
+    DESIGN_WEBHOOK_PATH = "/" + DESIGN_WEBHOOK_PATH
 
 app = FastAPI(title="Keitaro Telegram Notifier")
 
@@ -287,11 +292,26 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"Failed to set orders bot commands: {e}")
 
+    design_token = settings.design_bot_token
+    if design_token and design_token not in (settings.telegram_bot_token, orders_token):
+        design_url = settings.base_url.rstrip("/") + DESIGN_WEBHOOK_PATH
+        try:
+            await design_bot.set_webhook(design_url)
+            logger.info(f"Design webhook set to {design_url}")
+        except Exception as e:
+            logger.error(f"Failed to set design webhook: {e}")
+        try:
+            await design_bot.set_my_commands([
+                BotCommand(command="start", description="Приветствие"),
+            ])
+        except Exception as e:
+            logger.warning(f"Failed to set design bot commands: {e}")
+
 @app.on_event("shutdown")
 async def on_shutdown():
     await db.close_pool()
     # Close aiogram bot aiohttp sessions to avoid "Unclosed client session" warnings
-    for bot_instance in (bot, orders_bot):
+    for bot_instance in (bot, orders_bot, design_bot):
         try:
             session = getattr(bot_instance, "session", None)
             if session is not None and hasattr(session, "close"):
@@ -828,4 +848,18 @@ async def orders_telegram_webhook(request: Request):
         return JSONResponse({"ok": True})
     except Exception as e:
         logger.exception(f"Orders webhook handling failed: {e}")
+        return JSONResponse({"ok": True})
+
+
+@app.post(DESIGN_WEBHOOK_PATH)
+async def design_telegram_webhook(request: Request):
+    if not settings.design_bot_token or settings.design_bot_token == settings.telegram_bot_token:
+        return JSONResponse({"ok": True})
+    try:
+        payload = await request.json()
+        update = Update.model_validate(payload)
+        await design_dp.feed_update(design_bot, update)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        logger.exception(f"Design webhook handling failed: {e}")
         return JSONResponse({"ok": True})
