@@ -49,7 +49,7 @@ class Settings(BaseModel):
         raw = {
             "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
             "ORDERS_BOT_TOKEN": os.getenv("ORDERS_BOT_TOKEN"),
-            "DESIGN_BOT_TOKEN": os.getenv("DESIGN_BOT_TOKEN"),
+            "DESIGN_BOT_TOKEN": os.getenv("DESIGN_BOT_TOKEN") or os.getenv("DESIGNBOT_TOKEN"),
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
             "BASE_URL": os.getenv("BASE_URL", ""),
             "WEBHOOK_SECRET_PATH": os.getenv("WEBHOOK_SECRET_PATH", "/telegram/webhook"),
