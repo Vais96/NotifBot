@@ -896,6 +896,14 @@ async def design_telegram_webhook(request: Request):
     try:
         payload = await request.json()
         update = Update.model_validate(payload)
+        # Лог при каждом апдейте — если при /start в DesignBot здесь пусто, вебхук не доходит
+        msg = update.message
+        logger.info(
+            "Design webhook received",
+            update_id=update.update_id,
+            chat_id=msg.chat.id if msg else None,
+            text=(msg.text or "")[:50] if msg else None,
+        )
         await design_dp.feed_update(design_bot, update)
         return JSONResponse({"ok": True})
     except Exception as e:
