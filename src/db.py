@@ -331,6 +331,19 @@ async def list_design_bot_subscribers() -> List[int]:
             return [int(r[0]) for r in rows] if rows else []
 
 
+async def list_telegram_ids_tg_users(*, active_only: bool = True) -> List[int]:
+    """Все telegram_id из tg_users (кто уже в основном боте). Для рассылки design-уведомлений в основной бот."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            if active_only:
+                await cur.execute("SELECT telegram_id FROM tg_users WHERE is_active = 1")
+            else:
+                await cur.execute("SELECT telegram_id FROM tg_users")
+            rows = await cur.fetchall()
+            return [int(r[0]) for r in rows] if rows else []
+
+
 async def is_design_assignment_sent(order_id: int) -> bool:
     """True if we already sent 'task assigned' notification for this order."""
     pool = await init_pool()

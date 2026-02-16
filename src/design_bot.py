@@ -21,8 +21,21 @@ design_dp = Dispatcher()
 async def on_design_start(message: Message) -> None:
     """Регистрируем подписчика (tg_design_bot_chats) и приветствуем — без этого в рассылку не попадёте."""
     chat_id = message.chat.id
-    await db.add_design_bot_subscriber(chat_id)
-    logger.info("Design bot: new subscriber", chat_id=chat_id, username=message.from_user.username)
+    try:
+        await db.add_design_bot_subscriber(chat_id)
+        count = len(await db.list_design_bot_subscribers())
+        logger.info(
+            "Design bot: subscriber added",
+            chat_id=chat_id,
+            username=message.from_user.username,
+            total_subscribers_now=count,
+        )
+    except Exception as e:
+        logger.exception("Design bot: failed to add subscriber to tg_design_bot_chats", chat_id=chat_id, error=str(e))
+        await message.answer(
+            "Подписка не сохранилась (ошибка БД). Напишите админу или попробуйте позже."
+        )
+        return
     await message.answer(
         "Привет! Ты подписан на уведомления о заказах на дизайн (креативы и PWA). "
         "Когда появятся новые заказы — пришлю сюда."
