@@ -874,8 +874,8 @@ class DesignAssignmentNotifier:
             )
             message_for_designer = _build_design_assignment_message(order, designer_name=designer_name)
             admin_message = f"📋 Копия админу:\n\n{message_for_broadcast}"
-            if designer_telegram_id is None:
-                admin_message += f"\n\n⚠️ Дизайнеру не отправлено: contractor_id={contractor_id}, telegram не найден."
+            # Не предупреждаем админа и не считаем unknown, если в сообщении уже есть «Таск назначен на: @username» из API
+            if designer_telegram_id is None and not telegram_from_order:
                 stats.unknown_user += 1
                 stats.unknown_orders.append(
                     {
@@ -885,17 +885,14 @@ class DesignAssignmentNotifier:
                         "name": order.get("name"),
                     }
                 )
-                logger.warning(
-                    "Design assignment: no telegram for contractor",
-                    order_id=order_id,
-                    contractor_id=contractor_id,
-                )
+                logger.debug("Design assignment: no @username in API for contractor", order_id=order_id, contractor_id=contractor_id)
 
             if dry_run:
-                stats.matched_users += 1 if designer_telegram_id is not None else 0
-                stats.notified += len(subscribers) + (1 if designer_telegram_id and designer_telegram_id not in subscribers else 0) + len(self.admin_ids)
+                stats.matched_users += 1
+                stats.notified += len(subscribers) + len(self.admin_ids)
                 continue
 
+            # Рассылка только подписчикам (и админам ниже). Личное сообщение дизайнеру не шлём — достаточно «Таск назначен на: @username», ТГ сам уведомит.
             for chat_id in subscribers:
                 text = message_for_designer if (designer_telegram_id is not None and chat_id == designer_telegram_id) else message_for_broadcast
                 try:
@@ -929,14 +926,6 @@ class DesignAssignmentNotifier:
                         )
             else:
                 logger.warning("No admin_ids configured (ADMINS env): admin copy not sent", order_id=order_id)
-
-            try:
-                if designer_telegram_id is not None and designer_telegram_id not in subscribers:
-                    await self.bot.send_message(chat_id=designer_telegram_id, text=message_for_designer)
-                    stats.notified += 1
-            except Exception as exc:
-                stats.errors += 1
-                logger.warning("Failed to send design assignment to designer (not in subscribers)", order_id=order_id, error=str(exc))
 
             await db.mark_design_assignment_sent(int(order_id))
             stats.matched_users += 1
