@@ -155,6 +155,27 @@ def _resolve_owner_fields(record: Dict[str, Any]) -> tuple[Optional[str], Option
     return normalized, raw_handle, owner_name
 
 
+# Статусы заказов дизайна (для уведомлений)
+ORDER_STATUS_TEXTS: Dict[int, str] = {
+    0: "обработка",
+    1: "выполнен",
+    2: "в работе",
+    3: "на правках",
+    4: "отдано на апрув",
+    5: "возвращено на доработку",
+}
+
+
+def _order_status_text(status_id: Any) -> str:
+    if status_id is None:
+        return "—"
+    try:
+        sid = int(status_id)
+        return ORDER_STATUS_TEXTS.get(sid, "unknown")
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _build_order_message(order: Dict[str, Any]) -> str:
     order_id = order.get("id")
     name = order.get("name") or order.get("type") or "—"
@@ -166,6 +187,25 @@ def _build_order_message(order: Dict[str, Any]) -> str:
         f"Название: {name}",
         f"Количество: {count}",
         f"Сумма: {total}",
+    ]
+    return "\n".join(str(line) for line in lines)
+
+
+def _build_design_order_message(order: Dict[str, Any]) -> str:
+    """Сообщение для заказа дизайна (креатив/PWA) с учётом статуса."""
+    order_id = order.get("id")
+    name = order.get("name") or order.get("type") or "—"
+    count = order.get("count") or 0
+    total = order.get("total") or order.get("price") or "0"
+    status_id = order.get("status_id")
+    status_text = _order_status_text(status_id)
+    lines = [
+        f"📐 Заказ (дизайн) ID {order_id}",
+        "",
+        f"Название: {name}",
+        f"Количество: {count}",
+        f"Сумма: {total}",
+        f"Статус: {status_text}",
     ]
     return "\n".join(str(line) for line in lines)
 
@@ -309,6 +349,20 @@ class UnderdogClient:
             raise UnderdogAPIError(f"Request {method} {path} failed with status {resp.status_code}") from exc
         return resp
 
+    async def fetch_orders_by_type(
+        self,
+        order_type: str,
+        *,
+        order_status: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """Fetch orders from /api/v2/orders?type=<order_type>&order_status=<order_status>."""
+        params = {"type": order_type, "order_status": order_status}
+        logger.info("Fetching Underdog orders by type", params=params)
+        resp = await self.request("GET", ORDERS_PATH, params=params)
+        orders = _extract_items(resp.json())
+        logger.info("Received orders", type=order_type, count=len(orders))
+        return orders
+
     async def fetch_orders_for_date(
         self,
         target_date: date,
@@ -340,6 +394,39 @@ class UnderdogClient:
             status_id=status_id,
             telegram_sent=telegram_sent,
         )
+
+    ORDER_TYPES_ORDERS_BOT = ("domain", "transferDomain")
+    ORDER_TYPES_DESIGN_BOT = ("pwaDesign", "creative")
+
+    async def fetch_orders_for_orders_bot(self) -> List[Dict[str, Any]]:
+        """Fetch domain + transferDomain orders (for orders bot). Только с telegram_sent=0."""
+        all_orders: List[Dict[str, Any]] = []
+        seen_ids: set = set()
+        for order_type in self.ORDER_TYPES_ORDERS_BOT:
+            orders = await self.fetch_orders_by_type(order_type, order_status=1)
+            for o in orders:
+                if int(o.get("telegram_sent", 1)) != 0:
+                    continue
+                oid = o.get("id")
+                if oid is not None and oid not in seen_ids:
+                    seen_ids.add(oid)
+                    all_orders.append(o)
+        return all_orders
+
+    async def fetch_orders_for_design_bot(self) -> List[Dict[str, Any]]:
+        """Fetch pwaDesign + creative orders (for design bot). Только с telegram_sent=0."""
+        all_orders = []
+        seen_ids = set()
+        for order_type in self.ORDER_TYPES_DESIGN_BOT:
+            orders = await self.fetch_orders_by_type(order_type, order_status=1)
+            for o in orders:
+                if int(o.get("telegram_sent", 1)) != 0:
+                    continue
+                oid = o.get("id")
+                if oid is not None and oid not in seen_ids:
+                    seen_ids.add(oid)
+                    all_orders.append(o)
+        return all_orders
 
     async def mark_order_telegram_sent(self, order_id: int) -> None:
         path = f"{ORDERS_PATH}/{order_id}/telegram-sent"
@@ -510,7 +597,7 @@ class OrderNotifier:
         dry_run: bool = True,
         limit_user_ids: Optional[Iterable[int]] = None,
     ) -> NotificationStats:
-        orders = await self.underdog.fetch_yesterday_orders()
+        orders = await self.underdog.fetch_orders_for_orders_bot()
         limit_set: Optional[set[int]] = None
         if limit_user_ids is not None:
             limit_set = {int(uid) for uid in limit_user_ids}
@@ -649,6 +736,68 @@ class OrderNotifier:
                     admin_id=admin_id,
                     error=str(exc),
                 )
+
+
+@dataclass(slots=True)
+class DesignOrderNotifier:
+    """Notifier for design orders (creative, pwaDesign) — sends to all design bot subscribers."""
+
+    underdog: UnderdogClient
+    bot: Bot
+    admin_ids: Sequence[int]
+
+    async def notify_design_orders(
+        self,
+        *,
+        dry_run: bool = True,
+    ) -> NotificationStats:
+        orders = await self.underdog.fetch_orders_for_design_bot()
+        subscribers = await db.list_design_bot_subscribers()
+        stats = NotificationStats(total_orders=len(orders))
+        if not orders:
+            return stats
+        if not subscribers:
+            logger.warning("No design bot subscribers; skipping design order notifications")
+            return stats
+
+        stats.matched_users = len(subscribers)
+        for order in orders:
+            message = _build_design_order_message(order)
+            for chat_id in subscribers:
+                if dry_run:
+                    logger.info(
+                        "Dry-run: would send design order to subscriber",
+                        order_id=order.get("id"),
+                        chat_id=chat_id,
+                    )
+                    stats.notified += 1
+                    continue
+                try:
+                    await self.bot.send_message(chat_id=chat_id, text=message)
+                    stats.notified += 1
+                except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                    order_errors += 1
+                    stats.errors += 1
+                    logger.warning(
+                        "Failed to send design order to subscriber",
+                        order_id=order.get("id"),
+                        chat_id=chat_id,
+                        error=str(exc),
+                    )
+                except Exception as exc:
+                    order_errors += 1
+                    stats.errors += 1
+                    logger.exception(
+                        "Unexpected error sending design order",
+                        order_id=order.get("id"),
+                        chat_id=chat_id,
+                    )
+            if not dry_run:
+                try:
+                    await self.underdog.mark_order_telegram_sent(int(order.get("id")))
+                except Exception as exc:
+                    logger.warning("Failed to mark design order telegram_sent", order_id=order.get("id"), error=str(exc))
+        return stats
 
 
 @dataclass(slots=True)
@@ -1597,6 +1746,14 @@ def _create_bot() -> Bot:
     )
 
 
+def _create_design_bot() -> Bot:
+    token = settings.design_bot_token or settings.telegram_bot_token
+    return Bot(
+        token=token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
+
 async def fetch_yesterday_orders(status_id: int = 1, telegram_sent: int = 0) -> List[Dict[str, Any]]:
     async with UnderdogClient.from_settings() as client:
         return await client.fetch_yesterday_orders(status_id=status_id, telegram_sent=telegram_sent)
@@ -1621,6 +1778,22 @@ async def notify_ready_orders(
                 dry_run=dry_run,
                 limit_user_ids=limit_user_ids,
             )
+            return stats.to_dict(dry_run=dry_run)
+
+
+async def notify_design_orders(
+    dry_run: bool = True,
+    bot_instance: Optional[Bot] = None,
+) -> Dict[str, Any]:
+    """Fetch creative + pwaDesign orders and notify all design bot subscribers."""
+    async with UnderdogClient.from_settings() as client:
+        if bot_instance is not None:
+            notifier = DesignOrderNotifier(client, bot_instance, settings.admins)
+            stats = await notifier.notify_design_orders(dry_run=dry_run)
+            return stats.to_dict(dry_run=dry_run)
+        async with _create_design_bot() as owned_bot:
+            notifier = DesignOrderNotifier(client, owned_bot, settings.admins)
+            stats = await notifier.notify_design_orders(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
 
 
@@ -1676,8 +1849,14 @@ async def notify_completed_tickets(
 
 async def _amain() -> None:
     parser = ArgumentParser(description="Interact with the Underdog admin API")
-    parser.add_argument("--orders", action="store_true", help="Fetch yesterday's pending telegram orders")
-    parser.add_argument("--notify", action="store_true", help="Send Telegram notifications for ready orders")
+    parser.add_argument("--orders", action="store_true", help="Fetch domain+transferDomain orders (orders bot)")
+    parser.add_argument("--orders-design", action="store_true", help="Fetch pwaDesign+creative orders (design bot)")
+    parser.add_argument("--notify", action="store_true", help="Send Telegram notifications for ready orders (orders bot)")
+    parser.add_argument(
+        "--notify-design",
+        action="store_true",
+        help="Send design order notifications to design bot subscribers (cron: python -m src.underdog --notify-design --apply)",
+    )
     parser.add_argument("--domains", action="store_true", help="Fetch all domains from Underdog")
     parser.add_argument("--notify-domains", action="store_true", help="Notify Telegram users about expiring domains")
     parser.add_argument("--ips", action="store_true", help="Fetch expiring IPs from Underdog")
@@ -1706,7 +1885,12 @@ async def _amain() -> None:
 
     async with UnderdogClient.from_settings() as client:
         if args.orders:
-            orders = await client.fetch_yesterday_orders()
+            orders = await client.fetch_orders_for_orders_bot()
+            print(json.dumps({"count": len(orders), "orders": orders}, ensure_ascii=False, indent=2))
+            return
+
+        if args.orders_design:
+            orders = await client.fetch_orders_for_design_bot()
             print(json.dumps({"count": len(orders), "orders": orders}, ensure_ascii=False, indent=2))
             return
 
@@ -1715,6 +1899,14 @@ async def _amain() -> None:
             async with _create_bot() as bot_instance:
                 notifier = OrderNotifier(client, bot_instance, settings.admins)
                 stats = await notifier.notify_ready_orders(dry_run=dry_run)
+            print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
+            return
+
+        if args.notify_design:
+            dry_run = not args.apply
+            async with _create_design_bot() as bot_instance:
+                notifier = DesignOrderNotifier(client, bot_instance, settings.admins)
+                stats = await notifier.notify_design_orders(dry_run=dry_run)
             print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
             return
 

@@ -1,4 +1,4 @@
-"""Design bot — уведомления о заказах на дизайн (Underdog API). Пока только подключение."""
+"""Design bot — уведомления о заказах на дизайн (Underdog API: creative, pwaDesign)."""
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -7,6 +7,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 from .config import settings
+from . import db
 
 design_bot = Bot(
     token=settings.design_bot_token or settings.telegram_bot_token,
@@ -17,8 +18,10 @@ design_dp = Dispatcher()
 
 @design_dp.message(CommandStart())
 async def on_design_start(message: Message) -> None:
-    """Приветствие — функционал заказов будет подключён после изменений API Underdog."""
+    """Регистрируем подписчика и приветствуем."""
+    chat_id = message.chat.id
+    await db.add_design_bot_subscriber(chat_id)
     await message.answer(
-        "Привет! Это бот уведомлений о заказах на дизайн. "
-        "Подключение настроено, функционал заказов будет добавлен позже."
+        "Привет! Ты подписан на уведомления о заказах на дизайн (креативы и PWA). "
+        "Когда появятся новые заказы — пришлю сюда."
     )

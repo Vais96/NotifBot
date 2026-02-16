@@ -824,6 +824,24 @@ async def notify_expiring_ips_endpoint(
     return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
 
 
+@app.post("/underdog/design/notify")
+async def notify_design_orders_endpoint(
+    payload: DomainNotifyRequest,
+    authorization: str | None = Header(default=None),
+):
+    _require_internal_token(authorization, payload.token)
+    if not settings.design_bot_token:
+        return JSONResponse(
+            {"ok": False, "error": "DESIGN_BOT_TOKEN not configured"},
+            status_code=503,
+        )
+    stats = await underdog.notify_design_orders(
+        dry_run=payload.dry_run,
+        bot_instance=design_bot,
+    )
+    return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
+
+
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     try:

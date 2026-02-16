@@ -172,6 +172,13 @@ SCHEMA_SQL = [
         CONSTRAINT fk_tg_ui_cache_user FOREIGN KEY (user_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # design bot: chat_ids that /started the bot (receive design order notifications)
+    """
+    CREATE TABLE IF NOT EXISTS tg_design_bot_chats (
+        chat_id BIGINT PRIMARY KEY,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 
@@ -285,6 +292,28 @@ async def close_pool() -> None:
         _pool.close()
         await _pool.wait_closed()
         _pool = None
+
+
+async def add_design_bot_subscriber(chat_id: int) -> None:
+    """Register a chat as design bot subscriber (on /start)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT IGNORE INTO tg_design_bot_chats (chat_id) VALUES (%s)",
+                (chat_id,),
+            )
+
+
+async def list_design_bot_subscribers() -> List[int]:
+    """Return all chat_ids subscribed to design bot."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT chat_id FROM tg_design_bot_chats ORDER BY created_at ASC")
+            rows = await cur.fetchall()
+            return [int(r[0]) for r in rows] if rows else []
+
 
 async def upsert_user(telegram_id: int, username: Optional[str], full_name: Optional[str]) -> None:
     pool = await init_pool()
