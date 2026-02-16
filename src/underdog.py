@@ -210,6 +210,36 @@ def _build_design_order_message(order: Dict[str, Any]) -> str:
     return "\n".join(str(line) for line in lines)
 
 
+def _build_design_assignment_message(
+    order: Dict[str, Any],
+    designer_name: Optional[str] = None,
+    assigned_to_display: Optional[str] = None,
+    assigned_to_mention_html: Optional[str] = None,
+) -> str:
+    """Сообщение о постановке таска. assigned_to_mention_html: HTML с <a href=\"tg://user?id=...\">@user</a> (тег); assigned_to_display: текст, если тега нет; если оба None — «вас» (личное дизайнеру)."""
+    order_id = order.get("id")
+    name = order.get("name") or order.get("type") or "—"
+    owner = order.get("owner") or {}
+    owner_name = owner.get("name") or "—"
+    if assigned_to_mention_html is not None:
+        assign_line = f"Таск назначен на: {assigned_to_mention_html}"
+    elif assigned_to_display is not None:
+        assign_line = f"Таск назначен на: {assigned_to_display}"
+    else:
+        assign_line = f"Таск назначен на: вас" + (f" ({designer_name})" if designer_name else "")
+    lines = [
+        "📐 Вам поставлен таск (дизайн/креатив)",
+        "",
+        assign_line,
+        f"Заказчик: {owner_name}",
+        "",
+        f"Название: {name}",
+        f"ID заказа: {order_id}",
+        "Статус: обработка",
+    ]
+    return "\n".join(str(line) for line in lines)
+
+
 def _yesterday() -> date:
     return datetime.now(timezone.utc).date() - timedelta(days=1)
 
@@ -422,6 +452,19 @@ class UnderdogClient:
             for o in orders:
                 if int(o.get("telegram_sent", 1)) != 0:
                     continue
+                oid = o.get("id")
+                if oid is not None and oid not in seen_ids:
+                    seen_ids.add(oid)
+                    all_orders.append(o)
+        return all_orders
+
+    async def fetch_design_new_tasks(self) -> List[Dict[str, Any]]:
+        """Fetch pwaDesign + creative orders with order_status=0 (новый таск, обработка)."""
+        all_orders = []
+        seen_ids = set()
+        for order_type in self.ORDER_TYPES_DESIGN_BOT:
+            orders = await self.fetch_orders_by_type(order_type, order_status=0)
+            for o in orders:
                 oid = o.get("id")
                 if oid is not None and oid not in seen_ids:
                     seen_ids.add(oid)
@@ -739,64 +782,118 @@ class OrderNotifier:
 
 
 @dataclass(slots=True)
-class DesignOrderNotifier:
-    """Notifier for design orders (creative, pwaDesign) — sends to all design bot subscribers."""
+class DesignAssignmentNotifier:
+    """Уведомление дизайнеру, когда ему ставят таск (order_status=0). Отправляем тому, на кого назначен (contractor)."""
 
     underdog: UnderdogClient
     bot: Bot
     admin_ids: Sequence[int]
 
-    async def notify_design_orders(
+    async def notify_design_assignments(
         self,
         *,
         dry_run: bool = True,
     ) -> NotificationStats:
-        orders = await self.underdog.fetch_orders_for_design_bot()
-        subscribers = await db.list_design_bot_subscribers()
+        orders = await self.underdog.fetch_design_new_tasks()
         stats = NotificationStats(total_orders=len(orders))
         if not orders:
             return stats
-        if not subscribers:
-            logger.warning("No design bot subscribers; skipping design order notifications")
-            return stats
 
-        stats.matched_users = len(subscribers)
+        subscribers = await db.list_design_bot_subscribers()
+
         for order in orders:
-            message = _build_design_order_message(order)
+            order_id = order.get("id")
+            if order_id is None:
+                continue
+            if await db.is_design_assignment_sent(int(order_id)):
+                continue
+
+            contractor = order.get("contractor") or {}
+            contractor_id = order.get("contractor_id")
+            if contractor_id is not None:
+                contractor_id = str(contractor_id).strip()
+            telegram_from_order = (contractor.get("telegram") or contractor.get("telegram_handle") or "").strip().lstrip("@")
+            designer_telegram_id: Optional[int] = None
+            designer_name: Optional[str] = contractor.get("name")
+
+            if telegram_from_order:
+                user = await db.find_user_by_username(telegram_from_order)
+                if user:
+                    designer_telegram_id = int(user.get("telegram_id"))
+            if designer_telegram_id is None and contractor_id:
+                designer_telegram_id = await db.get_contractor_telegram_id(contractor_id)
+
+            if designer_telegram_id is not None:
+                label = f"@{telegram_from_order}" if telegram_from_order else (designer_name or f"id{designer_telegram_id}")
+                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{label}</a>'
+                assigned_to_display = None
+            else:
+                assigned_to_mention_html = None
+                assigned_to_display = f"contractor_id {contractor_id}" if contractor_id else "—"
+            message_for_broadcast = _build_design_assignment_message(
+                order,
+                designer_name=designer_name,
+                assigned_to_display=assigned_to_display,
+                assigned_to_mention_html=assigned_to_mention_html,
+            )
+            message_for_designer = _build_design_assignment_message(order, designer_name=designer_name)
+            admin_message = f"📋 Копия админу:\n\n{message_for_broadcast}"
+            if designer_telegram_id is None:
+                admin_message += f"\n\n⚠️ Дизайнеру не отправлено: contractor_id={contractor_id}, telegram не найден."
+                stats.unknown_user += 1
+                stats.unknown_orders.append(
+                    {
+                        "order_id": order_id,
+                        "contractor_id": contractor_id,
+                        "owner": (order.get("owner") or {}).get("name"),
+                        "name": order.get("name"),
+                    }
+                )
+                logger.warning(
+                    "Design assignment: no telegram for contractor",
+                    order_id=order_id,
+                    contractor_id=contractor_id,
+                )
+
+            if dry_run:
+                stats.matched_users += 1 if designer_telegram_id is not None else 0
+                stats.notified += len(subscribers) + (1 if designer_telegram_id and designer_telegram_id not in subscribers else 0) + len(self.admin_ids)
+                continue
+
             for chat_id in subscribers:
-                if dry_run:
-                    logger.info(
-                        "Dry-run: would send design order to subscriber",
-                        order_id=order.get("id"),
-                        chat_id=chat_id,
-                    )
-                    stats.notified += 1
-                    continue
+                text = message_for_designer if (designer_telegram_id is not None and chat_id == designer_telegram_id) else message_for_broadcast
                 try:
-                    await self.bot.send_message(chat_id=chat_id, text=message)
+                    await self.bot.send_message(chat_id=chat_id, text=text)
                     stats.notified += 1
                 except (TelegramForbiddenError, TelegramBadRequest) as exc:
-                    order_errors += 1
                     stats.errors += 1
-                    logger.warning(
-                        "Failed to send design order to subscriber",
-                        order_id=order.get("id"),
-                        chat_id=chat_id,
-                        error=str(exc),
-                    )
+                    logger.warning("Failed to send design assignment to subscriber", order_id=order_id, chat_id=chat_id, error=str(exc))
                 except Exception as exc:
-                    order_errors += 1
                     stats.errors += 1
-                    logger.exception(
-                        "Unexpected error sending design order",
-                        order_id=order.get("id"),
-                        chat_id=chat_id,
-                    )
-            if not dry_run:
-                try:
-                    await self.underdog.mark_order_telegram_sent(int(order.get("id")))
-                except Exception as exc:
-                    logger.warning("Failed to mark design order telegram_sent", order_id=order.get("id"), error=str(exc))
+                    logger.exception("Unexpected error sending design assignment to subscriber", order_id=order_id, chat_id=chat_id)
+
+            if self.admin_ids:
+                for admin_id in self.admin_ids:
+                    try:
+                        await self.bot.send_message(chat_id=int(admin_id), text=admin_message)
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to send design assignment copy to admin",
+                            admin_id=admin_id,
+                            order_id=order_id,
+                            error=str(exc),
+                        )
+
+            try:
+                if designer_telegram_id is not None and designer_telegram_id not in subscribers:
+                    await self.bot.send_message(chat_id=designer_telegram_id, text=message_for_designer)
+                    stats.notified += 1
+            except Exception as exc:
+                stats.errors += 1
+                logger.warning("Failed to send design assignment to designer (not in subscribers)", order_id=order_id, error=str(exc))
+
+            await db.mark_design_assignment_sent(int(order_id))
+            stats.matched_users += 1
         return stats
 
 
@@ -1781,19 +1878,19 @@ async def notify_ready_orders(
             return stats.to_dict(dry_run=dry_run)
 
 
-async def notify_design_orders(
+async def notify_design_assignments(
     dry_run: bool = True,
     bot_instance: Optional[Bot] = None,
 ) -> Dict[str, Any]:
-    """Fetch creative + pwaDesign orders and notify all design bot subscribers."""
+    """Уведомлять дизайнера, когда ему ставят таск (order_status=0). Результат по contractor_id -> telegram."""
     async with UnderdogClient.from_settings() as client:
         if bot_instance is not None:
-            notifier = DesignOrderNotifier(client, bot_instance, settings.admins)
-            stats = await notifier.notify_design_orders(dry_run=dry_run)
+            notifier = DesignAssignmentNotifier(client, bot_instance, settings.admins)
+            stats = await notifier.notify_design_assignments(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
         async with _create_design_bot() as owned_bot:
-            notifier = DesignOrderNotifier(client, owned_bot, settings.admins)
-            stats = await notifier.notify_design_orders(dry_run=dry_run)
+            notifier = DesignAssignmentNotifier(client, owned_bot, settings.admins)
+            stats = await notifier.notify_design_assignments(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
 
 
@@ -1850,12 +1947,13 @@ async def notify_completed_tickets(
 async def _amain() -> None:
     parser = ArgumentParser(description="Interact with the Underdog admin API")
     parser.add_argument("--orders", action="store_true", help="Fetch domain+transferDomain orders (orders bot)")
-    parser.add_argument("--orders-design", action="store_true", help="Fetch pwaDesign+creative orders (design bot)")
+    parser.add_argument("--orders-design", action="store_true", help="Fetch pwaDesign+creative orders with order_status=1 (design bot)")
+    parser.add_argument("--orders-design-new", action="store_true", help="Fetch pwaDesign+creative with order_status=0 (new tasks for assignment notify)")
     parser.add_argument("--notify", action="store_true", help="Send Telegram notifications for ready orders (orders bot)")
     parser.add_argument(
         "--notify-design",
         action="store_true",
-        help="Send design order notifications to design bot subscribers (cron: python -m src.underdog --notify-design --apply)",
+        help="Notify designers when a task is assigned (order_status=0). Cron: python -m src.underdog --notify-design --apply",
     )
     parser.add_argument("--domains", action="store_true", help="Fetch all domains from Underdog")
     parser.add_argument("--notify-domains", action="store_true", help="Notify Telegram users about expiring domains")
@@ -1894,6 +1992,11 @@ async def _amain() -> None:
             print(json.dumps({"count": len(orders), "orders": orders}, ensure_ascii=False, indent=2))
             return
 
+        if args.orders_design_new:
+            orders = await client.fetch_design_new_tasks()
+            print(json.dumps({"count": len(orders), "orders": orders}, ensure_ascii=False, indent=2))
+            return
+
         if args.notify:
             dry_run = not args.apply
             async with _create_bot() as bot_instance:
@@ -1905,8 +2008,8 @@ async def _amain() -> None:
         if args.notify_design:
             dry_run = not args.apply
             async with _create_design_bot() as bot_instance:
-                notifier = DesignOrderNotifier(client, bot_instance, settings.admins)
-                stats = await notifier.notify_design_orders(dry_run=dry_run)
+                notifier = DesignAssignmentNotifier(client, bot_instance, settings.admins)
+                stats = await notifier.notify_design_assignments(dry_run=dry_run)
             print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
             return
 

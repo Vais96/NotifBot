@@ -123,23 +123,20 @@ For Railway scheduled task (every 5 minutes):
 
 Note: The `tickets` process in Procfile is for a persistent worker, not for scheduled tasks. Use Railway Scheduler for cron-like behavior.
 
-## Design bot (заказы на дизайн: креативы и PWA)
-Отдельный бот (`DESIGN_BOT_TOKEN`) получает заказы типов `pwaDesign` и `creative` из Underdog API и рассылает их всем, кто нажал `/start` в design-боте. В уведомлении передаётся статус заказа (обработка, выполнен, в работе, на правках, отдано на апрув, возвращено на доработку).
+## Design bot (таски на дизайн и креативы)
+Отдельный бот (`DESIGN_BOT_TOKEN`) уведомляет **дизайнеров о постановке таска**: когда в Underdog создают заказ (pwaDesign/creative) с `order_status=0`, назначенному исполнителю (contractor) уходит сообщение в личку: «Вам поставлен таск», заказчик, ID, «Таск назначен на: вас».
 
-**Cron (например, Railway Scheduler):**
+**Маппинг contractor → Telegram:** таблица `tg_underdog_contractor_telegram` (contractor_id, telegram_username или telegram_id). Если в ответе API по заказу приходит объект `contractor` с полем `telegram`, он тоже используется.
+
+**Одна команда для крона:**
 ```bash
 python -m src.underdog --notify-design --apply
 ```
-Без `--apply` — dry-run (статистика без отправки).
+Без `--apply` — dry-run.
 
-**Проверка ответа API локально:**
-```bash
-# из корня проекта, с активированным venv и .env (UNDERDOG_EMAIL, UNDERDOG_PASSWORD)
-python -m src.underdog --orders-design
-```
-Выведет JSON с заказами (pwaDesign + creative). То же для orders-бота: `python -m src.underdog --orders`.
+**Проверка API:** `python -m src.underdog --orders-design-new` — список новых тасков (order_status=0).
 
-**HTTP endpoint:** `POST /underdog/design/notify` (как у domains/notify: `dry_run`, `token`/Authorization).
+**HTTP:** `POST /underdog/design/notify` (как у domains: `dry_run`, Bearer POSTBACK_TOKEN или `token` в body).
 
 ## Run locally (optional)
 1. Create virtualenv and install deps

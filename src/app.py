@@ -825,17 +825,18 @@ async def notify_expiring_ips_endpoint(
 
 
 @app.post("/underdog/design/notify")
-async def notify_design_orders_endpoint(
+async def notify_design_endpoint(
     payload: DomainNotifyRequest,
     authorization: str | None = Header(default=None),
 ):
+    """Уведомлять дизайнера в design-боте, когда ему ставят таск (order_status=0). Маппинг contractor_id → telegram: tg_underdog_contractor_telegram."""
     _require_internal_token(authorization, payload.token)
     if not settings.design_bot_token:
         return JSONResponse(
             {"ok": False, "error": "DESIGN_BOT_TOKEN not configured"},
             status_code=503,
         )
-    stats = await underdog.notify_design_orders(
+    stats = await underdog.notify_design_assignments(
         dry_run=payload.dry_run,
         bot_instance=design_bot,
     )

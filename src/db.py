@@ -179,6 +179,22 @@ SCHEMA_SQL = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # design: order_ids for which we already sent "task assigned" notification (avoid duplicate)
+    """
+    CREATE TABLE IF NOT EXISTS tg_design_assignment_sent (
+        order_id BIGINT PRIMARY KEY,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Underdog contractor_id -> telegram (designer): to notify the right person when task is assigned
+    """
+    CREATE TABLE IF NOT EXISTS tg_underdog_contractor_telegram (
+        contractor_id VARCHAR(32) PRIMARY KEY,
+        telegram_username VARCHAR(64) NULL,
+        telegram_id BIGINT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 
@@ -313,6 +329,70 @@ async def list_design_bot_subscribers() -> List[int]:
             await cur.execute("SELECT chat_id FROM tg_design_bot_chats ORDER BY created_at ASC")
             rows = await cur.fetchall()
             return [int(r[0]) for r in rows] if rows else []
+
+
+async def is_design_assignment_sent(order_id: int) -> bool:
+    """True if we already sent 'task assigned' notification for this order."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT 1 FROM tg_design_assignment_sent WHERE order_id = %s", (order_id,))
+            return (await cur.fetchone()) is not None
+
+
+async def mark_design_assignment_sent(order_id: int) -> None:
+    """Mark that we sent 'task assigned' notification for this order."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT IGNORE INTO tg_design_assignment_sent (order_id) VALUES (%s)",
+                (order_id,),
+            )
+
+
+async def get_contractor_telegram_id(contractor_id: str) -> Optional[int]:
+    """Resolve Underdog contractor_id to telegram_id (from tg_underdog_contractor_telegram or tg_users by username)."""
+    if not contractor_id:
+        return None
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT telegram_id, telegram_username FROM tg_underdog_contractor_telegram WHERE contractor_id = %s",
+                (str(contractor_id).strip(),),
+            )
+            row = await cur.fetchone()
+            if row and row.get("telegram_id"):
+                return int(row["telegram_id"])
+            username = (row or {}).get("telegram_username")
+            if username:
+                handle = (str(username).strip()).lstrip("@").lower()
+                user = await find_user_by_username(handle)
+                if user:
+                    return int(user["telegram_id"])
+    return None
+
+
+async def set_contractor_telegram(
+    contractor_id: str,
+    telegram_username: Optional[str] = None,
+    telegram_id: Optional[int] = None,
+) -> None:
+    """Set mapping Underdog contractor_id -> telegram (for assignment notifications)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO tg_underdog_contractor_telegram (contractor_id, telegram_username, telegram_id)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    telegram_username = COALESCE(VALUES(telegram_username), telegram_username),
+                    telegram_id = COALESCE(VALUES(telegram_id), telegram_id)
+                """,
+                (str(contractor_id).strip(), telegram_username or None, telegram_id),
+            )
 
 
 async def upsert_user(telegram_id: int, username: Optional[str], full_name: Optional[str]) -> None:
