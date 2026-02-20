@@ -1208,10 +1208,10 @@ class IPNotifier:
             return stats
 
         logger.info(
-            "IP notify: horizon=%s days, ips=%s, bot=orders_bot=%s (users must have /start in that bot)",
-            days,
-            len(ips),
-            bool(settings.orders_bot_token),
+            "IP notify",
+            horizon_days=days,
+            ips_count=len(ips),
+            bot_orders_bot=bool(settings.orders_bot_token),
         )
         per_handle: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         today = datetime.now(timezone.utc).date()
