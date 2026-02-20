@@ -1207,6 +1207,12 @@ class IPNotifier:
         if not ips:
             return stats
 
+        logger.info(
+            "IP notify: horizon=%s days, ips=%s, bot=orders_bot=%s (users must have /start in that bot)",
+            days,
+            len(ips),
+            bool(settings.orders_bot_token),
+        )
         per_handle: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         today = datetime.now(timezone.utc).date()
         cutoff = today + timedelta(days=max(0, int(days)))
@@ -1292,9 +1298,16 @@ class IPNotifier:
                 continue
 
             try:
-                await self.bot.send_message(int(user["telegram_id"]), text)
+                telegram_id = int(user["telegram_id"])
+                await self.bot.send_message(telegram_id, text)
                 stats.notified_users += 1
                 stats.notified_ips += len(ip_entries)
+                logger.info(
+                    "Sent IP expiration notification",
+                    handle=handle,
+                    telegram_id=telegram_id,
+                    ips_count=len(ip_entries),
+                )
                 for entry in ip_entries:
                     ip_id = entry["raw"].get("id")
                     if ip_id is None:
@@ -1308,6 +1321,20 @@ class IPNotifier:
                             ip_id=ip_id,
                             error=str(exc),
                         )
+            except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                stats.errors += 1
+                logger.warning(
+                    "IP notification not delivered (user blocked bot or chat not found)",
+                    handle=handle,
+                    telegram_id=user.get("telegram_id"),
+                    error=str(exc),
+                )
+                await self._notify_admins_ip_delivery_error(
+                    handle=handle,
+                    entries=ip_entries,
+                    error_text=str(exc),
+                    dry_run=dry_run,
+                )
             except Exception as exc:  # pragma: no cover
                 stats.errors += 1
                 logger.warning(
