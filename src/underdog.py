@@ -393,7 +393,15 @@ class UnderdogClient:
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise UnderdogAPIError(f"Request {method} {path} failed with status {resp.status_code}") from exc
+            try:
+                body = resp.text if hasattr(resp, "text") else ""
+            except Exception:
+                body = ""
+            if body and len(body) > 500:
+                body = body[:500] + "..."
+            raise UnderdogAPIError(
+                f"Request {method} {path} failed with status {resp.status_code}: {body}"
+            ) from exc
         return resp
 
     async def fetch_orders_by_type(
@@ -1317,9 +1325,9 @@ class IPNotifier:
                     except Exception as exc:  # pragma: no cover
                         stats.errors += 1
                         logger.warning(
-                            "Failed to mark IP telegram_sent",
-                            ip_id=ip_id,
-                            error=str(exc),
+                            "Failed to mark IP telegram_sent: ip_id=%s path=PATCH /api/v2/ip/{id}/telegram-sent error=%s",
+                            ip_id,
+                            exc,
                         )
             except (TelegramForbiddenError, TelegramBadRequest) as exc:
                 stats.errors += 1
