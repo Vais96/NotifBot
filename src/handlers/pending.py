@@ -90,6 +90,25 @@ async def on_text_fallback(message: Message):
             await db.set_user_role(uid, "mentor")
             await db.clear_pending_action(message.from_user.id)
             return await message.answer("Назначен ментором")
+        if action == "helper:add":
+            v = (message.text or "").strip()
+            if v.lower() in ("-", "отмена", "cancel"):
+                await db.clear_pending_action(message.from_user.id)
+                return await message.answer("Отменено.")
+            try:
+                uid = await _resolve_user_id(v)
+            except ValueError as e:
+                return await message.answer(str(e))
+            user = await db.get_user(uid)
+            if not user:
+                return await message.answer("Пользователь не найден в базе. Пусть нажмёт /start в боте.")
+            await db.set_user_role(uid, "helper")
+            await db.clear_pending_action(message.from_user.id)
+            name = user.get("full_name") or user.get("username") or uid
+            return await message.answer(
+                f"Пользователь {name} (@{user.get('username') or uid}) назначен помощником.\n"
+                "Откройте «Помощники» в меню и нажмите «Назначить байера» рядом с ним."
+            )
         if action == "team:new":
             name = message.text.strip()
             tid = await db.create_team(name)

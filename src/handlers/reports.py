@@ -96,6 +96,12 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     my_role = (me or {}).get("role", "buyer")
     if actor_id in ADMIN_IDS:
         my_role = "admin"
+    # Помощник видит только депозиты своего назначенного байера
+    if my_role == "helper":
+        buyer_id = await db.get_helper_buyer(actor_id)
+        if buyer_id is not None:
+            return [buyer_id]
+        return []
     allowed_roles = {"buyer", "lead", "mentor", "head"}
     if my_role in ("admin", "head"):
         # Include buyers, leads, mentors; exclude admins/heads

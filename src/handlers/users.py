@@ -83,7 +83,8 @@ def _user_row_controls(u: dict) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="lead", callback_data=f"role:{uid}:lead"),
          InlineKeyboardButton(text="head", callback_data=f"role:{uid}:head"),
          InlineKeyboardButton(text="admin", callback_data=f"role:{uid}:admin"),
-         InlineKeyboardButton(text="mentor", callback_data=f"role:{uid}:mentor")],
+         InlineKeyboardButton(text="mentor", callback_data=f"role:{uid}:mentor"),
+         InlineKeyboardButton(text="helper", callback_data=f"role:{uid}:helper")],
         [InlineKeyboardButton(text=("Deactivate" if is_active else "Activate"), callback_data=f"active:{uid}:{0 if is_active else 1}")],
         [InlineKeyboardButton(text="Set team", callback_data=f"team:choose:{uid}")]
     ]

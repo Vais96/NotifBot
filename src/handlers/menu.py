@@ -10,6 +10,7 @@ from ..handlers.users import _send_whoami, _send_list_users, _send_list_routes, 
 from ..handlers.aliases import _send_aliases
 from ..handlers.teams import _send_teams, _send_myteam
 from ..handlers.mentors import _send_mentors
+from ..handlers.helpers import _send_helpers_list
 from ..handlers.reports import _send_reports_menu, _send_kpi_menu
 from loguru import logger
 
@@ -27,7 +28,7 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
         buttons += [
             [InlineKeyboardButton(text="Пользователи", callback_data="menu:listusers"), InlineKeyboardButton(text="Управление", callback_data="menu:manage")],
             [InlineKeyboardButton(text="Команды", callback_data="menu:teams"), InlineKeyboardButton(text="Алиасы", callback_data="menu:aliases")],
-            [InlineKeyboardButton(text="Менторы", callback_data="menu:mentors")],
+            [InlineKeyboardButton(text="Менторы", callback_data="menu:mentors"), InlineKeyboardButton(text="Помощники", callback_data="menu:helpers")],
             [InlineKeyboardButton(text="Обновить домены", callback_data="menu:refreshdomains")],
             [InlineKeyboardButton(text="Очистить FB данные", callback_data="menu:resetfbdata")],
         ]
@@ -131,6 +132,9 @@ async def on_menu_click(call: CallbackQuery):
         return await call.answer()
     if key == "mentors":
         await _send_mentors(call.message.chat.id, call.from_user.id)
+        return await call.answer()
+    if key == "helpers":
+        await _send_helpers_list(call.message.chat.id, call.from_user.id)
         return await call.answer()
     if key == "myteam":
         await _send_myteam(call.message.chat.id, call.from_user.id)

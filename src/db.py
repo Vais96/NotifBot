@@ -38,7 +38,7 @@ SCHEMA_SQL = [
         telegram_id BIGINT PRIMARY KEY,
         username VARCHAR(255) NULL,
         full_name VARCHAR(255) NULL,
-        role ENUM('buyer','lead','head','admin','mentor') NOT NULL DEFAULT 'buyer',
+        role ENUM('buyer','lead','head','admin','mentor','helper') NOT NULL DEFAULT 'buyer',
         team_id BIGINT NULL,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -120,6 +120,16 @@ SCHEMA_SQL = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT fk_tg_team_leads_extra_team FOREIGN KEY (team_id) REFERENCES tg_teams (id) ON DELETE CASCADE,
         CONSTRAINT fk_tg_team_leads_extra_user FOREIGN KEY (user_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # helper -> buyer assignment (helper sees only that buyer's deposits)
+    """
+    CREATE TABLE IF NOT EXISTS tg_helper_buyer (
+        helper_id BIGINT PRIMARY KEY,
+        buyer_id BIGINT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_tg_helper_buyer_helper FOREIGN KEY (helper_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE,
+        CONSTRAINT fk_tg_helper_buyer_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
     # cached Keitaro campaigns for domain lookups
@@ -281,8 +291,11 @@ async def init_pool() -> aiomysql.Pool:
                     if 'enum(' in col_type.lower() and 'mentor' not in col_type:
                         logger.info("Altering tg_users.role to include 'mentor'")
                         await cur.execute("ALTER TABLE tg_users MODIFY role ENUM('buyer','lead','head','admin','mentor') NOT NULL DEFAULT 'buyer'")
+                    if 'enum(' in col_type.lower() and 'helper' not in col_type:
+                        logger.info("Altering tg_users.role to include 'helper'")
+                        await cur.execute("ALTER TABLE tg_users MODIFY role ENUM('buyer','lead','head','admin','mentor','helper') NOT NULL DEFAULT 'buyer'")
                 except Exception as e:
-                    logger.warning(f"Failed to ensure mentor in role enum: {e}")
+                    logger.warning(f"Failed to ensure mentor/helper in role enum: {e}")
                 # Ensure tg_report_filters has buyer_id and team_id columns (migration for existing installations)
                 try:
                     await cur.execute("SHOW COLUMNS FROM tg_report_filters")
@@ -443,7 +456,7 @@ async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
             return row
 
 async def set_user_role(telegram_id: int, role: str) -> None:
-    assert role in ("buyer", "lead", "head", "admin", "mentor")
+    assert role in ("buyer", "lead", "head", "admin", "mentor", "helper")
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
@@ -454,6 +467,65 @@ async def set_user_active(telegram_id: int, is_active: bool) -> None:
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("UPDATE tg_users SET is_active=%s WHERE telegram_id=%s", (1 if is_active else 0, telegram_id))
+
+
+async def get_helper_buyer(helper_id: int) -> Optional[int]:
+    """Возвращает buyer_id, к которому привязан помощник, или None."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT buyer_id FROM tg_helper_buyer WHERE helper_id=%s", (helper_id,))
+            row = await cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else None
+
+
+async def set_helper_buyer(helper_id: int, buyer_id: int) -> None:
+    """Привязывает помощника к байеру (один помощник — один байер)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO tg_helper_buyer (helper_id, buyer_id) VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE buyer_id = VALUES(buyer_id)
+                """,
+                (helper_id, buyer_id),
+            )
+
+
+async def list_helpers_with_buyers() -> List[Dict[str, Any]]:
+    """Список помощников (role=helper) с привязкой к байеру (для админки)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                """
+                SELECT hu.telegram_id AS helper_id, hu.username AS helper_username, hu.full_name AS helper_name,
+                       h.buyer_id, bu.username AS buyer_username, bu.full_name AS buyer_name, h.created_at
+                FROM tg_users hu
+                LEFT JOIN tg_helper_buyer h ON h.helper_id = hu.telegram_id
+                LEFT JOIN tg_users bu ON bu.telegram_id = h.buyer_id
+                WHERE hu.role = 'helper'
+                ORDER BY hu.telegram_id DESC
+                """
+            )
+            return await cur.fetchall() or []
+
+
+async def list_users_as_buyer_candidates() -> List[Dict[str, Any]]:
+    """Пользователи, которых можно назначить байером для помощника (buyer, lead, mentor)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                """
+                SELECT telegram_id, username, full_name, role, team_id, is_active
+                FROM tg_users
+                WHERE is_active = 1 AND role IN ('buyer', 'lead', 'mentor', 'head')
+                ORDER BY full_name, username
+                """
+            )
+            return await cur.fetchall() or []
 
 
 async def fetch_users_by_usernames(usernames: Iterable[str]) -> Dict[str, Dict[str, Any]]:

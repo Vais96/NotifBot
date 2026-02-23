@@ -5,6 +5,7 @@ from . import users  # noqa: F401
 from . import aliases  # noqa: F401
 from . import teams  # noqa: F401
 from . import mentors  # noqa: F401
+from . import helpers  # noqa: F401
 from . import domains  # noqa: F401
 from . import youtube  # noqa: F401
 from . import reports  # noqa: F401
