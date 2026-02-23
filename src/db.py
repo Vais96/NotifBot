@@ -493,6 +493,19 @@ async def set_helper_buyer(helper_id: int, buyer_id: int) -> None:
             )
 
 
+async def list_helpers_by_buyer(buyer_id: int) -> List[int]:
+    """Список telegram_id помощников, привязанных к данному байеру (для уведомлений о депозитах)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT helper_id FROM tg_helper_buyer WHERE buyer_id = %s",
+                (buyer_id,),
+            )
+            rows = await cur.fetchall()
+            return [int(r[0]) for r in rows] if rows else []
+
+
 async def list_helpers_with_buyers() -> List[Dict[str, Any]]:
     """Список помощников (role=helper) с привязкой к байеру (для админки)."""
     pool = await init_pool()

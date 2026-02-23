@@ -589,6 +589,14 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
             heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
             for u in heads:
                 recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+            # помощники, привязанные к этому байеру — тоже получают уведомление о депозите
+            if buyer_id:
+                try:
+                    helper_ids = await db.list_helpers_by_buyer(int(buyer_id))
+                    for hid in helper_ids:
+                        recipient_ids.add(hid)
+                except Exception as e:
+                    logger.warning(f"Failed to include helpers for buyer: {e}")
     except Exception as e:
         logger.warning(f"Failed to expand recipients: {e}")
 
@@ -778,6 +786,13 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
                 heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
                 for u in heads:
                     recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+                if buyer_id:
+                    try:
+                        helper_ids = await db.list_helpers_by_buyer(int(buyer_id))
+                        for hid in helper_ids:
+                            recipient_ids.add(hid)
+                    except Exception as e:
+                        logger.warning(f"Failed to include helpers for buyer: {e}")
         except Exception as e:
             logger.warning(f"Failed to expand recipients: {e}")
 
