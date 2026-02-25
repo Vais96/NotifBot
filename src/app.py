@@ -141,6 +141,7 @@ def _build_notification_text(data: dict, daily_count: int | None = None, kpi_dai
     offer_id = data.get("offer_id") or data.get("offer.id")
     offer_name = data.get("offer_name") or data.get("offer.name") or data.get("offer")
     subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
+    sub_id_2 = data.get("sub_id_2") or data.get("subid2")
     sub_id_3 = data.get("sub_id_3") or data.get("subid3")
     sale_time = data.get("conversion_sale_time") or data.get("conversion.sale_time") or data.get("conversion_time")
     campaign_name = data.get("campaign_name") or data.get("campaign.name") or data.get("campaign")
@@ -158,6 +159,7 @@ def _build_notification_text(data: dict, daily_count: int | None = None, kpi_dai
     offer_id = _clean(offer_id)
     offer_name = _clean(offer_name)
     subid = _clean(subid)
+    sub_id_2 = _clean(sub_id_2)
     sub_id_3 = _clean(sub_id_3)
     sale_time = _clean(sale_time)
     campaign_name = _clean(campaign_name)
@@ -226,6 +228,8 @@ def _build_notification_text(data: dict, daily_count: int | None = None, kpi_dai
     if campaign_name:
         lines.append(f"📣 <b>КАМПАНИЯ:</b> <code>{campaign_name}</code>")
     lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
+    if sub_id_2:
+        lines.append(f"📌 <b>SubID2:</b> <code>{sub_id_2}</code>")
     if daily_count is not None:
         lines.append(f"📈 <b>ДЕПОЗИТОВ ЗА ДЕНЬ:</b> <code>{daily_count}</code>")
     # KPI progress if available
