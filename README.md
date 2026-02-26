@@ -65,7 +65,7 @@ Content-Type: application/json
 
 {
 	"days": 7,        // optional horizon, default 7
-	"dry_run": true,   // set false to actually message and mark telegram_sent
+	"dry_run": false,  // по умолчанию false — сообщения отправляются; true = только проверка
 	"token": "..."     // optional fallback if you cannot send Authorization header
 }
 ```

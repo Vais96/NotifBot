@@ -58,7 +58,7 @@ class DomainNotifyRequest(BaseModel):
 
 class IPNotifyRequest(BaseModel):
     days: int = Field(default=7, ge=0, le=365)
-    dry_run: bool = Field(default=True)
+    dry_run: bool = Field(default=False, description="True = только проверка без отправки; по умолчанию отправляем")
     token: Optional[str] = None
 
 
