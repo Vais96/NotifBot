@@ -94,7 +94,8 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     users = await db.list_users()
     me = next((u for u in users if u["telegram_id"] == actor_id), None)
     my_role = (me or {}).get("role", "buyer")
-    if actor_id in ADMIN_IDS:
+    # Админ: по env ADMINS или по роли в БД — видит всех пользователей в отчётах
+    if actor_id in ADMIN_IDS or (me and me.get("role") == "admin"):
         my_role = "admin"
     # Помощник в отчётах — только как «зритель»:
     # видит депозиты ТОЛЬКО назначенного байера и сам в отчётах не фигурирует.
@@ -104,10 +105,12 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
             return [buyer_id]
         return []
     allowed_roles = {"buyer", "lead", "mentor", "head"}
-    if my_role in ("admin", "head"):
-        # Админ/голова должны видеть всю картину: берём всех активных пользователей,
-        # независимо от роли (чтобы не терять данные при нетипичных ролях).
-        return [int(u["telegram_id"]) for u in users if u.get("is_active")]
+    if my_role == "admin":
+        # Админ видит всю картину — по всем пользователям, независимо от роли/флага is_active.
+        return [int(u["telegram_id"]) for u in users]
+    if my_role == "head":
+        # Голова видит всех активных байеров/лидов/менторов.
+        return [int(u["telegram_id"]) for u in users if u.get("is_active") and (u.get("role") in allowed_roles)]
     lead_team_ids = await db.list_user_lead_teams(actor_id)
     scoped_ids: list[int] = []
     if lead_team_ids:
