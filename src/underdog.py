@@ -1022,6 +1022,8 @@ class DomainNotifier:
 
         user_map = await db.fetch_users_by_usernames(list(per_handle.keys()))
 
+        send_counter = 0  # simple rate limiter: 3 messages, then small pause
+
         for handle, domain_entries in per_handle.items():
             user = user_map.get(handle)
             if not user:
@@ -1055,9 +1057,18 @@ class DomainNotifier:
                 continue
 
             try:
-                await self.bot.send_message(int(user["telegram_id"]), text)
+                msg = await self.bot.send_message(int(user["telegram_id"]), text)
+                send_counter += 1
+                if not dry_run and send_counter % 3 == 0:
+                    await asyncio.sleep(1.0)
                 stats.notified_users += 1
                 stats.notified_domains += len(domain_entries)
+                logger.info(
+                    "Telegram domain notify sent",
+                    telegram_id=user.get("telegram_id"),
+                    message_id=getattr(msg, "message_id", None),
+                    domains_count=len(domain_entries),
+                )
                 # Дублируем отправленное сообщение всем админам для контроля.
                 await self._notify_admins_copy(text)
                 for entry in domain_entries:
@@ -1274,6 +1285,8 @@ class IPNotifier:
 
         user_map = await db.fetch_users_by_usernames(list(per_handle.keys()))
 
+        send_counter = 0  # simple rate limiter: 3 messages, then small pause
+
         for handle, ip_entries in per_handle.items():
             user = user_map.get(handle)
             if not user:
@@ -1307,13 +1320,17 @@ class IPNotifier:
 
             try:
                 telegram_id = int(user["telegram_id"])
-                await self.bot.send_message(telegram_id, text)
+                msg = await self.bot.send_message(telegram_id, text)
+                send_counter += 1
+                if not dry_run and send_counter % 3 == 0:
+                    await asyncio.sleep(1.0)
                 stats.notified_users += 1
                 stats.notified_ips += len(ip_entries)
                 logger.info(
                     "Sent IP expiration notification",
                     handle=handle,
                     telegram_id=telegram_id,
+                    message_id=getattr(msg, "message_id", None),
                     ips_count=len(ip_entries),
                 )
                 for entry in ip_entries:
