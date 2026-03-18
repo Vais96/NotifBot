@@ -1,9 +1,11 @@
 """YouTube video download handlers."""
 
 import shutil
+import urllib.parse
 from typing import Optional
 
 from aiogram.types import FSInputFile, Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..dispatcher import dp
 from .. import db
@@ -15,6 +17,39 @@ from ..services.youtube import (
     YoutubeVideoTooLarge,
 )
 from loguru import logger
+
+
+def _build_savefrom_urls(youtube_url: str) -> tuple[str, str]:
+    """Return (ssyoutube_url, savefrom_url) for manual download flow."""
+    url = (youtube_url or "").strip()
+    if url.startswith("https://www.youtube.com/"):
+        ss_url = "https://www.ssyoutube.com/" + url[len("https://www.youtube.com/") :]
+    elif url.startswith("http://www.youtube.com/"):
+        ss_url = "https://www.ssyoutube.com/" + url[len("http://www.youtube.com/") :]
+    elif url.startswith("https://youtube.com/"):
+        ss_url = "https://www.ssyoutube.com/" + url[len("https://youtube.com/") :]
+    elif url.startswith("http://youtube.com/"):
+        ss_url = "https://www.ssyoutube.com/" + url[len("http://youtube.com/") :]
+    elif url.startswith("https://m.youtube.com/"):
+        ss_url = "https://www.ssyoutube.com/" + url[len("https://m.youtube.com/") :]
+    elif url.startswith("http://m.youtube.com/"):
+        ss_url = "https://www.ssyoutube.com/" + url[len("http://m.youtube.com/") :]
+    else:
+        # Fallback: just prefix scheme-less url; SaveFrom itself will resolve.
+        ss_url = "https://www.ssyoutube.com/" + url.lstrip("/")
+    encoded = urllib.parse.quote(url, safe="")
+    savefrom_url = f"https://ru.savefrom.net/246rR/#url={encoded}&utm_source=youtube.com&utm_medium=short_domains&utm_campaign=ssyoutube.com"
+    return ss_url, savefrom_url
+
+
+def _savefrom_kb(youtube_url: str) -> InlineKeyboardMarkup:
+    ss_url, savefrom_url = _build_savefrom_urls(youtube_url)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть в SaveFrom (ssyoutube)", url=savefrom_url)],
+            [InlineKeyboardButton(text="Открыть ssyoutube ссылку", url=ss_url)],
+        ]
+    )
 
 
 async def handle_youtube_download(message: Message) -> bool:
@@ -50,15 +85,15 @@ async def handle_youtube_download(message: Message) -> bool:
         size_mb = exc.size_bytes / (1024 * 1024)
         response = (
             f"Видео слишком большое для отправки (~{size_mb:.1f} MB, лимит 48 MB). "
-            "Попробуйте ссылку на более короткий ролик или '-' чтобы отменить."
+            "Попробуйте ссылку на более короткий ролик или скачайте вручную по кнопке ниже."
         )
         if status_msg:
             try:
-                await status_msg.edit_text(response)
+                await status_msg.edit_text(response, reply_markup=_savefrom_kb(text))
             except Exception:
-                await message.answer(response)
+                await message.answer(response, reply_markup=_savefrom_kb(text))
         else:
-            await message.answer(response)
+            await message.answer(response, reply_markup=_savefrom_kb(text))
         return True
     except YoutubeDownloadError as exc:
         logger.warning("Ошибка скачивания видео YouTube", error=str(exc))
@@ -73,13 +108,14 @@ async def handle_youtube_download(message: Message) -> bool:
             if detail and len(detail) < 200:  # Показываем короткие детали
                 response += f"\nПричина: {detail}"
         
+        # Предлагаем ручной вариант (SaveFrom) как fallback
         if status_msg:
             try:
-                await status_msg.edit_text(response)
+                await status_msg.edit_text(response, reply_markup=_savefrom_kb(text))
             except Exception:
-                await message.answer(response)
+                await message.answer(response, reply_markup=_savefrom_kb(text))
         else:
-            await message.answer(response)
+            await message.answer(response, reply_markup=_savefrom_kb(text))
         return True
     except Exception as exc:
         logger.exception("Непредвиденная ошибка при скачивании видео YouTube", exc_info=exc)
