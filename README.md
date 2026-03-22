@@ -72,7 +72,23 @@ Content-Type: application/json
 
 The helper fetches `/api/v2/ip`, filters records with `expires_at <= today + days` and `telegram_sent=0`, notifies matching buyers, then PATCH-es `/api/v2/ip/{id}/telegram-sent`.
 
-CLI example:
+**Важно:** флаг `telegram_sent` в Underdog выставляется **только после** успешной отправки в Telegram, когда Bot API вернул сообщение с `message_id`. Без этого PATCH не выполняется.
+
+**Список IP:** `GET /api/v2/ip` — считаем, что Underdog уже отдаёт только те записи, по которым нужно уведомление; **дополнительный фильтр по дате на стороне бота не применяется** (поле `days` в теле запроса оставлено для совместимости, но не сужает выборку).
+
+Проверка без отправки (тот же код, что и HTTP, но `dry_run`):
+
+```
+python -m src.underdog --notify-ips --ip-days 7
+```
+
+Сырой ответ API (все IP из Underdog):
+
+```
+python -m src.underdog --ips
+```
+
+CLI example (реальная рассылка — то же `IPNotifier`, что и `POST /underdog/ip/notify` с `orders_bot`):
 
 ```
 python -m src.underdog --notify-ips --ip-days 7 --apply

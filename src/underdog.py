@@ -1071,19 +1071,26 @@ class DomainNotifier:
                 )
                 # Дублируем отправленное сообщение всем админам для контроля.
                 await self._notify_admins_copy(text)
-                for entry in domain_entries:
-                    domain_id = entry["raw"].get("id")
-                    if domain_id is None:
-                        continue
-                    try:
-                        await self.underdog.mark_domain_telegram_sent(int(domain_id))
-                    except Exception as exc:
-                        stats.errors += 1
-                        logger.warning(
-                            "Failed to mark domain telegram_sent",
-                            domain_id=domain_id,
-                            error=str(exc),
-                        )
+                if not _telegram_message_confirmed(msg):
+                    stats.errors += 1
+                    logger.error(
+                        "Telegram returned message without message_id — не помечаем domain telegram_sent в Underdog",
+                        telegram_id=user.get("telegram_id"),
+                    )
+                else:
+                    for entry in domain_entries:
+                        domain_id = entry["raw"].get("id")
+                        if domain_id is None:
+                            continue
+                        try:
+                            await self.underdog.mark_domain_telegram_sent(int(domain_id))
+                        except Exception as exc:
+                            stats.errors += 1
+                            logger.warning(
+                                "Failed to mark domain telegram_sent",
+                                domain_id=domain_id,
+                                error=str(exc),
+                            )
             except Exception as exc:
                 stats.errors += 1
                 logger.warning(
@@ -1221,6 +1228,11 @@ class IPNotifier:
     admin_ids: Sequence[int]
 
     async def notify_expiring_ips(self, *, dry_run: bool = True, days: int = 7) -> IPNotifierStats:
+        """
+        Список IP приходит с Underdog API уже отфильтрованным (кому нужно уведомление).
+        Клиентский фильтр по горизонту дат не применяем; параметр days оставлен для совместимости API/CLI.
+        """
+        _ = days  # совместимость с POST /underdog/ip/notify и CLI --ip-days
         ips = await self.underdog.fetch_ips()
         stats = IPNotifierStats(total_ips=len(ips))
         if not ips:
@@ -1228,13 +1240,12 @@ class IPNotifier:
 
         logger.info(
             "IP notify",
-            horizon_days=days,
             ips_count=len(ips),
             bot_orders_bot=bool(settings.orders_bot_token),
+            note="список IP с API — без доп. фильтра по дате на нашей стороне",
         )
         per_handle: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         today = datetime.now(timezone.utc).date()
-        cutoff = today + timedelta(days=max(0, int(days)))
 
         for ip_entry in ips:
             if _is_ip_sent(ip_entry):
@@ -1245,10 +1256,7 @@ class IPNotifier:
                 or ip_entry.get("expires")
                 or ip_entry.get("expiration")
             )
-            if not expires_at:
-                continue
-            if expires_at > cutoff:
-                continue
+            days_left = (expires_at - today).days if expires_at else None
             if not handle:
                 stats.missing_contact += 1
                 stats.unknown_items.append(
@@ -1263,7 +1271,7 @@ class IPNotifier:
                     entries=[{
                         "raw": ip_entry,
                         "expires_at": expires_at,
-                        "days_left": (expires_at - today).days if expires_at else None,
+                        "days_left": days_left,
                         "display_handle": raw_handle,
                         "owner_name": owner_name,
                     }],
@@ -1274,7 +1282,7 @@ class IPNotifier:
                 {
                     "raw": ip_entry,
                     "expires_at": expires_at,
-                    "days_left": (expires_at - today).days if expires_at else None,
+                    "days_left": days_left,
                     "display_handle": raw_handle,
                     "owner_name": owner_name,
                 }
@@ -1333,19 +1341,34 @@ class IPNotifier:
                     message_id=getattr(msg, "message_id", None),
                     ips_count=len(ip_entries),
                 )
-                for entry in ip_entries:
-                    ip_id = entry["raw"].get("id")
-                    if ip_id is None:
-                        continue
-                    try:
-                        await self.underdog.mark_ip_telegram_sent(int(ip_id))
-                    except Exception as exc:  # pragma: no cover
-                        stats.errors += 1
-                        logger.warning(
-                            "Failed to mark IP telegram_sent: ip_id=%s path=PATCH /api/v2/ip/{id}/telegram-sent error=%s",
-                            ip_id,
-                            exc,
-                        )
+                # В Underdog помечаем telegram_sent только если Telegram реально вернул сообщение с message_id
+                if not _telegram_message_confirmed(msg):
+                    stats.errors += 1
+                    logger.error(
+                        "Telegram returned message without message_id — не помечаем IP telegram_sent в Underdog",
+                        handle=handle,
+                        telegram_id=telegram_id,
+                    )
+                    await self._notify_admins_ip_delivery_error(
+                        handle=handle,
+                        entries=ip_entries,
+                        error_text="Telegram: ответ без message_id, Underdog не обновлён",
+                        dry_run=dry_run,
+                    )
+                else:
+                    for entry in ip_entries:
+                        ip_id = entry["raw"].get("id")
+                        if ip_id is None:
+                            continue
+                        try:
+                            await self.underdog.mark_ip_telegram_sent(int(ip_id))
+                        except Exception as exc:  # pragma: no cover
+                            stats.errors += 1
+                            logger.warning(
+                                "Failed to mark IP telegram_sent: ip_id=%s path=PATCH /api/v2/ip/{id}/telegram-sent error=%s",
+                                ip_id,
+                                exc,
+                            )
             except (TelegramForbiddenError, TelegramBadRequest) as exc:
                 stats.errors += 1
                 logger.warning(
@@ -1857,6 +1880,14 @@ def _build_ip_notification(entries: List[Dict[str, Any]]) -> str:
         ]
     )
     return "\n".join(lines).rstrip()
+
+
+def _telegram_message_confirmed(msg: Any) -> bool:
+    """True only if Bot API вернул объект сообщения с message_id (успешная отправка)."""
+    if msg is None:
+        return False
+    mid = getattr(msg, "message_id", None)
+    return mid is not None
 
 
 def _is_ip_sent(item: Dict[str, Any]) -> bool:
