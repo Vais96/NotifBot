@@ -839,6 +839,7 @@ async def notify_expiring_ips_endpoint(
         dry_run=payload.dry_run,
         days=payload.days,
         bot_instance=orders_bot,
+        admin_bot_instance=bot,
     )
     return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
 

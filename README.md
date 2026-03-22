@@ -70,11 +70,15 @@ Content-Type: application/json
 }
 ```
 
-The helper fetches `/api/v2/ip`, filters records with `expires_at <= today + days` and `telegram_sent=0`, notifies matching buyers, then PATCH-es `/api/v2/ip/{id}/telegram-sent`.
+The helper fetches `/api/v2/ip`, пропускает уже помеченные (`telegram_sent` и т.п.), уведомляет покупателей через **orders bot**, помечает IP в Underdog через PATCH `/api/v2/ip/{id}/telegram-sent`.
+
+**Админам** служебные сообщения (ошибки доставки, неизвестный username) идут через **основной бот** (`admin_bot_instance`), если он настроен в приложении — так алерты доходят даже если админ не открывал чат с orders bot.
 
 **Важно:** флаг `telegram_sent` в Underdog выставляется **только после** успешной отправки в Telegram, когда Bot API вернул сообщение с `message_id`. Без этого PATCH не выполняется.
 
 **Список IP:** `GET /api/v2/ip` — считаем, что Underdog уже отдаёт только те записи, по которым нужно уведомление; **дополнительный фильтр по дате на стороне бота не применяется** (поле `days` в теле запроса оставлено для совместимости, но не сужает выборку).
+
+**Ответ `stats`:** помимо счётчиков есть детализация — `delivered` (кому ушло в TG: handle, `telegram_id`, `message_id`, список IP), `send_failures` (кому нет: `exc_type`, `error`), `underdog_mark_failures` (PATCH в Underdog не прошёл после успешной отправки), `dry_run_preview` при `dry_run: true`. То же дублируется в **логах** в конце прогона одной сводкой.
 
 Проверка без отправки (тот же код, что и HTTP, но `dry_run`):
 

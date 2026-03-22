@@ -607,6 +607,11 @@ class IPNotifierStats:
     unknown_user: int = 0
     errors: int = 0
     unknown_items: List[Dict[str, Any]] = field(default_factory=list)
+    # Детализация для логов и ответа API: кому ушло, кому нет, почему
+    delivered: List[Dict[str, Any]] = field(default_factory=list)
+    send_failures: List[Dict[str, Any]] = field(default_factory=list)
+    underdog_mark_failures: List[Dict[str, Any]] = field(default_factory=list)
+    dry_run_preview: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self, *, dry_run: Optional[bool] = None) -> Dict[str, Any]:
         payload = {
@@ -618,10 +623,74 @@ class IPNotifierStats:
             "unknown_user": self.unknown_user,
             "errors": self.errors,
             "unknown_items": self.unknown_items,
+            "delivered": self.delivered,
+            "send_failures": self.send_failures,
+            "underdog_mark_failures": self.underdog_mark_failures,
+            "dry_run_preview": self.dry_run_preview,
         }
         if dry_run is not None:
             payload["dry_run"] = dry_run
         return payload
+
+
+def _log_ip_notify_delivery_report(stats: IPNotifierStats, *, dry_run: bool) -> None:
+    """Сводка в лог: кому ушло, кому нет, ошибки Telegram и PATCH Underdog."""
+    if dry_run:
+        logger.info(
+            "IP notify (dry-run): план — {} получателей (preview)",
+            len(stats.dry_run_preview),
+        )
+        if stats.dry_run_preview:
+            logger.info(
+                "IP notify dry-run preview:\n{}",
+                json.dumps(stats.dry_run_preview, ensure_ascii=False, indent=2),
+            )
+        if stats.unknown_user or stats.missing_contact:
+            logger.info(
+                "IP notify dry-run: без рассылки — unknown_user={}, missing_contact={}, см. unknown_items",
+                stats.unknown_user,
+                stats.missing_contact,
+            )
+        return
+
+    logger.info(
+        "IP notify итог: доставлено записей={}, ошибок отправки в TG={}, сбоев пометки в Underdog={}",
+        len(stats.delivered),
+        len(stats.send_failures),
+        len(stats.underdog_mark_failures),
+    )
+    if stats.unknown_user or stats.missing_contact:
+        logger.info(
+            "IP notify без рассылки: unknown_user={} (нет в tg_users), missing_contact={} (нет username у IP)",
+            stats.unknown_user,
+            stats.missing_contact,
+        )
+    if stats.unknown_items:
+        preview = stats.unknown_items[:50]
+        extra = len(stats.unknown_items) - len(preview)
+        logger.info(
+            "IP notify — не рассылали по этим IP (нет контакта / нет в БД), записей={}{}:\n{}",
+            len(stats.unknown_items),
+            f", показано {len(preview)}" if extra > 0 else "",
+            json.dumps(preview, ensure_ascii=False, indent=2),
+        )
+        if extra > 0:
+            logger.info("IP notify — … и ещё {} записей в unknown_items", extra)
+    if stats.delivered:
+        logger.info(
+            "IP notify — кому отправилось:\n{}",
+            json.dumps(stats.delivered, ensure_ascii=False, indent=2),
+        )
+    if stats.send_failures:
+        logger.warning(
+            "IP notify — кому НЕ отправилось (ошибка Telegram):\n{}",
+            json.dumps(stats.send_failures, ensure_ascii=False, indent=2),
+        )
+    if stats.underdog_mark_failures:
+        logger.warning(
+            "IP notify — в TG ушло, но PATCH telegram-sent в Underdog не удался:\n{}",
+            json.dumps(stats.underdog_mark_failures, ensure_ascii=False, indent=2),
+        )
 
 
 @dataclass(slots=True)
@@ -1226,6 +1295,28 @@ class IPNotifier:
     underdog: UnderdogClient
     bot: Bot
     admin_ids: Sequence[int]
+    # Сообщения пользователям — через bot (часто orders_bot). Алерты админам: сначала admin_bot (главный бот),
+    # иначе админы без чата с orders bot не получат уведомления.
+    admin_bot: Optional[Bot] = None
+
+    async def _send_admin_dm(self, admin_id: int, text: str) -> None:
+        """Пробуем admin_bot (главный), затем bot — чтобы алерты доходили, если админ только в основном боте."""
+        last_exc: Optional[BaseException] = None
+        bots: List[Bot] = []
+        if self.admin_bot is not None:
+            bots.append(self.admin_bot)
+        if self.admin_bot is None or self.bot is not self.admin_bot:
+            bots.append(self.bot)
+        if not bots:
+            bots = [self.bot]
+        for b in bots:
+            try:
+                await b.send_message(int(admin_id), text)
+                return
+            except Exception as exc:  # pragma: no cover
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
 
     async def notify_expiring_ips(self, *, dry_run: bool = True, days: int = 7) -> IPNotifierStats:
         """
@@ -1236,6 +1327,7 @@ class IPNotifier:
         ips = await self.underdog.fetch_ips()
         stats = IPNotifierStats(total_ips=len(ips))
         if not ips:
+            logger.info("IP notify: список IP пуст, рассылка не требуется")
             return stats
 
         logger.info(
@@ -1289,6 +1381,7 @@ class IPNotifier:
             )
 
         if not per_handle:
+            _log_ip_notify_delivery_report(stats, dry_run=dry_run)
             return stats
 
         user_map = await db.fetch_users_by_usernames(list(per_handle.keys()))
@@ -1324,6 +1417,17 @@ class IPNotifier:
                 )
                 stats.notified_users += 1
                 stats.notified_ips += len(ip_entries)
+                stats.dry_run_preview.append(
+                    {
+                        "handle": handle,
+                        "telegram_id": user.get("telegram_id"),
+                        "ips_count": len(ip_entries),
+                        "ips": [
+                            e["raw"].get("ip") or e["raw"].get("address")
+                            for e in ip_entries
+                        ],
+                    }
+                )
                 continue
 
             try:
@@ -1344,6 +1448,14 @@ class IPNotifier:
                 # В Underdog помечаем telegram_sent только если Telegram реально вернул сообщение с message_id
                 if not _telegram_message_confirmed(msg):
                     stats.errors += 1
+                    stats.send_failures.append(
+                        {
+                            "handle": handle,
+                            "telegram_id": telegram_id,
+                            "exc_type": "TelegramResponse",
+                            "error": "ответ без message_id, Underdog не обновлён",
+                        }
+                    )
                     logger.error(
                         "Telegram returned message without message_id — не помечаем IP telegram_sent в Underdog",
                         handle=handle,
@@ -1356,6 +1468,18 @@ class IPNotifier:
                         dry_run=dry_run,
                     )
                 else:
+                    stats.delivered.append(
+                        {
+                            "handle": handle,
+                            "telegram_id": telegram_id,
+                            "message_id": getattr(msg, "message_id", None),
+                            "ips_count": len(ip_entries),
+                            "ips": [
+                                e["raw"].get("ip") or e["raw"].get("address")
+                                for e in ip_entries
+                            ],
+                        }
+                    )
                     for entry in ip_entries:
                         ip_id = entry["raw"].get("id")
                         if ip_id is None:
@@ -1364,6 +1488,15 @@ class IPNotifier:
                             await self.underdog.mark_ip_telegram_sent(int(ip_id))
                         except Exception as exc:  # pragma: no cover
                             stats.errors += 1
+                            stats.underdog_mark_failures.append(
+                                {
+                                    "handle": handle,
+                                    "telegram_id": telegram_id,
+                                    "ip_id": int(ip_id),
+                                    "exc_type": type(exc).__name__,
+                                    "error": str(exc),
+                                }
+                            )
                             logger.warning(
                                 "Failed to mark IP telegram_sent: ip_id=%s path=PATCH /api/v2/ip/{id}/telegram-sent error=%s",
                                 ip_id,
@@ -1371,6 +1504,18 @@ class IPNotifier:
                             )
             except (TelegramForbiddenError, TelegramBadRequest) as exc:
                 stats.errors += 1
+                stats.send_failures.append(
+                    {
+                        "handle": handle,
+                        "telegram_id": user.get("telegram_id"),
+                        "exc_type": type(exc).__name__,
+                        "error": str(exc),
+                        "ips": [
+                            e["raw"].get("ip") or e["raw"].get("address")
+                            for e in ip_entries
+                        ],
+                    }
+                )
                 logger.warning(
                     "IP notification not delivered (user blocked bot or chat not found)",
                     handle=handle,
@@ -1385,9 +1530,22 @@ class IPNotifier:
                 )
             except Exception as exc:  # pragma: no cover
                 stats.errors += 1
+                stats.send_failures.append(
+                    {
+                        "handle": handle,
+                        "telegram_id": user.get("telegram_id"),
+                        "exc_type": type(exc).__name__,
+                        "error": str(exc),
+                        "ips": [
+                            e["raw"].get("ip") or e["raw"].get("address")
+                            for e in ip_entries
+                        ],
+                    }
+                )
                 logger.warning(
                     "Failed to send IP expiration message",
                     handle=handle,
+                    exc_type=type(exc).__name__,
                     error=str(exc),
                 )
                 await self._notify_admins_ip_delivery_error(
@@ -1400,6 +1558,7 @@ class IPNotifier:
         if stats.unknown_items and dry_run:
             await self._alert_admins(stats.unknown_items)
 
+        _log_ip_notify_delivery_report(stats, dry_run=dry_run)
         return stats
 
     async def _notify_admins_missing_ip(
@@ -1430,12 +1589,13 @@ class IPNotifier:
             return
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await self._send_admin_dm(int(admin_id), text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about missing IP recipient",
                     admin_id=admin_id,
                     handle=handle,
+                    exc_type=type(exc).__name__,
                     error=str(exc),
                 )
 
@@ -1466,12 +1626,13 @@ class IPNotifier:
             return
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await self._send_admin_dm(int(admin_id), text)
             except Exception as exc:  # pragma: no cover
                 logger.warning(
                     "Failed to notify admin about IP delivery error",
                     admin_id=admin_id,
                     handle=handle,
+                    exc_type=type(exc).__name__,
                     error=str(exc),
                 )
 
@@ -1491,11 +1652,12 @@ class IPNotifier:
         text = "\n".join(lines)
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await self._send_admin_dm(int(admin_id), text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about IPs",
                     admin_id=admin_id,
+                    exc_type=type(exc).__name__,
                     error=str(exc),
                 )
 
@@ -2059,14 +2221,20 @@ async def notify_expiring_ips(
     dry_run: bool = True,
     days: int = 7,
     bot_instance: Optional[Bot] = None,
+    admin_bot_instance: Optional[Bot] = None,
 ) -> Dict[str, Any]:
     async with UnderdogClient.from_settings() as client:
         if bot_instance is not None:
-            notifier = IPNotifier(client, bot_instance, settings.admins)
+            notifier = IPNotifier(
+                client,
+                bot_instance,
+                settings.admins,
+                admin_bot=admin_bot_instance,
+            )
             stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
             return stats.to_dict(dry_run=dry_run)
         async with _create_bot() as owned_bot:
-            notifier = IPNotifier(client, owned_bot, settings.admins)
+            notifier = IPNotifier(client, owned_bot, settings.admins, admin_bot=None)
             stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
             return stats.to_dict(dry_run=dry_run)
 
