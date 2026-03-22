@@ -2143,6 +2143,24 @@ def _create_bot() -> Bot:
     )
 
 
+def _orders_and_main_bots_differ() -> bool:
+    """True если orders bot и основной бот — разные токены (нужен отдельный admin_bot для алертов админу)."""
+    o = (settings.orders_bot_token or "").strip()
+    m = (settings.telegram_bot_token or "").strip()
+    return bool(o and m and o != m)
+
+
+def _create_main_bot() -> Bot:
+    """Только TELEGRAM_BOT_TOKEN — для админских DM, когда рассылка идёт через ORDERS_BOT_TOKEN."""
+    token = (settings.telegram_bot_token or "").strip()
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is required when using a separate main bot for admin alerts")
+    return Bot(
+        token=token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
+
 def _create_design_bot() -> Bot:
     token = settings.design_bot_token or settings.telegram_bot_token
     if not settings.design_bot_token:
@@ -2234,6 +2252,25 @@ async def notify_expiring_ips(
             stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
             return stats.to_dict(dry_run=dry_run)
         async with _create_bot() as owned_bot:
+            if admin_bot_instance is not None:
+                notifier = IPNotifier(
+                    client,
+                    owned_bot,
+                    settings.admins,
+                    admin_bot=admin_bot_instance,
+                )
+                stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
+                return stats.to_dict(dry_run=dry_run)
+            if _orders_and_main_bots_differ():
+                async with _create_main_bot() as main_bot:
+                    notifier = IPNotifier(
+                        client,
+                        owned_bot,
+                        settings.admins,
+                        admin_bot=main_bot,
+                    )
+                    stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
+                    return stats.to_dict(dry_run=dry_run)
             notifier = IPNotifier(client, owned_bot, settings.admins, admin_bot=None)
             stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
             return stats.to_dict(dry_run=dry_run)
@@ -2346,8 +2383,23 @@ async def _amain() -> None:
             dry_run = not args.apply
             horizon = max(0, args.ip_days)
             async with _create_bot() as bot_instance:
-                notifier = IPNotifier(client, bot_instance, settings.admins)
-                stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=horizon)
+                if _orders_and_main_bots_differ():
+                    async with _create_main_bot() as admin_bot:
+                        notifier = IPNotifier(
+                            client,
+                            bot_instance,
+                            settings.admins,
+                            admin_bot=admin_bot,
+                        )
+                        stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=horizon)
+                else:
+                    notifier = IPNotifier(
+                        client,
+                        bot_instance,
+                        settings.admins,
+                        admin_bot=None,
+                    )
+                    stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=horizon)
             print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
             return
 
