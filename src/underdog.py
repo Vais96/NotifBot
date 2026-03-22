@@ -116,6 +116,21 @@ def _extract_ips(payload: Any) -> List[Dict[str, Any]]:
     raise UnderdogAPIError("Unexpected IP response shape")
 
 
+def _extract_ip_record_id(raw: Any) -> Optional[int]:
+    """ID записи IP в Underdog (в разных ответах может быть id / Id / ip_id)."""
+    if not isinstance(raw, dict):
+        return None
+    for key in ("id", "Id", "ID", "ip_id", "ipId"):
+        val = raw.get(key)
+        if val is None:
+            continue
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _extract_tickets(payload: Any) -> List[Dict[str, Any]]:
     if isinstance(payload, list):
         return payload
@@ -522,8 +537,27 @@ class UnderdogClient:
         return _extract_ips(resp.json())
 
     async def mark_ip_telegram_sent(self, ip_id: int) -> None:
+        """PATCH telegram-sent; при 429 от Underdog — повтор с backoff (иначе те же IP уходят в рассылку снова)."""
         path = f"{IPS_PATH}/{ip_id}/telegram-sent"
-        await self.request("PATCH", path)
+        max_attempts = 12
+        for attempt in range(max_attempts):
+            try:
+                await self.request("PATCH", path)
+                return
+            except UnderdogAPIError as exc:
+                err_s = str(exc)
+                is_ratelimit = "429" in err_s or "Too Many Attempts" in err_s
+                if is_ratelimit and attempt < max_attempts - 1:
+                    wait_s = min(2.0 * (2**attempt), 90.0)
+                    logger.warning(
+                        "Underdog 429 on PATCH ip telegram-sent, retry",
+                        ip_id=ip_id,
+                        attempt=attempt + 1,
+                        wait_s=round(wait_s, 1),
+                    )
+                    await asyncio.sleep(wait_s)
+                    continue
+                raise
 
     async def fetch_tickets(self) -> List[Dict[str, Any]]:
         resp = await self.request("GET", TICKETS_PATH)
@@ -1318,6 +1352,93 @@ class IPNotifier:
         if last_exc is not None:
             raise last_exc
 
+    async def _mark_ip_entries_in_underdog(
+        self,
+        *,
+        handle: str,
+        telegram_id: int,
+        ip_entries: List[Dict[str, Any]],
+        stats: IPNotifierStats,
+    ) -> None:
+        """
+        После успешной отправки в TG — PATCH telegram-sent для каждого IP.
+        Ошибки только в stats.underdog_mark_failures; наружу не пробрасываем (иначе ложный send_failures).
+        """
+        try:
+            for idx, entry in enumerate(ip_entries):
+                raw = entry.get("raw") if isinstance(entry, dict) else None
+                if not isinstance(raw, dict):
+                    stats.errors += 1
+                    stats.underdog_mark_failures.append(
+                        {
+                            "handle": handle,
+                            "telegram_id": telegram_id,
+                            "ip_id": None,
+                            "exc_type": "ValueError",
+                            "error": "запись IP без dict raw — нет id для PATCH",
+                        }
+                    )
+                    logger.warning(
+                        "IP notify skip PATCH: raw не dict",
+                        handle=handle,
+                        entry_index=idx,
+                    )
+                    continue
+                ip_id = _extract_ip_record_id(raw)
+                if ip_id is None:
+                    stats.errors += 1
+                    stats.underdog_mark_failures.append(
+                        {
+                            "handle": handle,
+                            "telegram_id": telegram_id,
+                            "ip_id": None,
+                            "exc_type": "ValueError",
+                            "error": "в объекте IP нет поля id/Id/ip_id",
+                        }
+                    )
+                    logger.warning(
+                        "IP notify skip PATCH: не извлечён id",
+                        handle=handle,
+                        raw_keys=list(raw.keys())[:40],
+                    )
+                    continue
+                try:
+                    await self.underdog.mark_ip_telegram_sent(ip_id)
+                except Exception as exc:  # pragma: no cover
+                    stats.errors += 1
+                    stats.underdog_mark_failures.append(
+                        {
+                            "handle": handle,
+                            "telegram_id": telegram_id,
+                            "ip_id": ip_id,
+                            "exc_type": type(exc).__name__,
+                            "error": str(exc),
+                        }
+                    )
+                    logger.warning(
+                        "Failed to mark IP telegram_sent: ip_id=%s path=PATCH /api/v2/ip/{id}/telegram-sent error=%s",
+                        ip_id,
+                        exc,
+                    )
+                if idx < len(ip_entries) - 1:
+                    await asyncio.sleep(0.35)
+        except Exception as exc:  # pragma: no cover
+            stats.errors += 1
+            stats.underdog_mark_failures.append(
+                {
+                    "handle": handle,
+                    "telegram_id": telegram_id,
+                    "ip_id": None,
+                    "exc_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            logger.opt(exception=exc).error(
+                "Unexpected error while marking IPs in Underdog after TG send",
+                handle=handle,
+                telegram_id=telegram_id,
+            )
+
     async def notify_expiring_ips(self, *, dry_run: bool = True, days: int = 7) -> IPNotifierStats:
         """
         Список IP приходит с Underdog API уже отфильтрованным (кому нужно уведомление).
@@ -1480,28 +1601,12 @@ class IPNotifier:
                             ],
                         }
                     )
-                    for entry in ip_entries:
-                        ip_id = entry["raw"].get("id")
-                        if ip_id is None:
-                            continue
-                        try:
-                            await self.underdog.mark_ip_telegram_sent(int(ip_id))
-                        except Exception as exc:  # pragma: no cover
-                            stats.errors += 1
-                            stats.underdog_mark_failures.append(
-                                {
-                                    "handle": handle,
-                                    "telegram_id": telegram_id,
-                                    "ip_id": int(ip_id),
-                                    "exc_type": type(exc).__name__,
-                                    "error": str(exc),
-                                }
-                            )
-                            logger.warning(
-                                "Failed to mark IP telegram_sent: ip_id=%s path=PATCH /api/v2/ip/{id}/telegram-sent error=%s",
-                                ip_id,
-                                exc,
-                            )
+                    await self._mark_ip_entries_in_underdog(
+                        handle=handle,
+                        telegram_id=telegram_id,
+                        ip_entries=ip_entries,
+                        stats=stats,
+                    )
             except (TelegramForbiddenError, TelegramBadRequest) as exc:
                 stats.errors += 1
                 stats.send_failures.append(
