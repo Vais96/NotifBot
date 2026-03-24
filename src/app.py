@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timezone, date
 from typing import Dict, Tuple, Optional
 
-from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi import FastAPI, Request, HTTPException, Header, BackgroundTasks
 from fastapi.responses import JSONResponse
 from loguru import logger
 import json
@@ -240,6 +240,207 @@ def _build_notification_text(data: dict, daily_count: int | None = None, kpi_dai
 
     return "\n".join(lines)
 
+
+async def _run_keitaro_postback_job(data: dict) -> None:
+    """Фоновая обработка: Keitaro ждёт ответ ~5 с, иначе cURL 28 — отдаём 200 раньше."""
+    try:
+        result = await _process_keitaro_postback(data)
+        logger.info(
+            "Keitaro postback processed",
+            subid=data.get("subid") or data.get("sub_id"),
+            routed=result.get("routed"),
+            sale=result.get("sale"),
+        )
+    except Exception:
+        logger.exception("Keitaro postback background job failed")
+
+
+async def _process_keitaro_postback(data: dict) -> dict:
+    # Try alias-based routing by campaign_name prefix
+    campaign_name = data.get("campaign_name") or data.get("campaign")
+    alias_key = None
+    if campaign_name:
+        alias_key = (campaign_name.split("_", 1)[0] or "").strip()
+    alias = await db.find_alias(alias_key)
+
+    buyer_id = alias.get("buyer_id") if alias else None
+    if not buyer_id:
+        buyer_id = await db.find_user_for_postback(
+            offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
+            country=data.get("country") or data.get("geo"),
+            source=data.get("source") or data.get("traffic_source_name") or data.get("traffic_source") or data.get("affiliate")
+        )
+
+    # Fallback to an admin if still not routed
+    used_fallback = False
+    if not buyer_id:
+        # Prefer ADMINS env, else try any DB user with admin role
+        if settings.admins:
+            buyer_id = settings.admins[0]
+            used_fallback = True
+        else:
+            try:
+                users = await db.list_users()
+                admin_user = next((u for u in users if (u.get("role") == "admin")), None)
+                if admin_user:
+                    buyer_id = int(admin_user["telegram_id"])  # type: ignore
+                    used_fallback = True
+            except Exception:
+                pass
+    routed_id = None
+    # Log event with final routed user id only if it's a real performer (buyer/lead/mentor); avoid fallback and admin/head
+    try:
+        routed_id = buyer_id
+        if used_fallback and routed_id:
+            routed_id = None
+        else:
+            try:
+                users = await db.list_users()
+                ru = next((u for u in users if u["telegram_id"] == routed_id), None)
+                if ru and (ru.get("role") not in {"buyer", "lead", "mentor", "head"}):
+                    routed_id = None
+            except Exception:
+                pass
+        await db.log_event(data, routed_id)
+    except Exception as e:
+        logger.warning(f"Failed to log event: {e}")
+        routed_id = None
+
+    stats_user_id: int | None = None
+    if routed_id is not None:
+        try:
+            stats_user_id = int(routed_id)
+        except Exception as e:
+            logger.warning(f"Failed to coerce routed user id {routed_id}: {e}")
+
+    # do not return early: admins should still receive notifications even if not routed
+
+    # Map status and accept only sale-like statuses
+    raw_status_value = (
+        data.get("status")
+        or data.get("conversion_status")
+        or data.get("conversion.status")
+        or data.get("status_name")
+        or data.get("state")
+        or data.get("action")
+        or ""
+    )
+    raw_status = str(raw_status_value).lower()
+    sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
+    is_sale = raw_status in sale_like
+    payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
+    currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
+    offer_id = data.get("offer_id") or data.get("offer.id")
+    offer_name = data.get("offer_name") or data.get("offer.name") or data.get("offer")
+    subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
+    sub_id_3 = data.get("sub_id_3") or data.get("subid3")
+    sale_time = data.get("conversion_sale_time") or data.get("conversion.sale_time") or data.get("conversion_time")
+    campaign_name = data.get("campaign_name") or data.get("campaign.name")
+    # Clean unexpanded placeholders like "{conversion.sale_time}"
+    def _clean(v):
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("{") and s.endswith("}"):
+                return None
+        return v
+    payout = _clean(payout)
+    currency = _clean(currency)
+    offer_id = _clean(offer_id)
+    offer_name = _clean(offer_name)
+    subid = _clean(subid)
+    sub_id_3 = _clean(sub_id_3)
+    sale_time = _clean(sale_time)
+    campaign_name = _clean(campaign_name)
+
+    # Build text via unified formatter (with optional daily deposits count)
+    # Serialize by user_id so concurrent postbacks for the same buyer get correct sequential daily counts
+    daily_count: int | None = None
+    kpi_daily_goal: int | None = None
+    if is_sale and stats_user_id is not None:
+        db_daily_count: int | None = None
+        async with _user_locks_guard:
+            user_lock = _lock_for_user(stats_user_id)
+        async with user_lock:
+            try:
+                db_daily_count = await db.count_today_user_sales(stats_user_id)
+            except Exception as e:
+                logger.warning(f"Failed to get daily count: {e}")
+            try:
+                daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
+            except Exception as e:
+                logger.warning(f"Failed to adjust daily counter: {e}")
+                daily_count = db_daily_count
+        try:
+            kpi = await db.get_kpi(stats_user_id)
+            kpi_daily_goal = kpi.get("daily_goal")
+        except Exception as e:
+            logger.warning(f"Failed to get KPI: {e}")
+    text = _build_notification_text(data, daily_count=daily_count, kpi_daily_goal=kpi_daily_goal)
+
+    # Determine recipients
+    recipient_ids: set[int] = set()
+    try:
+        users = await db.list_users()
+        # admins always receive all notifications
+        admins_db = [u for u in users if u.get("role") == "admin" and u.get("is_active")]
+        for u in admins_db:
+            recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+        # plus ADMINS from env, if provided
+        if settings.admins:
+            for aid in settings.admins:
+                try:
+                    recipient_ids.add(int(aid))
+                except Exception:
+                    pass
+        # for sale events, also notify buyer, team leads (or alias lead), and all heads
+        if is_sale:
+            if buyer_id:
+                recipient_ids.add(int(buyer_id))
+            if alias:
+                alias_lead_id = alias.get("lead_id")
+                if alias_lead_id:
+                    recipient_ids.add(int(alias_lead_id))
+            buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
+            if buyer_user and buyer_user.get("team_id"):
+                team_id = buyer_user.get("team_id")
+                # If buyer is NOT a mentor, notify team leads; mentors' own deposits are not visible to leads
+                if (buyer_user.get("role") != "mentor"):
+                    try:
+                        lead_ids = await db.list_team_leads(int(team_id))
+                        for lid in lead_ids:
+                            recipient_ids.add(int(lid))
+                    except Exception as e:
+                        logger.warning(f"Failed to include team leads: {e}")
+                # mentors subscribed to this team
+                try:
+                    mentor_ids = await db.list_team_mentors(int(team_id))
+                    for mid in mentor_ids:
+                        recipient_ids.add(int(mid))
+                except Exception as e:
+                    logger.warning(f"Failed to include mentors: {e}")
+            heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
+            for u in heads:
+                recipient_ids.add(int(u["telegram_id"]))  # type: ignore
+            # помощники, привязанные к этому байеру — тоже получают уведомление о депозите
+            if buyer_id:
+                try:
+                    helper_ids = await db.list_helpers_by_buyer(int(buyer_id))
+                    for hid in helper_ids:
+                        recipient_ids.add(hid)
+                except Exception as e:
+                    logger.warning(f"Failed to include helpers for buyer: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to expand recipients: {e}")
+
+    # Send message to all recipients (deduped)
+    for rid in recipient_ids:
+        try:
+            await notify_buyer(rid, text)
+        except Exception as e:
+            logger.warning(f"Notify failed for {rid}: {e}")
+    return {"ok": True, "routed": bool(buyer_id), "buyer_id": buyer_id, "fallback": used_fallback, "sale": is_sale}
+
+
 @app.on_event("startup")
 async def on_startup():
     try:
@@ -341,7 +542,11 @@ async def db_ping():
         raise HTTPException(500, f"DB ping failed: {e}")
 
 @app.post("/keitaro/postback")
-async def keitaro_postback(request: Request, authorization: str | None = Header(default=None)):
+async def keitaro_postback(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
     # Parse body leniently; if anything fails, continue with query params only
     content_type = (request.headers.get("content-type") or "").lower()
     data = {}
@@ -378,243 +583,17 @@ async def keitaro_postback(request: Request, authorization: str | None = Header(
     if not _has_meaningful_postback_fields(data):
         return JSONResponse({"success": 200})
 
-    # Try alias-based routing by campaign_name prefix
-    campaign_name = data.get("campaign_name") or data.get("campaign")
-    alias_key = None
-    if campaign_name:
-        alias_key = (campaign_name.split("_", 1)[0] or "").strip()
-    alias = await db.find_alias(alias_key)
-
-    buyer_id = alias.get("buyer_id") if alias else None
-    if not buyer_id:
-        buyer_id = await db.find_user_for_postback(
-            offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
-            country=data.get("country") or data.get("geo"),
-            source=data.get("source") or data.get("traffic_source_name") or data.get("traffic_source") or data.get("affiliate")
-        )
-
-    # Fallback to an admin if still not routed
-    used_fallback = False
-    if not buyer_id:
-        # Prefer ADMINS env, else try any DB user with admin role
-        if settings.admins:
-            buyer_id = settings.admins[0]
-            used_fallback = True
-        else:
-            try:
-                users = await db.list_users()
-                admin_user = next((u for u in users if (u.get("role") == "admin")), None)
-                if admin_user:
-                    buyer_id = int(admin_user["telegram_id"])  # type: ignore
-                    used_fallback = True
-            except Exception:
-                pass
-    routed_id = None
-    # Log event with final routed user id only if it's a real performer (buyer/lead/mentor); avoid fallback and admin/head
-    try:
-        routed_id = buyer_id
-        if used_fallback and routed_id:
-            routed_id = None
-        else:
-            try:
-                users = await db.list_users()
-                ru = next((u for u in users if u["telegram_id"] == routed_id), None)
-                if ru and (ru.get("role") not in {"buyer", "lead", "mentor", "head"}):
-                    routed_id = None
-            except Exception:
-                pass
-        await db.log_event(data, routed_id)
-    except Exception as e:
-        logger.warning(f"Failed to log event: {e}")
-        routed_id = None
-
-    stats_user_id: int | None = None
-    if routed_id is not None:
-        try:
-            stats_user_id = int(routed_id)
-        except Exception as e:
-            logger.warning(f"Failed to coerce routed user id {routed_id}: {e}")
-
-    # do not return early: admins should still receive notifications even if not routed
-
-    # Map status and accept only sale-like statuses
-    raw_status_value = (
-        data.get("status")
-        or data.get("conversion_status")
-        or data.get("conversion.status")
-        or data.get("status_name")
-        or data.get("state")
-        or data.get("action")
-        or ""
-    )
-    raw_status = str(raw_status_value).lower()
-    sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
-    is_sale = raw_status in sale_like
-    payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
-    currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
-    offer_id = data.get("offer_id") or data.get("offer.id")
-    offer_name = data.get("offer_name") or data.get("offer.name") or data.get("offer")
-    subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
-    sub_id_3 = data.get("sub_id_3") or data.get("subid3")
-    sale_time = data.get("conversion_sale_time") or data.get("conversion.sale_time") or data.get("conversion_time")
-    campaign_name = data.get("campaign_name") or data.get("campaign.name")
-    # Clean unexpanded placeholders like "{conversion.sale_time}"
-    def _clean(v):
-        if isinstance(v, str):
-            s = v.strip()
-            if s.startswith("{") and s.endswith("}"):
-                return None
-        return v
-    payout = _clean(payout)
-    currency = _clean(currency)
-    offer_id = _clean(offer_id)
-    offer_name = _clean(offer_name)
-    subid = _clean(subid)
-    sub_id_3 = _clean(sub_id_3)
-    sale_time = _clean(sale_time)
-    campaign_name = _clean(campaign_name)
-    # Helpers: round profit to integer and format conversion time as yyyy-mm-dd / HH:MM in UTC
-    def _format_payout(p):
-        if p is None:
-            return None
-        try:
-            s = str(p).replace(",", ".").strip()
-            value = float(s)
-            return str(int(round(value)))
-        except Exception:
-            return str(p)
-
-    def _format_sale_time(v):
-        from datetime import datetime, timezone
-        if v is None:
-            return None
-        try:
-            if isinstance(v, (int, float)):
-                ts = float(v)
-                if ts > 1e12:
-                    ts = ts / 1000.0
-                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                return dt.strftime("%Y-%m-%d / %H:%M")
-            s = str(v).strip()
-            if s.isdigit():
-                ts = float(s)
-                if ts > 1e12:
-                    ts = ts / 1000.0
-                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                return dt.strftime("%Y-%m-%d / %H:%M")
-            s_norm = s.replace("Z", "+00:00")
-            try:
-                dt = datetime.fromisoformat(s_norm)
-                # Convert to UTC; assume naive timestamps are UTC already
-                if dt.tzinfo:
-                    dt = dt.astimezone(timezone.utc)
-                return dt.strftime("%Y-%m-%d / %H:%M")
-            except Exception:
-                pass
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
-                try:
-                    dt = datetime.strptime(s, fmt)
-                    return dt.strftime("%Y-%m-%d / %H:%M")
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return str(v)
-
-    payout_fmt = _format_payout(payout)
-    sale_time_fmt = _format_sale_time(sale_time)
-
-    # Build text via unified formatter (with optional daily deposits count)
-    # Serialize by user_id so concurrent postbacks for the same buyer get correct sequential daily counts
-    daily_count: int | None = None
-    kpi_daily_goal: int | None = None
-    if is_sale and stats_user_id is not None:
-        db_daily_count: int | None = None
-        async with _user_locks_guard:
-            user_lock = _lock_for_user(stats_user_id)
-        async with user_lock:
-            try:
-                db_daily_count = await db.count_today_user_sales(stats_user_id)
-            except Exception as e:
-                logger.warning(f"Failed to get daily count: {e}")
-            try:
-                daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
-            except Exception as e:
-                logger.warning(f"Failed to adjust daily counter: {e}")
-                daily_count = db_daily_count
-        try:
-            kpi = await db.get_kpi(stats_user_id)
-            kpi_daily_goal = kpi.get("daily_goal")
-        except Exception as e:
-            logger.warning(f"Failed to get KPI: {e}")
-    text = _build_notification_text(data, daily_count=daily_count, kpi_daily_goal=kpi_daily_goal)
-
-    # Determine recipients
-    recipient_ids: set[int] = set()
-    try:
-        users = await db.list_users()
-        # admins always receive all notifications
-        admins_db = [u for u in users if u.get("role") == "admin" and u.get("is_active")]
-        for u in admins_db:
-            recipient_ids.add(int(u["telegram_id"]))  # type: ignore
-        # plus ADMINS from env, if provided
-        if settings.admins:
-            for aid in settings.admins:
-                try:
-                    recipient_ids.add(int(aid))
-                except Exception:
-                    pass
-        # for sale events, also notify buyer, team leads (or alias lead), and all heads
-        if is_sale:
-            if buyer_id:
-                recipient_ids.add(int(buyer_id))
-            if alias:
-                alias_lead_id = alias.get("lead_id")
-                if alias_lead_id:
-                    recipient_ids.add(int(alias_lead_id))
-            buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
-            if buyer_user and buyer_user.get("team_id"):
-                team_id = buyer_user.get("team_id")
-                # If buyer is NOT a mentor, notify team leads; mentors' own deposits are not visible to leads
-                if (buyer_user.get("role") != "mentor"):
-                    try:
-                        lead_ids = await db.list_team_leads(int(team_id))
-                        for lid in lead_ids:
-                            recipient_ids.add(int(lid))
-                    except Exception as e:
-                        logger.warning(f"Failed to include team leads: {e}")
-                # mentors subscribed to this team
-                try:
-                    mentor_ids = await db.list_team_mentors(int(team_id))
-                    for mid in mentor_ids:
-                        recipient_ids.add(int(mid))
-                except Exception as e:
-                    logger.warning(f"Failed to include mentors: {e}")
-            heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
-            for u in heads:
-                recipient_ids.add(int(u["telegram_id"]))  # type: ignore
-            # помощники, привязанные к этому байеру — тоже получают уведомление о депозите
-            if buyer_id:
-                try:
-                    helper_ids = await db.list_helpers_by_buyer(int(buyer_id))
-                    for hid in helper_ids:
-                        recipient_ids.add(hid)
-                except Exception as e:
-                    logger.warning(f"Failed to include helpers for buyer: {e}")
-    except Exception as e:
-        logger.warning(f"Failed to expand recipients: {e}")
-
-    # Send message to all recipients (deduped)
-    for rid in recipient_ids:
-        try:
-            await notify_buyer(rid, text)
-        except Exception as e:
-            logger.warning(f"Notify failed for {rid}: {e}")
-    return {"ok": True, "routed": bool(buyer_id), "buyer_id": buyer_id, "fallback": used_fallback, "sale": is_sale}
+    # Keitaro S2S often uses ~5s HTTP timeout — отвечаем сразу, обработку делаем в фоне
+    background_tasks.add_task(_run_keitaro_postback_job, dict(data))
+    return JSONResponse({"ok": True, "accepted": True})
 
 # Some trackers send GET S2S callbacks; mirror POST handler for query params
 @app.get("/keitaro/postback")
-async def keitaro_postback_get(request: Request, authorization: str | None = Header(default=None)):
+async def keitaro_postback_get(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+):
     try:
         # Parse query parameters as a dict
         data = dict(request.query_params)
@@ -635,182 +614,12 @@ async def keitaro_postback_get(request: Request, authorization: str | None = Hea
         if not _has_meaningful_postback_fields(data):
             return JSONResponse({"success": 200})
 
-        campaign_name = data.get("campaign_name") or data.get("campaign")
-        alias_key = None
-        if campaign_name:
-            alias_key = (campaign_name.split("_", 1)[0] or "").strip()
-        alias = await db.find_alias(alias_key)
-        buyer_id = alias.get("buyer_id") if alias else None
-        if not buyer_id:
-            buyer_id = await db.find_user_for_postback(
-                offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
-                country=data.get("country") or data.get("geo"),
-                source=data.get("source") or data.get("traffic_source_name") or data.get("traffic_source") or data.get("affiliate")
-            )
-        used_fallback = False
-        if not buyer_id:
-            if settings.admins:
-                buyer_id = settings.admins[0]
-                used_fallback = True
-            else:
-                try:
-                    users = await db.list_users()
-                    admin_user = next((u for u in users if (u.get("role") == "admin")), None)
-                    if admin_user:
-                        buyer_id = int(admin_user["telegram_id"])  # type: ignore
-                        used_fallback = True
-                except Exception:
-                    pass
+        background_tasks.add_task(_run_keitaro_postback_job, dict(data))
+        return JSONResponse({"ok": True, "accepted": True})
 
-        # Same logic for GET: attribute only for buyer/lead/mentor/head; avoid fallback and admin
-        routed_id = buyer_id
-        if used_fallback and routed_id:
-            routed_id = None
-        else:
-            try:
-                users = await db.list_users()
-                ru = next((u for u in users if u["telegram_id"] == routed_id), None)
-                if ru and (ru.get("role") not in {"buyer", "lead", "mentor", "head"}):
-                    routed_id = None
-            except Exception:
-                pass
-        try:
-            await db.log_event(data, routed_id)
-        except Exception as e:
-            logger.warning(f"GET postback log_event failed: {e}")
-            routed_id = None
-
-        # do not return early: admins must still receive notifications
-
-        raw_status_value = (
-            data.get("status")
-            or data.get("conversion_status")
-            or data.get("conversion.status")
-            or data.get("status_name")
-            or data.get("state")
-            or data.get("action")
-            or ""
-        )
-        raw_status = str(raw_status_value).lower()
-        sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
-        is_sale = raw_status in sale_like
-        payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
-        currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
-        offer_id = data.get("offer_id") or data.get("offer.id")
-        offer_name = data.get("offer_name") or data.get("offer.name") or data.get("offer")
-        subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
-        sub_id_3 = data.get("sub_id_3") or data.get("subid3")
-        sale_time = data.get("conversion_sale_time") or data.get("conversion.sale_time") or data.get("conversion_time")
-        campaign_name = data.get("campaign_name") or data.get("campaign.name")
-        def _clean(v):
-            if isinstance(v, str):
-                s = v.strip()
-                if s.startswith("{") and s.endswith("}"):
-                    return None
-            return v
-        payout = _clean(payout)
-        currency = _clean(currency)
-        offer_id = _clean(offer_id)
-        offer_name = _clean(offer_name)
-        subid = _clean(subid)
-        sub_id_3 = _clean(sub_id_3)
-        sale_time = _clean(sale_time)
-        campaign_name = _clean(campaign_name)
-
-        # Build text via unified formatter (with optional daily deposits count)
-        stats_user_id: int | None = None
-        if routed_id is not None:
-            try:
-                stats_user_id = int(routed_id)
-            except Exception as e:
-                logger.warning(f"Failed to coerce routed user id {routed_id}: {e}")
-
-        daily_count: int | None = None
-        kpi_daily_goal: int | None = None
-        if is_sale and stats_user_id is not None:
-            db_daily_count: int | None = None
-            async with _user_locks_guard:
-                user_lock = _lock_for_user(stats_user_id)
-            async with user_lock:
-                try:
-                    db_daily_count = await db.count_today_user_sales(stats_user_id)
-                except Exception as e:
-                    logger.warning(f"Failed to get daily count: {e}")
-                try:
-                    daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
-                except Exception as e:
-                    logger.warning(f"Failed to adjust daily counter: {e}")
-                    daily_count = db_daily_count
-            try:
-                kpi = await db.get_kpi(stats_user_id)
-                kpi_daily_goal = kpi.get("daily_goal")
-            except Exception as e:
-                logger.warning(f"Failed to get KPI: {e}")
-        text = _build_notification_text(data, daily_count=daily_count, kpi_daily_goal=kpi_daily_goal)
-
-        # Determine recipients
-        recipient_ids: set[int] = set()
-        try:
-            users = await db.list_users()
-            # include admins always
-            admins_db = [u for u in users if u.get("role") == "admin" and u.get("is_active")]
-            for u in admins_db:
-                recipient_ids.add(int(u["telegram_id"]))  # type: ignore
-            if settings.admins:
-                for aid in settings.admins:
-                    try:
-                        recipient_ids.add(int(aid))
-                    except Exception:
-                        pass
-            # for sale events, include other recipients
-            if is_sale:
-                if buyer_id:
-                    recipient_ids.add(int(buyer_id))
-                if alias:
-                    alias_lead_id = alias.get("lead_id")
-                    if alias_lead_id:
-                        recipient_ids.add(int(alias_lead_id))
-                buyer_user = next((u for u in users if u.get("telegram_id") == buyer_id), None)
-                if buyer_user and buyer_user.get("team_id"):
-                    team_id = buyer_user.get("team_id")
-                    if (buyer_user.get("role") != "mentor"):
-                        try:
-                            lead_ids = await db.list_team_leads(int(team_id))
-                            for lid in lead_ids:
-                                recipient_ids.add(int(lid))
-                        except Exception as e:
-                            logger.warning(f"Failed to include team leads: {e}")
-                    # mentors subscribed to this team
-                    try:
-                        mentor_ids = await db.list_team_mentors(int(team_id))
-                        for mid in mentor_ids:
-                            recipient_ids.add(int(mid))
-                    except Exception as e:
-                        logger.warning(f"Failed to include mentors: {e}")
-                heads = [u for u in users if u.get("role") == "head" and u.get("is_active")]
-                for u in heads:
-                    recipient_ids.add(int(u["telegram_id"]))  # type: ignore
-                if buyer_id:
-                    try:
-                        helper_ids = await db.list_helpers_by_buyer(int(buyer_id))
-                        for hid in helper_ids:
-                            recipient_ids.add(hid)
-                    except Exception as e:
-                        logger.warning(f"Failed to include helpers for buyer: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to expand recipients: {e}")
-
-        for rid in recipient_ids:
-            try:
-                await notify_buyer(rid, text)
-            except Exception as e:
-                logger.warning(f"Notify failed for {rid}: {e}")
-        return {"ok": True, "routed": bool(buyer_id), "buyer_id": buyer_id, "fallback": used_fallback, "sale": is_sale}
     except HTTPException:
-        # propagate 4xx/5xx from our explicit raises
         raise
     except Exception as e:
-        # Never 500 to Keitaro GET callbacks — acknowledge and log
         logger.exception(f"GET postback handler failed: {e}")
         return {"ok": True}
 
