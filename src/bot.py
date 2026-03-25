@@ -941,7 +941,16 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     my_role = (me or {}).get("role", "buyer")
     if actor_id in ADMIN_IDS:
         my_role = "admin"
+    # Hardcode: Arseny should see all reports (same as admin full access).
+    if actor_id == 5769579484:
+        return [int(u["telegram_id"]) for u in users]
     allowed_roles = {"buyer", "lead", "mentor", "head"}
+    if my_role == "helper":
+        # Helper в отчётах должен видеть депозиты ТОЛЬКО привязанного buyer.
+        buyer_id = await db.get_helper_buyer(actor_id)
+        if buyer_id is not None:
+            return [buyer_id]
+        return []
     if my_role in ("admin", "head"):
         # Include buyers, leads, mentors; exclude admins/heads
         return [int(u["telegram_id"]) for u in users if u.get("is_active") and (u.get("role") in allowed_roles)]
