@@ -196,6 +196,20 @@ SCHEMA_SQL = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # design: order_ids for which we already sent "task completed" notification (avoid duplicate)
+    """
+    CREATE TABLE IF NOT EXISTS tg_design_completion_sent (
+        order_id BIGINT PRIMARY KEY,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # design: order_ids for which we already sent "SLA 24h exceeded" warning notification (avoid duplicate)
+    """
+    CREATE TABLE IF NOT EXISTS tg_design_sla_24h_alert_sent (
+        order_id BIGINT PRIMARY KEY,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
     # Underdog contractor_id -> telegram (designer): to notify the right person when task is assigned
     """
     CREATE TABLE IF NOT EXISTS tg_underdog_contractor_telegram (
@@ -373,6 +387,64 @@ async def mark_design_assignment_sent(order_id: int) -> None:
         async with conn.cursor() as cur:
             await cur.execute(
                 "INSERT IGNORE INTO tg_design_assignment_sent (order_id) VALUES (%s)",
+                (order_id,),
+            )
+
+
+async def is_design_completion_sent(order_id: int) -> bool:
+    """True if we already sent 'task completed' notification for this order."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT 1 FROM tg_design_completion_sent WHERE order_id = %s", (order_id,))
+            return (await cur.fetchone()) is not None
+
+
+async def mark_design_completion_sent(order_id: int) -> None:
+    """Mark that we sent 'task completed' notification for this order."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT IGNORE INTO tg_design_completion_sent (order_id) VALUES (%s)",
+                (order_id,),
+            )
+
+
+async def get_design_assignment_sent_at(order_id: int) -> Optional[datetime]:
+    """Return UTC datetime when we first sent 'task assigned' for this order."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT created_at FROM tg_design_assignment_sent WHERE order_id = %s",
+                (order_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return row[0]
+
+
+async def is_design_sla_24h_alert_sent(order_id: int) -> bool:
+    """True if we already sent 'SLA 24h exceeded' warning notification for this order."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM tg_design_sla_24h_alert_sent WHERE order_id = %s",
+                (order_id,),
+            )
+            return (await cur.fetchone()) is not None
+
+
+async def mark_design_sla_24h_alert_sent(order_id: int) -> None:
+    """Mark that we sent 'SLA 24h exceeded' warning notification for this order."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT IGNORE INTO tg_design_sla_24h_alert_sent (order_id) VALUES (%s)",
                 (order_id,),
             )
 

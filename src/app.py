@@ -677,18 +677,35 @@ async def notify_design_endpoint(
     payload: DomainNotifyRequest,
     authorization: str | None = Header(default=None),
 ):
-    """Уведомлять дизайнера в design-боте, когда ему ставят таск (order_status=0). Маппинг contractor_id → telegram: tg_underdog_contractor_telegram."""
+    """Уведомлять по дизайну: назначение (order_status=0), выполнение (order_status=1) и SLA 24h warning."""
     _require_internal_token(authorization, payload.token)
     if not settings.design_bot_token:
         return JSONResponse(
             {"ok": False, "error": "DESIGN_BOT_TOKEN not configured"},
             status_code=503,
         )
-    stats = await underdog.notify_design_assignments(
+
+    assignment_stats = await underdog.notify_design_assignments(
         dry_run=payload.dry_run,
         bot_instance=design_bot,
     )
-    return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
+    completion_stats = await underdog.notify_design_completions(
+        dry_run=payload.dry_run,
+        bot_instance=design_bot,
+    )
+    sla_24h_stats = await underdog.notify_design_sla_24h(
+        dry_run=payload.dry_run,
+        bot_instance=design_bot,
+    )
+    return {
+        "ok": True,
+        "dry_run": payload.dry_run,
+        "stats": {
+            "assignments": assignment_stats,
+            "completions": completion_stats,
+            "sla_24h": sla_24h_stats,
+        },
+    }
 
 
 @app.post(WEBHOOK_PATH)

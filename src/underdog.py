@@ -272,6 +272,67 @@ def _build_design_assignment_message(
     return "\n".join(str(line) for line in lines)
 
 
+def _format_duration_ru(td: timedelta) -> str:
+    """Human-readable duration in Russian (e.g. 1д 03ч 12м)."""
+    total_seconds = int(td.total_seconds())
+    if total_seconds < 0:
+        total_seconds = 0
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    parts: List[str] = []
+    if days:
+        parts.append(f"{days}д")
+    if hours or (days and minutes):
+        parts.append(f"{hours:02d}ч")
+    parts.append(f"{minutes:02d}м")
+    return " ".join(parts)
+
+
+def _build_design_completion_message(
+    order: Dict[str, Any],
+    *,
+    duration_text: Optional[str] = None,
+) -> str:
+    order_id = order.get("id")
+    name = order.get("name") or order.get("type") or "—"
+    count = order.get("count") or 0
+    total = order.get("total") or order.get("price") or "0"
+    status_text = _order_status_text(order.get("status_id"))
+    lines = [
+        "✅ Заказ дизайна выполнен",
+        "",
+        f"ID заказа: {order_id}",
+        f"Название: {name}",
+        f"Количество: {count}",
+        f"Сумма: {total}",
+        f"Статус: {status_text}",
+    ]
+    if duration_text:
+        lines += [f"Время выполнения: {duration_text}"]
+    return "\n".join(str(line) for line in lines)
+
+
+def _build_design_sla_warning_message(
+    order: Dict[str, Any],
+    *,
+    passed_text: str,
+) -> str:
+    order_id = order.get("id")
+    name = order.get("name") or order.get("type") or "—"
+    status_text = _order_status_text(order.get("status_id"))
+    return "\n".join(
+        [
+            "⏳ Срок выполнения: почти 24 часа уже прошло, а статус не стал “выполнен”.",
+            "",
+            f"ID заказа: {order_id}",
+            f"Название: {name}",
+            f"Статус: {status_text}",
+            f"Прошло с назначения: {passed_text}",
+        ]
+    )
+
+
 def _yesterday() -> date:
     return datetime.now(timezone.utc).date() - timedelta(days=1)
 
@@ -509,6 +570,25 @@ class UnderdogClient:
                 if oid is not None and oid not in seen_ids:
                     seen_ids.add(oid)
                     all_orders.append(o)
+        return all_orders
+
+    async def fetch_design_orders_by_status(self, *, order_status: int) -> List[Dict[str, Any]]:
+        """
+        Fetch pwaDesign + creative orders for a given order_status.
+        Unlike fetch_orders_for_design_bot()/fetch_design_new_tasks(), this method DOESN'T filter by telegram_sent.
+        """
+        all_orders: List[Dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        for order_type in self.ORDER_TYPES_DESIGN_BOT:
+            orders = await self.fetch_orders_by_type(order_type, order_status=order_status)
+            for o in orders:
+                oid = o.get("id")
+                if oid is None:
+                    continue
+                if oid in seen_ids:
+                    continue
+                seen_ids.add(oid)
+                all_orders.append(o)
         return all_orders
 
     async def mark_order_telegram_sent(self, order_id: int) -> None:
@@ -1060,6 +1140,268 @@ class DesignAssignmentNotifier:
 
             await db.mark_design_assignment_sent(int(order_id))
             stats.matched_users += 1
+        return stats
+
+
+@dataclass(slots=True)
+class DesignCompletionNotifier:
+    """Уведомление о выполнении таска (order_status=1)."""
+
+    underdog: UnderdogClient
+    bot: Bot
+    admin_ids: Sequence[int]
+    broadcast_chat_ids: Sequence[int] = ()  # DESIGN_BROADCAST_CHAT_IDS — группа/канал, видят все
+
+    async def notify_design_completions(
+        self,
+        *,
+        dry_run: bool = True,
+    ) -> NotificationStats:
+        orders = await self.underdog.fetch_design_orders_by_status(order_status=1)
+        stats = NotificationStats(total_orders=len(orders))
+        if not orders:
+            return stats
+
+        subscribers = await db.list_design_bot_subscribers()
+        now = datetime.now(timezone.utc)
+
+        for order in orders:
+            order_id = order.get("id")
+            if order_id is None:
+                continue
+            order_id = int(order_id)
+
+            if await db.is_design_completion_sent(order_id):
+                logger.debug("Design completion already sent, skipping", order_id=order_id)
+                continue
+
+            contractor = order.get("contractor") or {}
+            contractor_id = order.get("contractor_id")
+            if contractor_id is not None:
+                contractor_id = str(contractor_id).strip()
+            telegram_from_order = (contractor.get("telegram") or contractor.get("telegram_handle") or "").strip().lstrip("@")
+            designer_name: Optional[str] = contractor.get("name")
+
+            designer_telegram_id: Optional[int] = _parse_telegram_id(contractor)
+            if designer_telegram_id is None and telegram_from_order:
+                user = await db.find_user_by_username(telegram_from_order)
+                if user:
+                    designer_telegram_id = int(user.get("telegram_id"))
+            if designer_telegram_id is None and contractor_id:
+                designer_telegram_id = await db.get_contractor_telegram_id(contractor_id)
+
+            duration_text: Optional[str] = None
+            assigned_at = await db.get_design_assignment_sent_at(order_id)
+            if assigned_at is not None:
+                duration_text = _format_duration_ru(now - assigned_at)
+
+            message_personal = _build_design_completion_message(order, duration_text=duration_text)
+
+            assigned_to_mention_html: Optional[str] = None
+            if designer_telegram_id is not None:
+                label = (
+                    f"@{telegram_from_order}"
+                    if telegram_from_order
+                    else (designer_name or f"id{designer_telegram_id}")
+                )
+                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{label}</a>'
+
+            message_for_broadcast = message_personal
+            if assigned_to_mention_html is not None:
+                message_for_broadcast = f"{message_personal}\nДизайнер: {assigned_to_mention_html}"
+
+            admin_message = f"📋 Копия админу:\n\n{message_for_broadcast}"
+
+            if dry_run:
+                stats.matched_users += 1
+                stats.notified += len(self.broadcast_chat_ids)
+                if designer_telegram_id is not None and designer_telegram_id in subscribers:
+                    stats.notified += 1
+                stats.notified += len(self.admin_ids)
+                continue
+
+            # 1) В broadcast-чаты
+            for chat_id in self.broadcast_chat_ids:
+                try:
+                    await self.bot.send_message(chat_id=int(chat_id), text=message_for_broadcast)
+                    stats.notified += 1
+                except Exception as exc:  # pragma: no cover
+                    stats.errors += 1
+                    logger.warning(
+                        "Failed to send design completion to broadcast chat",
+                        order_id=order_id,
+                        chat_id=chat_id,
+                        error=str(exc),
+                    )
+
+            # 2) Лично дизайнеру (только если он в подписчиках)
+            if designer_telegram_id is not None and designer_telegram_id in subscribers:
+                try:
+                    await self.bot.send_message(chat_id=designer_telegram_id, text=message_personal)
+                    stats.notified += 1
+                except Exception as exc:  # pragma: no cover
+                    stats.errors += 1
+                    logger.warning(
+                        "Failed to send design completion to designer",
+                        order_id=order_id,
+                        designer_telegram_id=designer_telegram_id,
+                        error=str(exc),
+                    )
+
+            # 3) Админам
+            if self.admin_ids:
+                for admin_id in self.admin_ids:
+                    try:
+                        await self.bot.send_message(chat_id=int(admin_id), text=admin_message)
+                    except Exception as exc:  # pragma: no cover
+                        stats.errors += 1
+                        logger.warning(
+                            "Failed to send design completion copy to admin",
+                            order_id=order_id,
+                            admin_id=admin_id,
+                            error=str(exc),
+                        )
+
+            await db.mark_design_completion_sent(order_id)
+            stats.matched_users += 1
+
+        return stats
+
+
+@dataclass(slots=True)
+class DesignSLA24hNotifier:
+    """Уведомление: прошло 24 часа после назначения, а статус ещё не выполнен."""
+
+    underdog: UnderdogClient
+    bot: Bot
+    admin_ids: Sequence[int]
+    broadcast_chat_ids: Sequence[int] = ()  # DESIGN_BROADCAST_CHAT_IDS — группа/канал, видят все
+    sla_hours: int = 24
+
+    async def notify_design_sla_24h(
+        self,
+        *,
+        dry_run: bool = True,
+    ) -> NotificationStats:
+        # Не-\"выполнен\" статусы берём по маппингу ORDER_STATUS_TEXTS.
+        non_completed_statuses = [int(sid) for sid in ORDER_STATUS_TEXTS.keys() if int(sid) != 1]
+        orders_by_id: Dict[int, Dict[str, Any]] = {}
+        for status_id in non_completed_statuses:
+            orders = await self.underdog.fetch_design_orders_by_status(order_status=status_id)
+            for o in orders:
+                oid = o.get("id")
+                if oid is None:
+                    continue
+                orders_by_id[int(oid)] = o
+
+        stats = NotificationStats(total_orders=len(orders_by_id))
+        if not orders_by_id:
+            return stats
+
+        subscribers = await db.list_design_bot_subscribers()
+        subscribers_set = set(subscribers)
+        now = datetime.now(timezone.utc)
+        sla_delta = timedelta(hours=int(self.sla_hours))
+
+        for order_id, order in orders_by_id.items():
+            if await db.is_design_completion_sent(order_id):
+                continue
+            if await db.is_design_sla_24h_alert_sent(order_id):
+                continue
+
+            assigned_at = await db.get_design_assignment_sent_at(order_id)
+            if assigned_at is None:
+                # Нет базового "времени получения таски" (мы не успели/не смогли отметить назначение)
+                continue
+
+            passed = now - assigned_at
+            if passed < sla_delta:
+                continue
+
+            contractor = order.get("contractor") or {}
+            contractor_id = order.get("contractor_id")
+            if contractor_id is not None:
+                contractor_id = str(contractor_id).strip()
+            telegram_from_order = (contractor.get("telegram") or contractor.get("telegram_handle") or "").strip().lstrip("@")
+            designer_name: Optional[str] = contractor.get("name")
+
+            designer_telegram_id: Optional[int] = _parse_telegram_id(contractor)
+            if designer_telegram_id is None and telegram_from_order:
+                user = await db.find_user_by_username(telegram_from_order)
+                if user:
+                    designer_telegram_id = int(user.get("telegram_id"))
+            if designer_telegram_id is None and contractor_id:
+                designer_telegram_id = await db.get_contractor_telegram_id(contractor_id)
+
+            passed_text = _format_duration_ru(passed)
+            message_personal = _build_design_sla_warning_message(order, passed_text=passed_text)
+
+            assigned_to_mention_html: Optional[str] = None
+            if designer_telegram_id is not None:
+                label = (
+                    f"@{telegram_from_order}"
+                    if telegram_from_order
+                    else (designer_name or f"id{designer_telegram_id}")
+                )
+                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{label}</a>'
+
+            message_for_broadcast = message_personal
+            if assigned_to_mention_html is not None:
+                message_for_broadcast = f"{message_personal}\nДизайнер: {assigned_to_mention_html}"
+            admin_message = f"📋 Копия админу:\n\n{message_for_broadcast}"
+
+            if dry_run:
+                stats.matched_users += 1
+                if designer_telegram_id is not None and designer_telegram_id in subscribers_set:
+                    stats.notified += 1
+                stats.notified += len(self.broadcast_chat_ids) + len(self.admin_ids)
+                continue
+
+            # 1) Designer personal message
+            if designer_telegram_id is not None and designer_telegram_id in subscribers_set:
+                try:
+                    await self.bot.send_message(chat_id=designer_telegram_id, text=message_personal)
+                    stats.notified += 1
+                except Exception as exc:  # pragma: no cover
+                    stats.errors += 1
+                    logger.warning(
+                        "Failed to send design SLA warning to designer",
+                        order_id=order_id,
+                        designer_telegram_id=designer_telegram_id,
+                        error=str(exc),
+                    )
+
+            # 2) Broadcast chats (optional)
+            for chat_id in self.broadcast_chat_ids:
+                try:
+                    await self.bot.send_message(chat_id=int(chat_id), text=message_for_broadcast)
+                    stats.notified += 1
+                except Exception as exc:  # pragma: no cover
+                    stats.errors += 1
+                    logger.warning(
+                        "Failed to send design SLA warning to broadcast chat",
+                        order_id=order_id,
+                        chat_id=chat_id,
+                        error=str(exc),
+                    )
+
+            # 3) Admin copies
+            if self.admin_ids:
+                for admin_id in self.admin_ids:
+                    try:
+                        await self.bot.send_message(chat_id=int(admin_id), text=admin_message)
+                    except Exception as exc:  # pragma: no cover
+                        stats.errors += 1
+                        logger.warning(
+                            "Failed to send design SLA warning copy to admin",
+                            order_id=order_id,
+                            admin_id=admin_id,
+                            error=str(exc),
+                        )
+
+            await db.mark_design_sla_24h_alert_sent(order_id)
+            stats.matched_users += 1
+
         return stats
 
 
@@ -2319,6 +2661,58 @@ async def notify_design_assignments(
         async with _create_design_bot() as owned_bot:
             notifier = DesignAssignmentNotifier(client, owned_bot, settings.admins, settings.design_broadcast_chat_ids)
             stats = await notifier.notify_design_assignments(dry_run=dry_run)
+            return stats.to_dict(dry_run=dry_run)
+
+
+async def notify_design_completions(
+    dry_run: bool = True,
+    bot_instance: Optional[Bot] = None,
+) -> Dict[str, Any]:
+    """Уведомлять дизайнера о выполнении таска (order_status=1) + время выполнения."""
+    async with UnderdogClient.from_settings() as client:
+        if bot_instance is not None:
+            notifier = DesignCompletionNotifier(
+                client,
+                bot_instance,
+                settings.admins,
+                settings.design_broadcast_chat_ids,
+            )
+            stats = await notifier.notify_design_completions(dry_run=dry_run)
+            return stats.to_dict(dry_run=dry_run)
+        async with _create_design_bot() as owned_bot:
+            notifier = DesignCompletionNotifier(
+                client,
+                owned_bot,
+                settings.admins,
+                settings.design_broadcast_chat_ids,
+            )
+            stats = await notifier.notify_design_completions(dry_run=dry_run)
+            return stats.to_dict(dry_run=dry_run)
+
+
+async def notify_design_sla_24h(
+    dry_run: bool = True,
+    bot_instance: Optional[Bot] = None,
+) -> Dict[str, Any]:
+    """Уведомлять: прошло SLA (24 часа) после назначения, а статус ещё не стал 'выполнен'."""
+    async with UnderdogClient.from_settings() as client:
+        if bot_instance is not None:
+            notifier = DesignSLA24hNotifier(
+                client,
+                bot_instance,
+                settings.admins,
+                settings.design_broadcast_chat_ids,
+            )
+            stats = await notifier.notify_design_sla_24h(dry_run=dry_run)
+            return stats.to_dict(dry_run=dry_run)
+        async with _create_design_bot() as owned_bot:
+            notifier = DesignSLA24hNotifier(
+                client,
+                owned_bot,
+                settings.admins,
+                settings.design_broadcast_chat_ids,
+            )
+            stats = await notifier.notify_design_sla_24h(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
 
 
