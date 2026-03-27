@@ -333,6 +333,24 @@ def _build_design_sla_warning_message(
     )
 
 
+def _is_design_order_completed(order: Dict[str, Any]) -> bool:
+    """Best-effort completion detection from different Underdog payload shapes."""
+    status_id = order.get("status_id")
+    try:
+        if status_id is not None and int(status_id) == 1:
+            return True
+    except Exception:
+        pass
+    for key in ("status", "state", "order_status"):
+        raw = order.get(key)
+        if raw is None:
+            continue
+        s = str(raw).strip().lower()
+        if s in ("completed", "complete", "done", "success", "выполнен"):
+            return True
+    return False
+
+
 def _yesterday() -> date:
     return datetime.now(timezone.utc).date() - timedelta(days=1)
 
@@ -484,10 +502,12 @@ class UnderdogClient:
         self,
         order_type: str,
         *,
-        order_status: int = 1,
+        order_status: Optional[int] = 1,
     ) -> List[Dict[str, Any]]:
-        """Fetch orders from /api/v2/orders?type=<order_type>&order_status=<order_status>."""
-        params = {"type": order_type, "order_status": order_status}
+        """Fetch orders from /api/v2/orders?type=<order_type>[&order_status=<order_status>]."""
+        params: Dict[str, Any] = {"type": order_type}
+        if order_status is not None:
+            params["order_status"] = order_status
         logger.info("Fetching Underdog orders by type", params=params)
         resp = await self.request("GET", ORDERS_PATH, params=params)
         orders = _extract_items(resp.json())
@@ -588,6 +608,23 @@ class UnderdogClient:
                 if oid in seen_ids:
                     continue
                 seen_ids.add(oid)
+                all_orders.append(o)
+        return all_orders
+
+    async def fetch_design_orders_for_statuses(self, statuses: Sequence[int]) -> List[Dict[str, Any]]:
+        """Fetch design orders for multiple order_status values and deduplicate by id."""
+        all_orders: List[Dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        for sid in statuses:
+            chunk = await self.fetch_design_orders_by_status(order_status=int(sid))
+            for o in chunk:
+                oid = o.get("id")
+                if oid is None:
+                    continue
+                oid_i = int(oid)
+                if oid_i in seen_ids:
+                    continue
+                seen_ids.add(oid_i)
                 all_orders.append(o)
         return all_orders
 
@@ -1157,7 +1194,9 @@ class DesignCompletionNotifier:
         *,
         dry_run: bool = True,
     ) -> NotificationStats:
-        orders = await self.underdog.fetch_design_orders_by_status(order_status=1)
+        # Fetch broadly, then detect completion from payload fields (status_id/status/state).
+        orders_all = await self.underdog.fetch_design_orders_for_statuses(range(0, 8))
+        orders = [o for o in orders_all if _is_design_order_completed(o)]
         stats = NotificationStats(total_orders=len(orders))
         if not orders:
             return stats
@@ -1283,16 +1322,15 @@ class DesignSLA24hNotifier:
         *,
         dry_run: bool = True,
     ) -> NotificationStats:
-        # Не-\"выполнен\" статусы берём по маппингу ORDER_STATUS_TEXTS.
-        non_completed_statuses = [int(sid) for sid in ORDER_STATUS_TEXTS.keys() if int(sid) != 1]
+        orders_all = await self.underdog.fetch_design_orders_for_statuses(range(0, 8))
         orders_by_id: Dict[int, Dict[str, Any]] = {}
-        for status_id in non_completed_statuses:
-            orders = await self.underdog.fetch_design_orders_by_status(order_status=status_id)
-            for o in orders:
-                oid = o.get("id")
-                if oid is None:
-                    continue
-                orders_by_id[int(oid)] = o
+        for o in orders_all:
+            oid = o.get("id")
+            if oid is None:
+                continue
+            if _is_design_order_completed(o):
+                continue
+            orders_by_id[int(oid)] = o
 
         stats = NotificationStats(total_orders=len(orders_by_id))
         if not orders_by_id:
