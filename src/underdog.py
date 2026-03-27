@@ -333,6 +333,13 @@ def _build_design_sla_warning_message(
     )
 
 
+def _to_utc_aware(dt: datetime) -> datetime:
+    """Normalize datetime from DB/API to UTC-aware."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _is_design_order_completed(order: Dict[str, Any]) -> bool:
     """Best-effort completion detection from different Underdog payload shapes."""
     status_id = order.get("status_id")
@@ -1232,7 +1239,7 @@ class DesignCompletionNotifier:
             duration_text: Optional[str] = None
             assigned_at = await db.get_design_assignment_sent_at(order_id)
             if assigned_at is not None:
-                duration_text = _format_duration_ru(now - assigned_at)
+                duration_text = _format_duration_ru(now - _to_utc_aware(assigned_at))
 
             message_personal = _build_design_completion_message(order, duration_text=duration_text)
 
@@ -1352,7 +1359,7 @@ class DesignSLA24hNotifier:
                 # Нет базового "времени получения таски" (мы не успели/не смогли отметить назначение)
                 continue
 
-            passed = now - assigned_at
+            passed = now - _to_utc_aware(assigned_at)
             if passed < sla_delta:
                 continue
 
@@ -2838,7 +2845,7 @@ async def _amain() -> None:
     parser.add_argument(
         "--notify-design",
         action="store_true",
-        help="Notify designers when a task is assigned (order_status=0). Cron: python -m src.underdog --notify-design --apply",
+        help="Design notify pipeline: assignments + completions + SLA24h alerts. Cron: python -m src.underdog --notify-design --apply",
     )
     parser.add_argument("--domains", action="store_true", help="Fetch all domains from Underdog")
     parser.add_argument("--notify-domains", action="store_true", help="Notify Telegram users about expiring domains")
@@ -2893,9 +2900,29 @@ async def _amain() -> None:
         if args.notify_design:
             dry_run = not args.apply
             async with _create_design_bot() as bot_instance:
-                notifier = DesignAssignmentNotifier(client, bot_instance, settings.admins, settings.design_broadcast_chat_ids)
-                stats = await notifier.notify_design_assignments(dry_run=dry_run)
-            print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
+                assignment_notifier = DesignAssignmentNotifier(
+                    client, bot_instance, settings.admins, settings.design_broadcast_chat_ids
+                )
+                completion_notifier = DesignCompletionNotifier(
+                    client, bot_instance, settings.admins, settings.design_broadcast_chat_ids
+                )
+                sla_notifier = DesignSLA24hNotifier(
+                    client, bot_instance, settings.admins, settings.design_broadcast_chat_ids
+                )
+                assignments = await assignment_notifier.notify_design_assignments(dry_run=dry_run)
+                completions = await completion_notifier.notify_design_completions(dry_run=dry_run)
+                sla_24h = await sla_notifier.notify_design_sla_24h(dry_run=dry_run)
+            print(
+                json.dumps(
+                    {
+                        "assignments": assignments.to_dict(dry_run=dry_run),
+                        "completions": completions.to_dict(dry_run=dry_run),
+                        "sla_24h": sla_24h.to_dict(dry_run=dry_run),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
             return
 
         if args.domains:
