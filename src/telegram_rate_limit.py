@@ -1,4 +1,11 @@
-"""Ограничение исходящих sendMessage с учётом лимитов Telegram Bot API."""
+"""Ограничение исходящих sendMessage с учётом лимитов Telegram Bot API.
+
+Логирование ошибок Telegram из этого модуля:
+- 429 Flood control: на каждой попытке — loguru ``warning`` (retry_after, chat_id);
+  если после всех повторов отправка не удалась — ``error`` и проброс исключения.
+- Остальные исключения aiogram из ``send_message`` не перехватываются здесь —
+  их обрабатывают вызывающие места (например, ``underdog``: Forbidden/BadRequest и общий ``Exception``).
+"""
 
 from __future__ import annotations
 
@@ -137,15 +144,26 @@ async def limited_send_message(
             return await bot.send_message(cid, **kwargs)
         except TelegramRetryAfter as exc:
             last_exc = exc
-            wait = float(getattr(exc, "retry_after", 1) or 1) + 0.35
+            ra = getattr(exc, "retry_after", None)
+            wait = float(ra if ra is not None else 1) + 0.35
+            # Ответ API: 429 Too Many Requests + retry_after (секунды ожидания).
             logger.warning(
-                "Telegram FloodWait (retry_after={}), backoff {:.1f}s chat_id={}",
-                getattr(exc, "retry_after", "?"),
+                "Telegram 429 FloodWait: attempt {}/{}, retry_after={}s, backoff {:.1f}s, chat_id={}",
+                attempt + 1,
+                max_flood_retries,
+                ra,
                 wait,
                 cid,
             )
             await asyncio.sleep(wait)
             attempt += 1
     if last_exc is not None:
+        logger.error(
+            "Telegram 429 FloodWait: исчерпаны повторы send_message ({}), chat_id={}, последний retry_after={}: {}",
+            max_flood_retries,
+            cid,
+            getattr(last_exc, "retry_after", None),
+            last_exc,
+        )
         raise last_exc
     raise RuntimeError("limited_send_message: retries exhausted without exception")
