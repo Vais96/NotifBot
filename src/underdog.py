@@ -19,6 +19,7 @@ from loguru import logger
 
 from . import db
 from .config import settings
+from .telegram_rate_limit import limited_send_message
 
 LOGIN_PATH = "/api/login"
 ORDERS_PATH = "/api/v2/orders"
@@ -959,7 +960,7 @@ class OrderNotifier:
             try:
                 oid = int(order.get("id"))
                 chat_id = int(user["telegram_id"])
-                msg = await self.bot.send_message(chat_id=chat_id, text=message)
+                msg = await limited_send_message(self.bot, chat_id, text=message)
                 _log_telegram_send_roundtrip(
                     context="orders_bot_order_ready",
                     chat_id=chat_id,
@@ -1021,7 +1022,7 @@ class OrderNotifier:
         text = "\n".join(lines)
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(chat_id=int(admin_id), text=text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about unknown orders",
@@ -1050,7 +1051,7 @@ class OrderNotifier:
         text = "\n".join(lines)
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(chat_id=int(admin_id), text=text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about delivery error",
@@ -1160,7 +1161,7 @@ class DesignAssignmentNotifier:
             # 1) В broadcast-чаты (группа/канал) — видят все участники
             for chat_id in self.broadcast_chat_ids:
                 try:
-                    await self.bot.send_message(chat_id=int(chat_id), text=message_for_broadcast)
+                    await limited_send_message(self.bot, int(chat_id), text=message_for_broadcast)
                     stats.notified += 1
                 except (TelegramForbiddenError, TelegramBadRequest) as exc:
                     stats.errors += 1
@@ -1173,7 +1174,7 @@ class DesignAssignmentNotifier:
             for chat_id in subscribers:
                 text = message_for_designer if (designer_telegram_id is not None and chat_id == designer_telegram_id) else message_for_broadcast
                 try:
-                    await self.bot.send_message(chat_id=chat_id, text=text)
+                    await limited_send_message(self.bot, chat_id, text=text)
                     stats.notified += 1
                 except (TelegramForbiddenError, TelegramBadRequest) as exc:
                     stats.errors += 1
@@ -1185,7 +1186,7 @@ class DesignAssignmentNotifier:
             if self.admin_ids:
                 for admin_id in self.admin_ids:
                     try:
-                        await self.bot.send_message(chat_id=int(admin_id), text=admin_message)
+                        await limited_send_message(self.bot, int(admin_id), text=admin_message)
                         logger.info("Sent design assignment copy to admin", admin_id=admin_id, order_id=order_id)
                     except (TelegramForbiddenError, TelegramBadRequest) as exc:
                         logger.warning(
@@ -1291,7 +1292,7 @@ class DesignCompletionNotifier:
             # 1) В broadcast-чаты
             for chat_id in self.broadcast_chat_ids:
                 try:
-                    await self.bot.send_message(chat_id=int(chat_id), text=message_for_broadcast)
+                    await limited_send_message(self.bot, int(chat_id), text=message_for_broadcast)
                     stats.notified += 1
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
@@ -1305,7 +1306,7 @@ class DesignCompletionNotifier:
             # 2) Лично дизайнеру (только если он в подписчиках)
             if designer_telegram_id is not None and designer_telegram_id in subscribers:
                 try:
-                    await self.bot.send_message(chat_id=designer_telegram_id, text=message_personal)
+                    await limited_send_message(self.bot, designer_telegram_id, text=message_personal)
                     stats.notified += 1
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
@@ -1320,7 +1321,7 @@ class DesignCompletionNotifier:
             if self.admin_ids:
                 for admin_id in self.admin_ids:
                     try:
-                        await self.bot.send_message(chat_id=int(admin_id), text=admin_message)
+                        await limited_send_message(self.bot, int(admin_id), text=admin_message)
                     except Exception as exc:  # pragma: no cover
                         stats.errors += 1
                         logger.warning(
@@ -1427,7 +1428,7 @@ class DesignSLA24hNotifier:
             # 1) Designer personal message
             if designer_telegram_id is not None and designer_telegram_id in subscribers_set:
                 try:
-                    await self.bot.send_message(chat_id=designer_telegram_id, text=message_personal)
+                    await limited_send_message(self.bot, designer_telegram_id, text=message_personal)
                     stats.notified += 1
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
@@ -1441,7 +1442,7 @@ class DesignSLA24hNotifier:
             # 2) Broadcast chats (optional)
             for chat_id in self.broadcast_chat_ids:
                 try:
-                    await self.bot.send_message(chat_id=int(chat_id), text=message_for_broadcast)
+                    await limited_send_message(self.bot, int(chat_id), text=message_for_broadcast)
                     stats.notified += 1
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
@@ -1456,7 +1457,7 @@ class DesignSLA24hNotifier:
             if self.admin_ids:
                 for admin_id in self.admin_ids:
                     try:
-                        await self.bot.send_message(chat_id=int(admin_id), text=admin_message)
+                        await limited_send_message(self.bot, int(admin_id), text=admin_message)
                     except Exception as exc:  # pragma: no cover
                         stats.errors += 1
                         logger.warning(
@@ -1534,8 +1535,6 @@ class DomainNotifier:
 
         user_map = await db.fetch_users_by_usernames(list(per_handle.keys()))
 
-        send_counter = 0  # simple rate limiter: 3 messages, then small pause
-
         for handle, domain_entries in per_handle.items():
             user = user_map.get(handle)
             if not user:
@@ -1570,10 +1569,7 @@ class DomainNotifier:
 
             try:
                 chat_id = int(user["telegram_id"])
-                msg = await self.bot.send_message(chat_id, text)
-                send_counter += 1
-                if not dry_run and send_counter % 3 == 0:
-                    await asyncio.sleep(1.0)
+                msg = await limited_send_message(self.bot, chat_id, text=text)
                 _log_telegram_send_roundtrip(
                     context="orders_bot_domain_expiration",
                     chat_id=chat_id,
@@ -1632,7 +1628,7 @@ class DomainNotifier:
             return
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to send admin copy for domains",
@@ -1656,7 +1652,7 @@ class DomainNotifier:
         text = "\n".join(lines)
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about domains",
@@ -1692,7 +1688,7 @@ class DomainNotifier:
             return
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about missing domain recipient",
@@ -1728,7 +1724,7 @@ class DomainNotifier:
             return
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about domain delivery error",
@@ -1759,7 +1755,7 @@ class IPNotifier:
             bots = [self.bot]
         for b in bots:
             try:
-                await b.send_message(int(admin_id), text)
+                await limited_send_message(b, int(admin_id), text=text)
                 return
             except Exception as exc:  # pragma: no cover
                 last_exc = exc
@@ -1921,8 +1917,6 @@ class IPNotifier:
 
         user_map = await db.fetch_users_by_usernames(list(per_handle.keys()))
 
-        send_counter = 0  # simple rate limiter: 3 messages, then small pause
-
         for handle, ip_entries in per_handle.items():
             user = user_map.get(handle)
             if not user:
@@ -1967,10 +1961,7 @@ class IPNotifier:
 
             try:
                 telegram_id = int(user["telegram_id"])
-                msg = await self.bot.send_message(telegram_id, text)
-                send_counter += 1
-                if not dry_run and send_counter % 3 == 0:
-                    await asyncio.sleep(1.0)
+                msg = await limited_send_message(self.bot, telegram_id, text=text)
                 _log_telegram_send_roundtrip(
                     context="orders_bot_ip_expiration",
                     chat_id=telegram_id,
@@ -2291,7 +2282,7 @@ class TicketNotifier:
             # Отправляем уведомление
             try:
                 user_telegram_id = int(user["telegram_id"])
-                msg = await self.bot.send_message(user_telegram_id, text)
+                msg = await limited_send_message(self.bot, user_telegram_id, text=text)
                 _log_telegram_send_roundtrip(
                     context="orders_bot_ticket_completed",
                     chat_id=user_telegram_id,
@@ -2362,7 +2353,7 @@ class TicketNotifier:
             if exclude_user_id is not None and int(admin_id) == exclude_user_id:
                 continue
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to send admin copy for tickets",
@@ -2398,7 +2389,7 @@ class TicketNotifier:
             return
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about missing ticket recipient",
@@ -2437,7 +2428,7 @@ class TicketNotifier:
             return
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about ticket mark error",
@@ -2473,7 +2464,7 @@ class TicketNotifier:
             return
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about ticket delivery error",
@@ -2498,7 +2489,7 @@ class TicketNotifier:
         text = "\n".join(lines)
         for admin_id in self.admin_ids:
             try:
-                await self.bot.send_message(int(admin_id), text)
+                await limited_send_message(self.bot, int(admin_id), text=text)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about tickets",
