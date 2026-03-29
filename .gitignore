@@ -10,6 +10,9 @@ venv/
 .env
 .env.*
 
+# Local API dumps (may contain PII)
+underdog-ips-response.local.json
+
 # OS
 .DS_Store
 

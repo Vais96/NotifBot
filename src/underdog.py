@@ -117,6 +117,38 @@ def _extract_ips(payload: Any) -> List[Dict[str, Any]]:
     raise UnderdogAPIError("Unexpected IP response shape")
 
 
+def _log_underdog_raw_json_response(
+    *,
+    method: str,
+    path: str,
+    raw: Any,
+    max_chars: int = 150_000,
+) -> None:
+    """Пишет в лог сырой JSON ответа Underdog (структура + тело, с обрезкой по размеру)."""
+    summary: Dict[str, Any] = {"root_type": type(raw).__name__}
+    if isinstance(raw, dict):
+        summary["root_keys"] = list(raw.keys())[:80]
+    elif isinstance(raw, list):
+        summary["list_len"] = len(raw)
+        if raw and isinstance(raw[0], dict):
+            sample = raw[0]
+            summary["first_item_keys"] = list(sample.keys())[:60]
+    try:
+        body = json.dumps(raw, ensure_ascii=False, indent=2, default=str)
+    except (TypeError, ValueError):
+        body = repr(raw)
+    if len(body) > max_chars:
+        cut = len(body) - max_chars
+        body = body[:max_chars] + f"\n... [{cut} chars truncated]"
+    logger.info(
+        "Underdog {} {} — raw JSON (log_raw/debug). Summary: {}\n{}",
+        method,
+        path,
+        json.dumps(summary, ensure_ascii=False),
+        body,
+    )
+
+
 def _extract_ip_record_id(raw: Any) -> Optional[int]:
     """ID записи IP в Underdog (в разных ответах может быть id / Id / ip_id)."""
     if not isinstance(raw, dict):
@@ -657,9 +689,13 @@ class UnderdogClient:
         if last_error:
             raise last_error
 
-    async def fetch_ips(self) -> List[Dict[str, Any]]:
+    async def fetch_ips(self, *, log_raw: bool = False) -> List[Dict[str, Any]]:
+        """log_raw=True — один раз в лог полный JSON (только для ручной отладки; рассылка вызывает без этого)."""
         resp = await self.request("GET", IPS_PATH)
-        return _extract_ips(resp.json())
+        raw = resp.json()
+        if log_raw:
+            _log_underdog_raw_json_response(method="GET", path=IPS_PATH, raw=raw)
+        return _extract_ips(raw)
 
     async def mark_ip_telegram_sent(self, ip_id: int) -> None:
         """PATCH telegram-sent; при 429 от Underdog — повтор с backoff (иначе те же IP уходят в рассылку снова)."""
@@ -2970,6 +3006,11 @@ async def _amain() -> None:
     parser.add_argument("--domains", action="store_true", help="Fetch all domains from Underdog")
     parser.add_argument("--notify-domains", action="store_true", help="Notify Telegram users about expiring domains")
     parser.add_argument("--ips", action="store_true", help="Fetch expiring IPs from Underdog")
+    parser.add_argument(
+        "--ips-raw",
+        action="store_true",
+        help="With --ips: also include raw Underdog JSON (same as API body before parsing)",
+    )
     parser.add_argument("--notify-ips", action="store_true", help="Notify Telegram users about expiring IPs")
     parser.add_argument("--tickets", action="store_true", help="Fetch all tickets from Underdog")
     parser.add_argument("--notify-tickets", action="store_true", help="Notify Telegram users about completed tickets")
@@ -3059,8 +3100,13 @@ async def _amain() -> None:
             return
 
         if args.ips:
-            ips = await client.fetch_ips()
-            print(json.dumps({"count": len(ips), "ips": ips}, ensure_ascii=False, indent=2))
+            resp = await client.request("GET", IPS_PATH)
+            raw = resp.json()
+            ips = _extract_ips(raw)
+            payload: Dict[str, Any] = {"count": len(ips), "ips": ips}
+            if args.ips_raw:
+                payload["raw"] = raw
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
             return
 
         if args.notify_ips:
