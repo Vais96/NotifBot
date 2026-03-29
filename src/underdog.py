@@ -957,9 +957,31 @@ class OrderNotifier:
                 continue
 
             try:
-                await self.bot.send_message(chat_id=int(user["telegram_id"]), text=message)
-                await self.underdog.mark_order_telegram_sent(int(order.get("id")))
-                stats.notified += 1
+                oid = int(order.get("id"))
+                chat_id = int(user["telegram_id"])
+                msg = await self.bot.send_message(chat_id=chat_id, text=message)
+                _log_telegram_send_roundtrip(
+                    context="orders_bot_order_ready",
+                    chat_id=chat_id,
+                    text=message,
+                    msg=msg,
+                    extra={"order_id": oid, "handle": handle},
+                )
+                if _telegram_message_confirmed(msg):
+                    await self.underdog.mark_order_telegram_sent(oid)
+                    stats.notified += 1
+                else:
+                    stats.errors += 1
+                    logger.error(
+                        "Order notify: Telegram ok!==true — Underdog telegram_sent не меняем",
+                        order_id=oid,
+                        chat_id=chat_id,
+                        response=_telegram_api_response_dict(msg),
+                    )
+                    await self._notify_admins_delivery_error(
+                        order=order,
+                        error_text="Telegram: ответ без подтверждённого message_id (ok!==true), статус заказа не обновлён",
+                    )
             except (TelegramForbiddenError, TelegramBadRequest) as exc:
                 stats.errors += 1
                 logger.warning(
@@ -1547,27 +1569,32 @@ class DomainNotifier:
                 continue
 
             try:
-                msg = await self.bot.send_message(int(user["telegram_id"]), text)
+                chat_id = int(user["telegram_id"])
+                msg = await self.bot.send_message(chat_id, text)
                 send_counter += 1
                 if not dry_run and send_counter % 3 == 0:
                     await asyncio.sleep(1.0)
-                stats.notified_users += 1
-                stats.notified_domains += len(domain_entries)
-                logger.info(
-                    "Telegram domain notify sent",
-                    telegram_id=user.get("telegram_id"),
-                    message_id=getattr(msg, "message_id", None),
-                    domains_count=len(domain_entries),
+                _log_telegram_send_roundtrip(
+                    context="orders_bot_domain_expiration",
+                    chat_id=chat_id,
+                    text=text,
+                    msg=msg,
+                    extra={
+                        "handle": handle,
+                        "domains_count": len(domain_entries),
+                    },
                 )
-                # Дублируем отправленное сообщение всем админам для контроля.
-                await self._notify_admins_copy(text)
                 if not _telegram_message_confirmed(msg):
                     stats.errors += 1
                     logger.error(
-                        "Telegram returned message without message_id — не помечаем domain telegram_sent в Underdog",
-                        telegram_id=user.get("telegram_id"),
+                        "Telegram ok!==true (нет message_id) — не помечаем domain telegram_sent в Underdog",
+                        telegram_id=chat_id,
+                        response=_telegram_api_response_dict(msg),
                     )
                 else:
+                    stats.notified_users += 1
+                    stats.notified_domains += len(domain_entries)
+                    await self._notify_admins_copy(text)
                     for entry in domain_entries:
                         domain_id = entry["raw"].get("id")
                         if domain_id is None:
@@ -1944,16 +1971,21 @@ class IPNotifier:
                 send_counter += 1
                 if not dry_run and send_counter % 3 == 0:
                     await asyncio.sleep(1.0)
-                stats.notified_users += 1
-                stats.notified_ips += len(ip_entries)
-                logger.info(
-                    "Sent IP expiration notification",
-                    handle=handle,
-                    telegram_id=telegram_id,
-                    message_id=getattr(msg, "message_id", None),
-                    ips_count=len(ip_entries),
+                _log_telegram_send_roundtrip(
+                    context="orders_bot_ip_expiration",
+                    chat_id=telegram_id,
+                    text=text,
+                    msg=msg,
+                    extra={
+                        "handle": handle,
+                        "ips_count": len(ip_entries),
+                        "ips": [
+                            e["raw"].get("ip") or e["raw"].get("address")
+                            for e in ip_entries
+                        ],
+                    },
                 )
-                # В Underdog помечаем telegram_sent только если Telegram реально вернул сообщение с message_id
+                # В Underdog помечаем telegram_sent только если в ответе API ok === true (есть message_id)
                 if not _telegram_message_confirmed(msg):
                     stats.errors += 1
                     stats.send_failures.append(
@@ -1972,10 +2004,12 @@ class IPNotifier:
                     await self._notify_admins_ip_delivery_error(
                         handle=handle,
                         entries=ip_entries,
-                        error_text="Telegram: ответ без message_id, Underdog не обновлён",
+                        error_text="Telegram: ok!==true или нет message_id, Underdog не обновлён",
                         dry_run=dry_run,
                     )
                 else:
+                    stats.notified_users += 1
+                    stats.notified_ips += len(ip_entries)
                     stats.delivered.append(
                         {
                             "handle": handle,
@@ -2257,31 +2291,48 @@ class TicketNotifier:
             # Отправляем уведомление
             try:
                 user_telegram_id = int(user["telegram_id"])
-                await self.bot.send_message(user_telegram_id, text)
-                stats.notified_users += 1
-                stats.notified_tickets += 1
-                # Дублируем отправленное сообщение всем админам для контроля
-                # (но не самому пользователю, если он админ)
-                await self._notify_admins_copy(text, exclude_user_id=user_telegram_id)
-                
-                # Сразу помечаем тикет как отправленный после успешной отправки
-                if ticket_id is not None:
-                    try:
-                        await self.underdog.mark_ticket_telegram_sent(int(ticket_id))
-                    except Exception as exc:
-                        stats.errors += 1
-                        logger.warning(
-                            "Failed to mark ticket telegram_sent",
-                            ticket_id=ticket_id,
-                            error=str(exc),
-                        )
-                        # Уведомляем админов об ошибке пометки тикета
-                        await self._notify_admins_mark_error(
-                            ticket_id=ticket_id,
-                            handle=handle,
-                            error_text=str(exc),
-                            dry_run=dry_run,
-                        )
+                msg = await self.bot.send_message(user_telegram_id, text)
+                _log_telegram_send_roundtrip(
+                    context="orders_bot_ticket_completed",
+                    chat_id=user_telegram_id,
+                    text=text,
+                    msg=msg,
+                    extra={"ticket_id": ticket_id, "handle": handle},
+                )
+                if not _telegram_message_confirmed(msg):
+                    stats.errors += 1
+                    logger.error(
+                        "Ticket notify: Telegram ok!==true — Underdog telegram_sent не меняем",
+                        ticket_id=ticket_id,
+                        chat_id=user_telegram_id,
+                        response=_telegram_api_response_dict(msg),
+                    )
+                    await self._notify_admins_ticket_delivery_error(
+                        handle=handle,
+                        entries=[{"raw": ticket}],
+                        error_text="Telegram: ok!==true или нет message_id, тикет не помечен отправленным",
+                        dry_run=dry_run,
+                    )
+                else:
+                    stats.notified_users += 1
+                    stats.notified_tickets += 1
+                    await self._notify_admins_copy(text, exclude_user_id=user_telegram_id)
+                    if ticket_id is not None:
+                        try:
+                            await self.underdog.mark_ticket_telegram_sent(int(ticket_id))
+                        except Exception as exc:
+                            stats.errors += 1
+                            logger.warning(
+                                "Failed to mark ticket telegram_sent",
+                                ticket_id=ticket_id,
+                                error=str(exc),
+                            )
+                            await self._notify_admins_mark_error(
+                                ticket_id=ticket_id,
+                                handle=handle,
+                                error_text=str(exc),
+                                dry_run=dry_run,
+                            )
             except Exception as exc:
                 stats.errors += 1
                 logger.warning(
@@ -2536,12 +2587,90 @@ def _build_ip_notification(entries: List[Dict[str, Any]]) -> str:
     return "\n".join(lines).rstrip()
 
 
-def _telegram_message_confirmed(msg: Any) -> bool:
-    """True only if Bot API вернул объект сообщения с message_id (успешная отправка)."""
+def _truncate_log_text(text: str, max_len: int = 1500) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
+def _chat_to_log_dict(chat: Any) -> Optional[Dict[str, Any]]:
+    if chat is None:
+        return None
+    out: Dict[str, Any] = {}
+    cid = getattr(chat, "id", None)
+    if cid is not None:
+        out["id"] = cid
+    ctype = getattr(chat, "type", None)
+    if ctype is not None:
+        out["type"] = str(getattr(ctype, "value", ctype))
+    title = getattr(chat, "title", None)
+    username = getattr(chat, "username", None)
+    if title:
+        out["title"] = title
+    if username:
+        out["username"] = username
+    return out or None
+
+
+def _telegram_api_response_dict(msg: Any) -> Dict[str, Any]:
+    """
+    Похоже на JSON ответа Telegram Bot API: {"ok": true, "result": {...}}.
+    Эквивалент проверки на PHP: if ($response['ok'] === true) { ... }
+    """
     if msg is None:
-        return False
+        return {"ok": False, "result": None, "description": "empty response"}
     mid = getattr(msg, "message_id", None)
-    return mid is not None
+    if mid is None:
+        return {
+            "ok": False,
+            "result": {"_type": type(msg).__name__},
+            "description": "missing message_id",
+        }
+    body: Dict[str, Any] = {
+        "message_id": int(mid),
+        "date": getattr(msg, "date", None),
+        "chat": _chat_to_log_dict(getattr(msg, "chat", None)),
+    }
+    text = getattr(msg, "text", None) or getattr(msg, "caption", None)
+    if text is not None:
+        body["text"] = _truncate_log_text(str(text), 800)
+    from_user = getattr(msg, "from_user", None) or getattr(msg, "from", None)
+    if from_user is not None:
+        body["from"] = {
+            "id": getattr(from_user, "id", None),
+            "username": getattr(from_user, "username", None),
+        }
+    return {"ok": True, "result": body}
+
+
+def _log_telegram_send_roundtrip(
+    *,
+    context: str,
+    chat_id: int,
+    text: str,
+    msg: Any,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Один JSON в лог: тело запроса sendMessage и то, что вернула Telegram (как в Postman)."""
+    line: Dict[str, Any] = {
+        "telegram_api_roundtrip": context,
+        "request": {
+            "method": "sendMessage",
+            "chat_id": chat_id,
+            "text": _truncate_log_text(text),
+            "text_full_length": len(text),
+            "parse_mode": "HTML",
+        },
+        "response": _telegram_api_response_dict(msg),
+    }
+    if extra:
+        line["extra"] = extra
+    logger.info("{}", json.dumps(line, ensure_ascii=False, default=str))
+
+
+def _telegram_message_confirmed(msg: Any) -> bool:
+    """True только если в ответе API ok === true (есть message_id)."""
+    return _telegram_api_response_dict(msg).get("ok") is True
 
 
 def _is_ip_sent(item: Dict[str, Any]) -> bool:
