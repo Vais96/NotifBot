@@ -1004,10 +1004,10 @@ class OrderNotifier:
                     msg=msg,
                     extra={"order_id": oid, "handle": handle},
                 )
-                if _telegram_message_confirmed(msg):
+                if _telegram_underdog_send_confirmed(msg):
                     await self.underdog.mark_order_telegram_sent(oid)
                     stats.notified += 1
-                else:
+                elif not _telegram_message_confirmed(msg):
                     stats.errors += 1
                     logger.error(
                         "Order notify: Telegram ok!==true — Underdog telegram_sent не меняем",
@@ -1018,6 +1018,19 @@ class OrderNotifier:
                     await self._notify_admins_delivery_error(
                         order=order,
                         error_text="Telegram: ответ без подтверждённого message_id (ok!==true), статус заказа не обновлён",
+                    )
+                else:
+                    stats.errors += 1
+                    logger.error(
+                        "Order notify: Telegram HTTP !== 200 — Underdog telegram_sent не меняем",
+                        order_id=oid,
+                        chat_id=chat_id,
+                        http_status=getattr(msg, "__tg_http_status__", None),
+                        response=_telegram_api_response_dict(msg),
+                    )
+                    await self._notify_admins_delivery_error(
+                        order=order,
+                        error_text="Telegram: HTTP статус не 200, статус заказа не обновлён",
                     )
             except (TelegramForbiddenError, TelegramBadRequest) as exc:
                 stats.errors += 1
@@ -1623,6 +1636,14 @@ class DomainNotifier:
                         telegram_id=chat_id,
                         response=_telegram_api_response_dict(msg),
                     )
+                elif not _telegram_http_ok_for_underdog(msg):
+                    stats.errors += 1
+                    logger.error(
+                        "Telegram HTTP !== 200 — не помечаем domain telegram_sent в Underdog",
+                        telegram_id=chat_id,
+                        http_status=getattr(msg, "__tg_http_status__", None),
+                        response=_telegram_api_response_dict(msg),
+                    )
                 else:
                     stats.notified_users += 1
                     stats.notified_domains += len(domain_entries)
@@ -2012,7 +2033,7 @@ class IPNotifier:
                         ],
                     },
                 )
-                # В Underdog помечаем telegram_sent только если в ответе API ok === true (есть message_id)
+                # В Underdog помечаем telegram_sent только при ok/message_id и HTTP 200
                 if not _telegram_message_confirmed(msg):
                     stats.errors += 1
                     stats.send_failures.append(
@@ -2032,6 +2053,28 @@ class IPNotifier:
                         handle=handle,
                         entries=ip_entries,
                         error_text="Telegram: ok!==true или нет message_id, Underdog не обновлён",
+                        dry_run=dry_run,
+                    )
+                elif not _telegram_http_ok_for_underdog(msg):
+                    stats.errors += 1
+                    stats.send_failures.append(
+                        {
+                            "handle": handle,
+                            "telegram_id": telegram_id,
+                            "exc_type": "TelegramHttpStatus",
+                            "error": f"HTTP не 200 (получен {getattr(msg, '__tg_http_status__', None)!r}), Underdog не обновлён",
+                        }
+                    )
+                    logger.error(
+                        "Telegram HTTP !== 200 — не помечаем IP telegram_sent в Underdog",
+                        handle=handle,
+                        telegram_id=telegram_id,
+                        http_status=getattr(msg, "__tg_http_status__", None),
+                    )
+                    await self._notify_admins_ip_delivery_error(
+                        handle=handle,
+                        entries=ip_entries,
+                        error_text="Telegram: HTTP статус не 200, Underdog не обновлён",
                         dry_run=dry_run,
                     )
                 else:
@@ -2338,6 +2381,21 @@ class TicketNotifier:
                         handle=handle,
                         entries=[{"raw": ticket}],
                         error_text="Telegram: ok!==true или нет message_id, тикет не помечен отправленным",
+                        dry_run=dry_run,
+                    )
+                elif not _telegram_http_ok_for_underdog(msg):
+                    stats.errors += 1
+                    logger.error(
+                        "Ticket notify: Telegram HTTP !== 200 — Underdog telegram_sent не меняем",
+                        ticket_id=ticket_id,
+                        chat_id=user_telegram_id,
+                        http_status=getattr(msg, "__tg_http_status__", None),
+                        response=_telegram_api_response_dict(msg),
+                    )
+                    await self._notify_admins_ticket_delivery_error(
+                        handle=handle,
+                        entries=[{"raw": ticket}],
+                        error_text="Telegram: HTTP статус не 200, тикет не помечен отправленным",
                         dry_run=dry_run,
                     )
                 else:
@@ -2679,6 +2737,8 @@ def _log_telegram_send_roundtrip(
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Один JSON в лог: тело запроса sendMessage и то, что вернула Telegram (как в Postman)."""
+    response_body = _telegram_api_response_dict(msg)
+    response_body["http_status"] = getattr(msg, "__tg_http_status__", None)
     line: Dict[str, Any] = {
         "telegram_api_roundtrip": context,
         "request": {
@@ -2688,7 +2748,7 @@ def _log_telegram_send_roundtrip(
             "text_full_length": len(text),
             "parse_mode": "HTML",
         },
-        "response": _telegram_api_response_dict(msg),
+        "response": response_body,
     }
     if extra:
         line["extra"] = extra
@@ -2698,6 +2758,16 @@ def _log_telegram_send_roundtrip(
 def _telegram_message_confirmed(msg: Any) -> bool:
     """True только если в ответе API ok === true (есть message_id)."""
     return _telegram_api_response_dict(msg).get("ok") is True
+
+
+def _telegram_http_ok_for_underdog(msg: Any) -> bool:
+    """HTTP 200 от Bot API — иначе не помечаем telegram_sent в Underdog."""
+    return getattr(msg, "__tg_http_status__", None) == 200
+
+
+def _telegram_underdog_send_confirmed(msg: Any) -> bool:
+    """Тело ответа успешно и транспорт HTTP 200 (как в Postman / curl -w %http_code)."""
+    return _telegram_message_confirmed(msg) and _telegram_http_ok_for_underdog(msg)
 
 
 def _is_ip_sent(item: Dict[str, Any]) -> bool:

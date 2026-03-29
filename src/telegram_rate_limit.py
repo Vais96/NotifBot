@@ -5,6 +5,10 @@
   если после всех повторов отправка не удалась — ``error`` и проброс исключения.
 - Остальные исключения aiogram из ``send_message`` не перехватываются здесь —
   их обрабатывают вызывающие места (например, ``underdog``: Forbidden/BadRequest и общий ``Exception``).
+
+HTTP-статус ответа Bot API сохраняется для каждого успешного вызова (см. ``StatusCapturingAiohttpSession``)
+и прокидывается в объект ``Message`` как поле ``__tg_http_status__``, чтобы при пометке ``telegram_sent``
+в Underdog требовать не только ``ok``/``message_id`` в теле JSON, но и именно HTTP 200.
 """
 
 from __future__ import annotations
@@ -13,11 +17,78 @@ import asyncio
 import time
 import weakref
 from collections import defaultdict, deque
-from typing import Any, Deque, Dict, Optional
+from contextvars import ContextVar
+from typing import Any, Deque, Dict, Optional, cast
 
+from aiohttp import ClientError
 from aiogram import Bot
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
+from aiogram.methods import TelegramMethod
+from aiogram.methods.base import TelegramType
 from loguru import logger
+
+# Последний HTTP-статус ответа Bot API в рамках текущего запроса метода (устанавливает session).
+_telegram_http_status_ctx: ContextVar[Optional[int]] = ContextVar(
+    "telegram_http_status_ctx", default=None
+)
+
+_ensure_session_lock = asyncio.Lock()
+
+
+class StatusCapturingAiohttpSession(AiohttpSession):
+    """
+    Как AiohttpSession, но перед разбором JSON сохраняет HTTP-статус (обычно 200 при успехе).
+    Telegram нередко отдаёт JSON с ``ok: false`` всё ещё с HTTP 200 — это обрабатывает check_response.
+    """
+
+    async def make_request(
+        self, bot: Bot, method: TelegramMethod[TelegramType], timeout: Optional[int] = None
+    ) -> TelegramType:
+        session = await self.create_session()
+
+        url = self.api.api_url(token=bot.token, method=method.__api_method__)
+        form = self.build_form_data(bot=bot, method=method)
+
+        try:
+            async with session.post(
+                url, data=form, timeout=self.timeout if timeout is None else timeout
+            ) as resp:
+                raw_result = await resp.text()
+        except asyncio.TimeoutError:
+            _telegram_http_status_ctx.set(None)
+            raise TelegramNetworkError(method=method, message="Request timeout error")
+        except ClientError as e:
+            _telegram_http_status_ctx.set(None)
+            raise TelegramNetworkError(method=method, message=f"{type(e).__name__}: {e}")
+        _telegram_http_status_ctx.set(resp.status)
+        response = self.check_response(
+            bot=bot, method=method, status_code=resp.status, content=raw_result
+        )
+        return cast(TelegramType, response.result)
+
+
+async def _ensure_status_capturing_session(bot: Bot) -> None:
+    if isinstance(bot.session, StatusCapturingAiohttpSession):
+        return
+    async with _ensure_session_lock:
+        if isinstance(bot.session, StatusCapturingAiohttpSession):
+            return
+        old = bot.session
+        kwargs: Dict[str, Any] = {
+            "timeout": old.timeout,
+            "json_loads": old.json_loads,
+            "json_dumps": old.json_dumps,
+            "api": old.api,
+        }
+        if isinstance(old, AiohttpSession):
+            kwargs["proxy"] = old.proxy
+            kwargs["limit"] = int(old._connector_init.get("limit", 100))
+        bot.session = StatusCapturingAiohttpSession(**kwargs)
+        try:
+            await old.close()
+        except Exception:
+            pass
 
 # Запас к официальным лимитам (~30/s общий, 1/s на чат, ~20/мин в группы/каналы).
 GLOBAL_MAX_PER_SECOND = 25
@@ -133,15 +204,24 @@ async def limited_send_message(
 ) -> Any:
     """
     send_message с учётом лимитов и повтором после TelegramRetryAfter (Flood control).
+
+    Успешный ответ дополняется ``__tg_http_status__`` (ожидается 200), если доступен
+    захват через ``StatusCapturingAiohttpSession``.
     """
+    await _ensure_status_capturing_session(bot)
     cid = int(chat_id)
     limiter = _limiter_for_bot(bot)
     attempt = 0
     last_exc: Optional[TelegramRetryAfter] = None
     while attempt < max_flood_retries:
+        _telegram_http_status_ctx.set(None)
         await limiter.acquire_before_send(cid)
         try:
-            return await bot.send_message(cid, **kwargs)
+            msg = await bot.send_message(cid, **kwargs)
+            st = _telegram_http_status_ctx.get()
+            if st is not None and hasattr(msg, "model_copy"):
+                msg = msg.model_copy(update={"__tg_http_status__": st})
+            return msg
         except TelegramRetryAfter as exc:
             last_exc = exc
             ra = getattr(exc, "retry_after", None)
