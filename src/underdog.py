@@ -743,9 +743,11 @@ class NotificationStats:
     total_orders: int = 0
     missing_contact: int = 0
     unknown_user: int = 0
+    no_recipient_mapping: int = 0
     matched_users: int = 0
     notified: int = 0
     errors: int = 0
+    delivery_failed: int = 0
     unknown_orders: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self, *, dry_run: Optional[bool] = None) -> Dict[str, Any]:
@@ -753,9 +755,11 @@ class NotificationStats:
             "total_orders": self.total_orders,
             "missing_contact": self.missing_contact,
             "unknown_user": self.unknown_user,
+            "no_recipient_mapping": self.no_recipient_mapping,
             "matched_users": self.matched_users,
             "notified": self.notified,
             "errors": self.errors,
+            "delivery_failed": self.delivery_failed,
             "unknown_orders": self.unknown_orders,
         }
         if dry_run is not None:
@@ -772,7 +776,9 @@ class DomainNotifierStats:
     notified_domains: int = 0
     missing_contact: int = 0
     unknown_user: int = 0
+    no_recipient_mapping: int = 0
     errors: int = 0
+    delivery_failed: int = 0
     unknown_items: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self, *, dry_run: Optional[bool] = None) -> Dict[str, Any]:
@@ -784,7 +790,9 @@ class DomainNotifierStats:
             "notified_domains": self.notified_domains,
             "missing_contact": self.missing_contact,
             "unknown_user": self.unknown_user,
+            "no_recipient_mapping": self.no_recipient_mapping,
             "errors": self.errors,
+            "delivery_failed": self.delivery_failed,
             "unknown_items": self.unknown_items,
         }
         if dry_run is not None:
@@ -800,6 +808,7 @@ class IPNotifierStats:
     notified_ips: int = 0
     missing_contact: int = 0
     unknown_user: int = 0
+    no_recipient_mapping: int = 0
     errors: int = 0
     unknown_items: List[Dict[str, Any]] = field(default_factory=list)
     # Детализация для логов и ответа API: кому ушло, кому нет, почему
@@ -816,7 +825,9 @@ class IPNotifierStats:
             "notified_ips": self.notified_ips,
             "missing_contact": self.missing_contact,
             "unknown_user": self.unknown_user,
+            "no_recipient_mapping": self.no_recipient_mapping,
             "errors": self.errors,
+            "delivery_failed": len(self.send_failures),
             "unknown_items": self.unknown_items,
             "delivered": self.delivered,
             "send_failures": self.send_failures,
@@ -897,7 +908,9 @@ class TicketNotifierStats:
     notified_tickets: int = 0
     missing_contact: int = 0
     unknown_user: int = 0
+    no_recipient_mapping: int = 0
     errors: int = 0
+    delivery_failed: int = 0
     unknown_items: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self, *, dry_run: Optional[bool] = None) -> Dict[str, Any]:
@@ -909,7 +922,9 @@ class TicketNotifierStats:
             "notified_tickets": self.notified_tickets,
             "missing_contact": self.missing_contact,
             "unknown_user": self.unknown_user,
+            "no_recipient_mapping": self.no_recipient_mapping,
             "errors": self.errors,
+            "delivery_failed": self.delivery_failed,
             "unknown_items": self.unknown_items,
         }
         if dry_run is not None:
@@ -955,6 +970,7 @@ class OrderNotifier:
                 user = user_map.get(handle)
                 if not user:
                     stats.unknown_user += 1
+                    stats.no_recipient_mapping += 1
                     stats.unknown_orders.append(
                         {
                             "order_id": order.get("id"),
@@ -1009,6 +1025,7 @@ class OrderNotifier:
                     stats.notified += 1
                 elif not _telegram_message_confirmed(msg):
                     stats.errors += 1
+                    stats.delivery_failed += 1
                     logger.error(
                         "Order notify: Telegram ok!==true — Underdog telegram_sent не меняем",
                         order_id=oid,
@@ -1021,6 +1038,7 @@ class OrderNotifier:
                     )
                 else:
                     stats.errors += 1
+                    stats.delivery_failed += 1
                     logger.error(
                         "Order notify: Telegram HTTP !== 200 — Underdog telegram_sent не меняем",
                         order_id=oid,
@@ -1034,6 +1052,7 @@ class OrderNotifier:
                     )
             except (TelegramForbiddenError, TelegramBadRequest) as exc:
                 stats.errors += 1
+                stats.delivery_failed += 1
                 logger.warning(
                     "Failed to deliver notification",
                     order_id=order.get("id"),
@@ -1042,6 +1061,7 @@ class OrderNotifier:
                 await self._notify_admins_delivery_error(order=order, error_text=str(exc))
             except Exception as exc:  # pragma: no cover
                 stats.errors += 1
+                stats.delivery_failed += 1
                 logger.exception(
                     "Unexpected error while notifying order",
                     order_id=order.get("id"),
@@ -1588,6 +1608,7 @@ class DomainNotifier:
             user = user_map.get(handle)
             if not user:
                 stats.unknown_user += len(domain_entries)
+                stats.no_recipient_mapping += len(domain_entries)
                 stats.unknown_items.extend(
                     {
                         "domain": entry["raw"].get("domain") or entry["raw"].get("name"),
@@ -1631,6 +1652,7 @@ class DomainNotifier:
                 )
                 if not _telegram_message_confirmed(msg):
                     stats.errors += 1
+                    stats.delivery_failed += len(domain_entries)
                     logger.error(
                         "Telegram ok!==true (нет message_id) — не помечаем domain telegram_sent в Underdog",
                         telegram_id=chat_id,
@@ -1638,6 +1660,7 @@ class DomainNotifier:
                     )
                 elif not _telegram_http_ok_for_underdog(msg):
                     stats.errors += 1
+                    stats.delivery_failed += len(domain_entries)
                     logger.error(
                         "Telegram HTTP !== 200 — не помечаем domain telegram_sent в Underdog",
                         telegram_id=chat_id,
@@ -1663,6 +1686,7 @@ class DomainNotifier:
                             )
             except Exception as exc:
                 stats.errors += 1
+                stats.delivery_failed += len(domain_entries)
                 logger.warning(
                     "Failed to send domain expiration message",
                     handle=handle,
@@ -1978,6 +2002,7 @@ class IPNotifier:
             user = user_map.get(handle)
             if not user:
                 stats.unknown_user += len(ip_entries)
+                stats.no_recipient_mapping += len(ip_entries)
                 stats.unknown_items.extend(
                     {
                         "ip": entry["raw"].get("ip") or entry["raw"].get("address"),
@@ -2329,6 +2354,7 @@ class TicketNotifier:
             
             if not user:
                 stats.unknown_user += 1
+                stats.no_recipient_mapping += 1
                 stats.unknown_items.append(
                     {
                         "ticket_id": ticket_id,
@@ -2371,6 +2397,7 @@ class TicketNotifier:
                 )
                 if not _telegram_message_confirmed(msg):
                     stats.errors += 1
+                    stats.delivery_failed += 1
                     logger.error(
                         "Ticket notify: Telegram ok!==true — Underdog telegram_sent не меняем",
                         ticket_id=ticket_id,
@@ -2385,6 +2412,7 @@ class TicketNotifier:
                     )
                 elif not _telegram_http_ok_for_underdog(msg):
                     stats.errors += 1
+                    stats.delivery_failed += 1
                     logger.error(
                         "Ticket notify: Telegram HTTP !== 200 — Underdog telegram_sent не меняем",
                         ticket_id=ticket_id,
@@ -2420,6 +2448,7 @@ class TicketNotifier:
                             )
             except Exception as exc:
                 stats.errors += 1
+                stats.delivery_failed += 1
                 logger.warning(
                     "Failed to send ticket notification message",
                     handle=handle,

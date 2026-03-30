@@ -96,6 +96,8 @@ PRIVATE_MIN_INTERVAL_S = 1.05
 GROUP_WINDOW_S = 60.0
 GROUP_MAX_PER_WINDOW = 18
 GROUP_MIN_GAP_S = 3.1
+# Не блокируем ETL на часы из-за одного проблемного чата.
+MAX_RETRY_AFTER_SECONDS = 90.0
 
 
 class TelegramOutboundRateLimiter:
@@ -200,6 +202,7 @@ async def limited_send_message(
     chat_id: int,
     *,
     max_flood_retries: int = 8,
+    max_retry_after_seconds: float = MAX_RETRY_AFTER_SECONDS,
     **kwargs: Any,
 ) -> Any:
     """
@@ -226,6 +229,15 @@ async def limited_send_message(
             last_exc = exc
             ra = getattr(exc, "retry_after", None)
             wait = float(ra if ra is not None else 1) + 0.35
+            if wait > max_retry_after_seconds:
+                logger.error(
+                    "Telegram 429 FloodWait слишком длинный (retry_after={}s > {}s), "
+                    "не ждём и отдаём ошибку выше, chat_id={}",
+                    ra,
+                    max_retry_after_seconds,
+                    cid,
+                )
+                raise exc
             # Ответ API: 429 Too Many Requests + retry_after (секунды ожидания).
             logger.warning(
                 "Telegram 429 FloodWait: attempt {}/{}, retry_after={}s, backoff {:.1f}s, chat_id={}",
