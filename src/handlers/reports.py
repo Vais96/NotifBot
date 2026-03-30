@@ -1048,7 +1048,36 @@ async def cb_report_pick_buyer(call: CallbackQuery):
     try:
         users = await db.list_users()
         scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
+        # Источник 1: классические "buyer" в tg_users.
         buyers = [u for u in users if int(u['telegram_id']) in scope_ids and (u.get('role') == "buyer")]
+        # Источник 2: buyer_id, реально используемые в tg_aliases (ваш основной кейс маршрутизации).
+        alias_rows = await db.list_aliases()
+        alias_buyer_ids: set[int] = set()
+        for row in alias_rows:
+            bid = row.get("buyer_id")
+            if bid is None:
+                continue
+            try:
+                alias_buyer_ids.add(int(bid))
+            except Exception:
+                continue
+        if alias_buyer_ids:
+            buyers_by_id = {int(u["telegram_id"]): u for u in users if u.get("telegram_id") is not None}
+            for bid in sorted(alias_buyer_ids):
+                if bid not in scope_ids:
+                    continue
+                u = buyers_by_id.get(bid)
+                if u is not None:
+                    buyers.append(u)
+        # Deduplicate by telegram_id after union from roles + aliases.
+        dedup: dict[int, dict] = {}
+        for u in buyers:
+            try:
+                uid = int(u["telegram_id"])
+            except Exception:
+                continue
+            dedup[uid] = u
+        buyers = list(dedup.values())
         # Respect currently selected team filter if present
         cur = await db.get_report_filter(call.from_user.id)
         if cur and cur.get('team_id'):
