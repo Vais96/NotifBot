@@ -86,7 +86,8 @@ def _user_row_controls(u: dict) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="mentor", callback_data=f"role:{uid}:mentor"),
          InlineKeyboardButton(text="helper", callback_data=f"role:{uid}:helper")],
         [InlineKeyboardButton(text=("Deactivate" if is_active else "Activate"), callback_data=f"active:{uid}:{0 if is_active else 1}")],
-        [InlineKeyboardButton(text="Set team", callback_data=f"team:choose:{uid}")]
+        [InlineKeyboardButton(text="Set team", callback_data=f"team:choose:{uid}")],
+        [InlineKeyboardButton(text="Удалить пользователя", callback_data=f"user:delete:{uid}")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -284,3 +285,24 @@ async def cb_set_active(call: CallbackQuery):
         await call.answer("Статус обновлен")
     else:
         await call.answer("Пользователь не найден", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("user:delete:"))
+async def cb_delete_user(call: CallbackQuery):
+    """Handle user deletion callback (soft delete / deactivate)."""
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    _, __, uid = call.data.split(":", 2)
+    target_id = int(uid)
+    try:
+        await db.deactivate_user(target_id)
+    except Exception as e:
+        logger.exception(e)
+        return await call.answer("Ошибка удаления пользователя", show_alert=True)
+    u = await db.get_user(target_id)
+    if u:
+        await call.message.edit_reply_markup(reply_markup=_user_row_controls(u))
+    await call.message.answer(
+        f"Пользователь <code>{target_id}</code> деактивирован. Бот больше не будет слать ему уведомления."
+    )
+    await call.answer("Пользователь удален", show_alert=True)

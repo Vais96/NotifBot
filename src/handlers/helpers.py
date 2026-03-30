@@ -11,7 +11,8 @@ from loguru import logger
 def _helper_row_controls(helper_id: int) -> InlineKeyboardMarkup:
     """Кнопка «Назначить байера» рядом с помощником."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Назначить байера", callback_data=f"helper:setbuyer:{helper_id}")]
+        [InlineKeyboardButton(text="Назначить байера", callback_data=f"helper:setbuyer:{helper_id}")],
+        [InlineKeyboardButton(text="Удалить помощника", callback_data=f"helper:delete:{helper_id}")],
     ])
 
 
@@ -98,5 +99,22 @@ async def cb_helper_assign(call: CallbackQuery):
         await call.answer("Ошибка", show_alert=True)
         return
     await call.answer("Готово", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("helper:delete:"))
+async def cb_helper_delete(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    _, __, helper_id_s = call.data.split(":", 2)
+    helper_id = int(helper_id_s)
+    try:
+        await db.remove_helper_and_promote_to_buyer(helper_id)
+        await call.message.answer(
+            f"Пользователь <code>{helper_id}</code> удален из помощников и переведен в роль buyer."
+        )
+    except Exception as e:
+        logger.exception("Failed to delete helper", helper_id=helper_id, error=e)
+        return await call.answer("Ошибка удаления помощника", show_alert=True)
+    await call.answer("Помощник удален", show_alert=True)
 
 

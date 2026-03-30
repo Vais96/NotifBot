@@ -961,6 +961,26 @@ class OrderNotifier:
             # Если API отдаёт telegram_id у owner — используем его, иначе ищем по нику в БД
             user_telegram_id: Optional[int] = _parse_telegram_id(owner)
             if user_telegram_id is not None:
+                # Внутреннее "мягкое удаление" (is_active=0) должно отключать любые рассылки этому пользователю.
+                db_user = await db.get_user(int(user_telegram_id))
+                if db_user is not None and not bool(db_user.get("is_active")):
+                    stats.unknown_user += 1
+                    stats.no_recipient_mapping += 1
+                    stats.unknown_orders.append(
+                        {
+                            "order_id": order.get("id"),
+                            "owner": owner.get("name"),
+                            "handle": handle,
+                            "total": order.get("total"),
+                            "name": order.get("name"),
+                        }
+                    )
+                    logger.warning(
+                        "Order owner is deactivated in tg_users, skip send",
+                        telegram_id=user_telegram_id,
+                        order_id=order.get("id"),
+                    )
+                    continue
                 user = {"telegram_id": user_telegram_id, "username": handle or owner.get("telegram") or owner.get("telegram_handle") or ""}
             else:
                 if not handle:

@@ -565,6 +565,40 @@ async def set_helper_buyer(helper_id: int, buyer_id: int) -> None:
             )
 
 
+async def clear_helper_buyer(helper_id: int) -> None:
+    """Удаляет привязку helper -> buyer."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM tg_helper_buyer WHERE helper_id=%s", (helper_id,))
+
+
+async def remove_helper_and_promote_to_buyer(helper_id: int) -> None:
+    """
+    Удаляет помощника как helper:
+    - снимает привязку к buyer
+    - переводит роль в buyer
+    """
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM tg_helper_buyer WHERE helper_id=%s", (helper_id,))
+            await cur.execute("UPDATE tg_users SET role='buyer' WHERE telegram_id=%s", (helper_id,))
+
+
+async def deactivate_user(telegram_id: int) -> None:
+    """
+    Мягкое удаление пользователя из бота:
+    - is_active=0
+    - удаляем helper-привязки (как helper и как buyer)
+    """
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("UPDATE tg_users SET is_active=0 WHERE telegram_id=%s", (telegram_id,))
+            await cur.execute("DELETE FROM tg_helper_buyer WHERE helper_id=%s OR buyer_id=%s", (telegram_id, telegram_id))
+
+
 async def list_helpers_by_buyer(buyer_id: int) -> List[int]:
     """Список telegram_id помощников, привязанных к данному байеру (для уведомлений о депозитах)."""
     pool = await init_pool()
@@ -628,7 +662,7 @@ async def fetch_users_by_usernames(usernames: Iterable[str]) -> Dict[str, Dict[s
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                f"SELECT telegram_id, username, full_name FROM tg_users WHERE LOWER(username) IN ({placeholders})",
+                f"SELECT telegram_id, username, full_name FROM tg_users WHERE is_active=1 AND LOWER(username) IN ({placeholders})",
                 tuple(normalized),
             )
             rows = await cur.fetchall()
