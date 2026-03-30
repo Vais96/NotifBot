@@ -168,6 +168,31 @@ def _report_text(title: str, agg: dict) -> str:
     return "\n".join(lines)
 
 
+async def _send_long_html(chat_id: int, text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """Send long HTML text in chunks to avoid Telegram 4096 limit."""
+    max_len = 3800
+    if len(text) <= max_len:
+        await bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        return
+    parts: list[str] = []
+    buf: list[str] = []
+    cur = 0
+    for line in text.split("\n"):
+        add = len(line) + 1
+        if buf and cur + add > max_len:
+            parts.append("\n".join(buf))
+            buf = [line]
+            cur = add
+        else:
+            buf.append(line)
+            cur += add
+    if buf:
+        parts.append("\n".join(buf))
+    for idx, part in enumerate(parts):
+        kb = reply_markup if idx == len(parts) - 1 else None
+        await bot.send_message(chat_id, part, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+
 async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int | None = None, yesterday: bool = False):
     from datetime import datetime, timezone, timedelta
     try:
@@ -248,6 +273,15 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
                 lines.append(f"{label}: <b>{cnt}</b>")
             if lines:
                 text += "\n\n" + "\n".join(lines)
+        # If a concrete buyer is selected, show offer breakdown for this buyer and period.
+        if filt.get('buyer_id'):
+            offer_dist = agg.get('offer_dist') or {}
+            if offer_dist:
+                text += "\n\n🧾 Офферы по выбранному байеру:\n"
+                for offer_name, dep_count in offer_dist.items():
+                    text += f"• <code>{html.escape(str(offer_name))}</code>: <b>{int(dep_count)}</b>\n"
+            else:
+                text += "\n\n🧾 Офферы по выбранному байеру: данных нет."
         if days == 7 and not yesterday:
             logger.info("Fetching trend data")
             trend = await db.trend_daily_sales(user_ids, days=7)
@@ -275,7 +309,7 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
                 fparts.append(f"team=<code>{tn}</code>")
             text += "\n🔎 Фильтры: " + ", ".join(fparts)
         logger.info(f"Sending report message (length={len(text)})")
-        await bot.send_message(chat_id, text, reply_markup=_reports_menu(actor_id), parse_mode=ParseMode.HTML)
+        await _send_long_html(chat_id, text, reply_markup=_reports_menu(actor_id))
         logger.info("Report sent successfully")
     except Exception as e:
         logger.exception(f"Error in _send_period_report: {e}", exc_info=e)
@@ -928,11 +962,24 @@ def _teams_picker_kb(teams: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _buyers_picker_kb(users: list[dict]) -> InlineKeyboardMarkup:
+def _buyers_picker_kb(users: list[dict], page: int = 0, page_size: int = 40) -> InlineKeyboardMarkup:
     rows = []
-    for u in users[:50]:
+    total = len(users)
+    pages = max((total - 1) // page_size + 1, 1)
+    page = max(0, min(page, pages - 1))
+    start = page * page_size
+    end = start + page_size
+    for u in users[start:end]:
         cap = f"@{u['username'] or u['telegram_id']} ({u['full_name'] or ''})"
         rows.append([InlineKeyboardButton(text=cap, callback_data=f"report:set:buyer:{u['telegram_id']}")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"report:pick:buyer:page:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="report:noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"report:pick:buyer:page:{page+1}"))
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton(text="Очистить", callback_data="report:set:buyer:-")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1001,8 +1048,7 @@ async def cb_report_pick_buyer(call: CallbackQuery):
     try:
         users = await db.list_users()
         scope_ids = set(await _resolve_scope_user_ids(call.from_user.id))
-        allowed_roles = {"buyer", "lead", "mentor", "head"}
-        buyers = [u for u in users if int(u['telegram_id']) in scope_ids and (u.get('role') in allowed_roles)]
+        buyers = [u for u in users if int(u['telegram_id']) in scope_ids and (u.get('role') == "buyer")]
         # Respect currently selected team filter if present
         cur = await db.get_report_filter(call.from_user.id)
         if cur and cur.get('team_id'):
@@ -1011,10 +1057,19 @@ async def cb_report_pick_buyer(call: CallbackQuery):
                 buyers = [u for u in buyers if (u.get('team_id') and int(u['team_id']) == team_id_filter)]
             except Exception:
                 pass
+        buyers = sorted(
+            buyers,
+            key=lambda u: (
+                str(u.get("username") or "").lower(),
+                str(u.get("full_name") or "").lower(),
+                int(u.get("telegram_id") or 0),
+            ),
+        )
         if not buyers:
             await call.message.answer("Нет доступных байеров")
         else:
-            await call.message.answer("Выберите байера:", reply_markup=_buyers_picker_kb(buyers))
+            await db.set_ui_cache_list(call.from_user.id, "buyers_picker_ids", [int(u["telegram_id"]) for u in buyers])
+            await call.message.answer("Выберите байера:", reply_markup=_buyers_picker_kb(buyers, page=0))
     except Exception as e:
         logger.exception(e)
         await call.message.answer(f"Ошибка списка байеров: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
@@ -1023,6 +1078,43 @@ async def cb_report_pick_buyer(call: CallbackQuery):
             await call.answer()
         except Exception:
             pass
+
+
+@dp.callback_query(F.data.startswith("report:pick:buyer:page:"))
+async def cb_report_pick_buyer_page(call: CallbackQuery):
+    try:
+        page = int(call.data.rsplit(":", 1)[1])
+    except Exception:
+        return await call.answer("Некорректная страница", show_alert=True)
+    # Reconstruct ids list from short-lived UI cache.
+    buyers_ids: list[int] = []
+    idx = 0
+    while True:
+        v = await db.get_ui_cache_value(call.from_user.id, "buyers_picker_ids", idx)
+        if v is None:
+            break
+        try:
+            buyers_ids.append(int(v))
+        except Exception:
+            pass
+        idx += 1
+    if not buyers_ids:
+        return await call.answer("Список байеров устарел, откройте заново", show_alert=True)
+    users = await db.list_users()
+    users_by_id = {int(u["telegram_id"]): u for u in users if u.get("telegram_id") is not None}
+    buyers = [users_by_id[uid] for uid in buyers_ids if uid in users_by_id]
+    if not buyers:
+        return await call.answer("Список байеров пуст", show_alert=True)
+    try:
+        await call.message.edit_reply_markup(reply_markup=_buyers_picker_kb(buyers, page=page))
+    except Exception:
+        await call.message.answer("Выберите байера:", reply_markup=_buyers_picker_kb(buyers, page=page))
+    await call.answer()
+
+
+@dp.callback_query(F.data == "report:noop")
+async def cb_report_noop(call: CallbackQuery):
+    await call.answer()
 
 
 @dp.callback_query(F.data == "report:pick:offer")

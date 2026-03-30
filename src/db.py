@@ -1076,11 +1076,20 @@ async def set_kpi(user_id: int, daily_goal: Optional[int] = None, weekly_goal: O
 
 async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] = None, creative: Optional[str] = None, filter_user_ids: Optional[List[int]] = None) -> Dict[str, Any]:
     """
-    Return dict with keys: count, profit, unique_clicks (if available), top_offer, geo_dist, source_dist.
+    Return dict with keys: count, profit, top_offer, geo_dist, creative_dist, buyer_dist, offer_dist, total.
     Filters: offer (by raw->'offer' or stored offer), creative (by raw JSON keys: creative/name/banner), time window [start, end).
     """
     if not user_ids:
-        return {"count": 0, "profit": 0.0, "top_offer": None, "geo_dist": {}, "source_dist": {}, "total": 0}
+        return {
+            "count": 0,
+            "profit": 0.0,
+            "top_offer": None,
+            "geo_dist": {},
+            "creative_dist": {},
+            "buyer_dist": {},
+            "offer_dist": {},
+            "total": 0,
+        }
     pool = await init_pool()
     sale_like = (
         "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
@@ -1193,6 +1202,18 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             GROUP BY uid
             ORDER BY cnt DESC
     """
+    # offer distribution (counts per offer) for detailed buyer reports
+    offer_dist_sql = f"""
+            SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')), offer) AS offer_name, COUNT(*) AS cnt
+            FROM tg_events
+            WHERE created_at >= %s AND created_at < %s
+                AND LOWER(TRIM(COALESCE(status,''))) IN ({placeholders_status})
+                AND routed_user_id IN ({placeholders_users})
+                {offer_filter_sql}
+                {creative_filter_sql}
+            GROUP BY offer_name
+            ORDER BY cnt DESC, offer_name ASC
+    """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             # total first
@@ -1217,7 +1238,24 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             await cur.execute(buyer_sql, params)
             by_rows = await cur.fetchall()
             buyer_dist = {int(r[0]): int(r[1]) for r in by_rows if r and r[0] is not None}
-    return {"count": count, "profit": profit, "top_offer": top_offer, "top_offer_count": top_offer_count, "geo_dist": geo_dist, "creative_dist": creative_dist, "buyer_dist": buyer_dist, "total": total}
+            # offer distribution
+            await cur.execute(offer_dist_sql, params)
+            off_rows = await cur.fetchall()
+            offer_dist = {
+                (str(r[0]).strip() if r[0] is not None and str(r[0]).strip() else "(пусто)"): int(r[1])
+                for r in off_rows
+            }
+    return {
+        "count": count,
+        "profit": profit,
+        "top_offer": top_offer,
+        "top_offer_count": top_offer_count,
+        "geo_dist": geo_dist,
+        "creative_dist": creative_dist,
+        "buyer_dist": buyer_dist,
+        "offer_dist": offer_dist,
+        "total": total,
+    }
 
 async def trend_daily_sales(user_ids: List[int], days: int = 7) -> List[Tuple[str, int]]:
     """Return list of (YYYY-MM-DD, count) for last N days (UTC)."""
