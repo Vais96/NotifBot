@@ -210,6 +210,13 @@ SCHEMA_SQL = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # design: order_ids for which we already sent "still not in progress after 48h" reminder (avoid duplicate)
+    """
+    CREATE TABLE IF NOT EXISTS tg_design_not_in_progress_48h_sent (
+        order_id BIGINT PRIMARY KEY,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
     # Underdog contractor_id -> telegram (designer): to notify the right person when task is assigned
     """
     CREATE TABLE IF NOT EXISTS tg_underdog_contractor_telegram (
@@ -445,6 +452,29 @@ async def mark_design_sla_24h_alert_sent(order_id: int) -> None:
         async with conn.cursor() as cur:
             await cur.execute(
                 "INSERT IGNORE INTO tg_design_sla_24h_alert_sent (order_id) VALUES (%s)",
+                (order_id,),
+            )
+
+
+async def is_design_not_in_progress_48h_sent(order_id: int) -> bool:
+    """True if we already sent 'not in progress after 48h' reminder for this order."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM tg_design_not_in_progress_48h_sent WHERE order_id = %s",
+                (order_id,),
+            )
+            return (await cur.fetchone()) is not None
+
+
+async def mark_design_not_in_progress_48h_sent(order_id: int) -> None:
+    """Mark that we sent 'not in progress after 48h' reminder for this order."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT IGNORE INTO tg_design_not_in_progress_48h_sent (order_id) VALUES (%s)",
                 (order_id,),
             )
 

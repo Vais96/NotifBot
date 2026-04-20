@@ -677,7 +677,7 @@ async def notify_design_endpoint(
     payload: DomainNotifyRequest,
     authorization: str | None = Header(default=None),
 ):
-    """Уведомлять по дизайну: назначение (order_status=0), выполнение (order_status=1) и SLA 24h warning."""
+    """Уведомлять по дизайну: назначение, выполнение, SLA24h и 48h not-in-progress reminder."""
     _require_internal_token(authorization, payload.token)
     if not settings.design_bot_token:
         return JSONResponse(
@@ -697,6 +697,10 @@ async def notify_design_endpoint(
         dry_run=payload.dry_run,
         bot_instance=design_bot,
     )
+    not_in_progress_48h_stats = await underdog.notify_design_not_in_progress_48h(
+        dry_run=payload.dry_run,
+        bot_instance=design_bot,
+    )
     return {
         "ok": True,
         "dry_run": payload.dry_run,
@@ -704,6 +708,7 @@ async def notify_design_endpoint(
             "assignments": assignment_stats,
             "completions": completion_stats,
             "sla_24h": sla_24h_stats,
+            "not_in_progress_48h": not_in_progress_48h_stats,
         },
     }
 

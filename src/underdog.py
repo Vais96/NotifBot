@@ -366,6 +366,28 @@ def _build_design_sla_warning_message(
     )
 
 
+def _build_design_not_in_progress_48h_message(
+    order: Dict[str, Any],
+    *,
+    passed_text: str,
+) -> str:
+    order_id = order.get("id")
+    name = order.get("name") or order.get("type") or "—"
+    status_text = _order_status_text(order.get("status_id"))
+    return "\n".join(
+        [
+            "⏰ Напоминание: таск все еще не взят в работу.",
+            "",
+            f"ID заказа: {order_id}",
+            f"Название: {name}",
+            f"Текущий статус: {status_text}",
+            f"Прошло с назначения: {passed_text}",
+            "",
+            "Пожалуйста, переведите таск в статус «в работе» или обновите статус по факту.",
+        ]
+    )
+
+
 def _to_utc_aware(dt: datetime) -> datetime:
     """Normalize datetime from DB/API to UTC-aware."""
     if dt.tzinfo is None:
@@ -389,6 +411,17 @@ def _is_design_order_completed(order: Dict[str, Any]) -> bool:
         if s in ("completed", "complete", "done", "success", "выполнен"):
             return True
     return False
+
+
+def _is_design_order_in_progress_or_completed(order: Dict[str, Any]) -> bool:
+    """Treat status_id in (1, 2) as already accepted into work-flow."""
+    status_id = order.get("status_id")
+    try:
+        if status_id is not None and int(status_id) in (1, 2):
+            return True
+    except Exception:
+        pass
+    return _is_design_order_completed(order)
 
 
 def _yesterday() -> date:
@@ -1558,6 +1591,104 @@ class DesignSLA24hNotifier:
 
             await db.mark_design_sla_24h_alert_sent(order_id)
             stats.matched_users += 1
+
+        return stats
+
+
+@dataclass(slots=True)
+class DesignNotInProgress48hNotifier:
+    """Reminder: 48h passed from assignment, but task is still not in 'in progress'."""
+
+    underdog: UnderdogClient
+    bot: Bot
+    reminder_hours: int = 48
+
+    async def notify_design_not_in_progress_48h(
+        self,
+        *,
+        dry_run: bool = True,
+    ) -> NotificationStats:
+        orders_all = await self.underdog.fetch_design_orders_for_statuses(range(0, 8))
+        orders_by_id: Dict[int, Dict[str, Any]] = {}
+        for o in orders_all:
+            oid = o.get("id")
+            if oid is None:
+                continue
+            if _is_design_order_in_progress_or_completed(o):
+                continue
+            orders_by_id[int(oid)] = o
+
+        stats = NotificationStats(total_orders=len(orders_by_id))
+        if not orders_by_id:
+            return stats
+
+        subscribers_set = set(await db.list_design_bot_subscribers())
+        now = datetime.now(timezone.utc)
+        reminder_delta = timedelta(hours=int(self.reminder_hours))
+
+        for order_id, order in orders_by_id.items():
+            if await db.is_design_not_in_progress_48h_sent(order_id):
+                continue
+
+            assigned_at = await db.get_design_assignment_sent_at(order_id)
+            if assigned_at is None:
+                continue
+
+            passed = now - _to_utc_aware(assigned_at)
+            if passed < reminder_delta:
+                continue
+
+            contractor = order.get("contractor") or {}
+            contractor_id = order.get("contractor_id")
+            if contractor_id is not None:
+                contractor_id = str(contractor_id).strip()
+            telegram_from_order = (contractor.get("telegram") or contractor.get("telegram_handle") or "").strip().lstrip("@")
+
+            designer_telegram_id: Optional[int] = _parse_telegram_id(contractor)
+            if designer_telegram_id is None and telegram_from_order:
+                user = await db.find_user_by_username(telegram_from_order)
+                if user:
+                    designer_telegram_id = int(user.get("telegram_id"))
+            if designer_telegram_id is None and contractor_id:
+                designer_telegram_id = await db.get_contractor_telegram_id(contractor_id)
+
+            if designer_telegram_id is None or designer_telegram_id not in subscribers_set:
+                stats.no_recipient_mapping += 1
+                stats.unknown_user += 1
+                stats.unknown_orders.append(
+                    {
+                        "order_id": order_id,
+                        "contractor_id": contractor_id,
+                        "telegram": telegram_from_order or None,
+                        "reason": "designer_not_found_or_not_subscribed",
+                    }
+                )
+                continue
+
+            message_personal = _build_design_not_in_progress_48h_message(
+                order,
+                passed_text=_format_duration_ru(passed),
+            )
+
+            if dry_run:
+                stats.matched_users += 1
+                stats.notified += 1
+                continue
+
+            try:
+                await limited_send_message(self.bot, designer_telegram_id, text=message_personal)
+                stats.notified += 1
+                stats.matched_users += 1
+                await db.mark_design_not_in_progress_48h_sent(order_id)
+            except Exception as exc:  # pragma: no cover
+                stats.errors += 1
+                stats.delivery_failed += 1
+                logger.warning(
+                    "Failed to send 48h not-in-progress reminder to designer",
+                    order_id=order_id,
+                    designer_telegram_id=designer_telegram_id,
+                    error=str(exc),
+                )
 
         return stats
 
@@ -3036,6 +3167,22 @@ async def notify_design_sla_24h(
             return stats.to_dict(dry_run=dry_run)
 
 
+async def notify_design_not_in_progress_48h(
+    dry_run: bool = True,
+    bot_instance: Optional[Bot] = None,
+) -> Dict[str, Any]:
+    """Напоминать через 48ч после назначения, если таск не переведен в статус 'в работе'."""
+    async with UnderdogClient.from_settings() as client:
+        if bot_instance is not None:
+            notifier = DesignNotInProgress48hNotifier(client, bot_instance)
+            stats = await notifier.notify_design_not_in_progress_48h(dry_run=dry_run)
+            return stats.to_dict(dry_run=dry_run)
+        async with _create_design_bot() as owned_bot:
+            notifier = DesignNotInProgress48hNotifier(client, owned_bot)
+            stats = await notifier.notify_design_not_in_progress_48h(dry_run=dry_run)
+            return stats.to_dict(dry_run=dry_run)
+
+
 async def notify_expiring_domains(
     *,
     dry_run: bool = True,
@@ -3120,7 +3267,7 @@ async def _amain() -> None:
     parser.add_argument(
         "--notify-design",
         action="store_true",
-        help="Design notify pipeline: assignments + completions + SLA24h alerts. Cron: python -m src.underdog --notify-design --apply",
+        help="Design notify pipeline: assignments + completions + SLA24h + 48h not-in-progress reminder. Cron: python -m src.underdog --notify-design --apply",
     )
     parser.add_argument("--domains", action="store_true", help="Fetch all domains from Underdog")
     parser.add_argument("--notify-domains", action="store_true", help="Notify Telegram users about expiring domains")
@@ -3189,15 +3336,22 @@ async def _amain() -> None:
                 sla_notifier = DesignSLA24hNotifier(
                     client, bot_instance, settings.admins, settings.design_broadcast_chat_ids
                 )
+                not_in_progress_48h_notifier = DesignNotInProgress48hNotifier(
+                    client, bot_instance
+                )
                 assignments = await assignment_notifier.notify_design_assignments(dry_run=dry_run)
                 completions = await completion_notifier.notify_design_completions(dry_run=dry_run)
                 sla_24h = await sla_notifier.notify_design_sla_24h(dry_run=dry_run)
+                not_in_progress_48h = await not_in_progress_48h_notifier.notify_design_not_in_progress_48h(
+                    dry_run=dry_run
+                )
             print(
                 json.dumps(
                     {
                         "assignments": assignments.to_dict(dry_run=dry_run),
                         "completions": completions.to_dict(dry_run=dry_run),
                         "sla_24h": sla_24h.to_dict(dry_run=dry_run),
+                        "not_in_progress_48h": not_in_progress_48h.to_dict(dry_run=dry_run),
                     },
                     ensure_ascii=False,
                     indent=2,
