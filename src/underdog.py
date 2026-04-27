@@ -2292,7 +2292,12 @@ class IPNotifier:
                     "IP notification not delivered (user blocked bot or chat not found)",
                     handle=handle,
                     telegram_id=user.get("telegram_id"),
+                    exc_type=type(exc).__name__,
                     error=str(exc),
+                    ips=[
+                        e["raw"].get("ip") or e["raw"].get("address")
+                        for e in ip_entries
+                    ],
                 )
                 await self._notify_admins_ip_delivery_error(
                     handle=handle,
@@ -2317,8 +2322,13 @@ class IPNotifier:
                 logger.warning(
                     "Failed to send IP expiration message",
                     handle=handle,
+                    telegram_id=user.get("telegram_id"),
                     exc_type=type(exc).__name__,
                     error=str(exc),
+                    ips=[
+                        e["raw"].get("ip") or e["raw"].get("address")
+                        for e in ip_entries
+                    ],
                 )
                 await self._notify_admins_ip_delivery_error(
                     handle=handle,
@@ -2811,7 +2821,22 @@ def _build_ip_notification(entries: List[Dict[str, Any]]) -> str:
         entries,
         key=lambda item: item.get("expires_at") or date.max,
     )
-    lines: List[str] = ["⏳ Срок действия следующих IP скоро истекает:", ""]
+    first_entry = sorted_entries[0] if sorted_entries else {}
+    owner_name = (first_entry.get("owner_name") or "").strip()
+    owner_tg = first_entry.get("display_handle") or ""
+    if owner_tg and isinstance(owner_tg, str) and not owner_tg.startswith("@"):
+        normalized_owner = _normalize_handle(owner_tg)
+        if normalized_owner:
+            owner_tg = f"@{normalized_owner}"
+
+    lines: List[str] = ["⏳ Срок действия следующих IP скоро истекает:"]
+    if owner_name or owner_tg:
+        lines.append("")
+        if owner_name:
+            lines.append(f"👤 Пользователь: {owner_name}")
+        if owner_tg:
+            lines.append(f"TG: {owner_tg}")
+    lines.append("")
     for entry in sorted_entries:
         ip_value = entry["raw"].get("ip") or entry["raw"].get("address") or "—"
         expires_at = entry.get("expires_at")
