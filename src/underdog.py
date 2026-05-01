@@ -220,6 +220,16 @@ def _resolve_owner_fields(record: Dict[str, Any]) -> tuple[Optional[str], Option
     return normalized, raw_handle, owner_name
 
 
+def _resolve_order_owner_handle(order: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """Resolve recipient handle for orders bot from corporate Telegram only."""
+    owner = order.get("owner") or {}
+    raw_handle = (
+        owner.get("corporate_telegram")
+        or order.get("corporate_telegram")
+    )
+    return _normalize_handle(raw_handle), raw_handle
+
+
 # Статусы заказов дизайна (для уведомлений)
 ORDER_STATUS_TEXTS: Dict[int, str] = {
     0: "обработка",
@@ -985,12 +995,13 @@ class OrderNotifier:
         if not orders:
             return stats
 
-        handles = [_normalize_handle((order.get("owner") or {}).get("telegram") or (order.get("owner") or {}).get("telegram_handle")) for order in orders]
+        handles = [_resolve_order_owner_handle(order)[0] for order in orders]
         valid_handles = [h for h in handles if h]
         user_map = await db.fetch_users_by_usernames(valid_handles)
 
         for order, handle in zip(orders, handles):
             owner = order.get("owner") or {}
+            _, raw_handle = _resolve_order_owner_handle(order)
             # Если API отдаёт telegram_id у owner — используем его, иначе ищем по нику в БД
             user_telegram_id: Optional[int] = _parse_telegram_id(owner)
             if user_telegram_id is not None:
@@ -1014,7 +1025,7 @@ class OrderNotifier:
                         order_id=order.get("id"),
                     )
                     continue
-                user = {"telegram_id": user_telegram_id, "username": handle or owner.get("telegram") or owner.get("telegram_handle") or ""}
+                user = {"telegram_id": user_telegram_id, "username": handle or raw_handle or ""}
             else:
                 if not handle:
                     stats.missing_contact += 1
