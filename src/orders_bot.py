@@ -140,13 +140,22 @@ def _format_user_line(user: Dict[str, Any]) -> str:
     return f"{status} {full_name} ({username}) — ID {telegram_id}, с {created_text}"
 
 
-def _slice_users(users: Iterable[Dict[str, Any]], limit: int = 30) -> List[Dict[str, Any]]:
-    sliced: List[Dict[str, Any]] = []
-    for user in users:
-        sliced.append(user)
-        if len(sliced) >= limit:
-            break
-    return sliced
+def _chunk_lines(lines: Iterable[str], *, max_chars: int = 3500) -> List[str]:
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1  # account for newline
+        if current and current_len + line_len > max_chars:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_len
+            continue
+        current.append(line)
+        current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
 
 
 @orders_dp.message(Command("users"))
@@ -160,25 +169,39 @@ async def list_bot_users(message: Message) -> None:
         return
     active_users = [user for user in users if int(user.get("is_active") or 0) == 1]
     inactive_count = len(users) - len(active_users)
-    shown = _slice_users(active_users, limit=30)
-    lines = [
+    header_lines = [
         "👥 <b>Активные пользователи бота</b>",
         f"Всего активных: {len(active_users)}",
     ]
     if inactive_count:
-        lines.append(f"Неактивных: {inactive_count}")
-    lines.append("")
-    for user in shown:
-        lines.append(_format_user_line(user))
-    if len(active_users) > len(shown):
-        lines.append(f"… и ещё {len(active_users) - len(shown)} пользователей")
-    lines.extend(
-        [
-            "",
-            "Чтобы отписать пользователя, отправь команду /unsubscribe <telegram_id>.",
-        ]
-    )
-    await message.answer("\n".join(lines), reply_markup=build_menu_keyboard(is_admin=True))
+        header_lines.append(f"Неактивных: {inactive_count}")
+    header_lines.append("")
+
+    user_lines = [_format_user_line(user) for user in active_users]
+    user_chunks = _chunk_lines(user_lines, max_chars=3500)
+    total_parts = len(user_chunks)
+
+    if not user_chunks:
+        await message.answer("\n".join(header_lines), reply_markup=build_menu_keyboard(is_admin=True))
+        return
+
+    for index, chunk in enumerate(user_chunks, start=1):
+        lines: List[str] = []
+        if index == 1:
+            lines.extend(header_lines)
+        lines.append(f"Часть {index}/{total_parts}")
+        lines.append(chunk)
+        if index == total_parts:
+            lines.extend(
+                [
+                    "",
+                    "Чтобы отписать пользователя, отправь команду /unsubscribe <telegram_id>.",
+                ]
+            )
+        await message.answer(
+            "\n".join(lines),
+            reply_markup=build_menu_keyboard(is_admin=True) if index == total_parts else None,
+        )
 
 
 @orders_dp.message(Command("unsubscribe"))
