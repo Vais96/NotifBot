@@ -9,6 +9,35 @@ from .. import db
 from loguru import logger
 
 
+def _chunk_text_lines(lines: list[str], *, max_chars: int = 3500) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current and current_len + line_len > max_chars:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_len
+            continue
+        current.append(line)
+        current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+async def _send_users_chunked(chat_id: int, lines: list[str]) -> None:
+    chunks = _chunk_text_lines(lines)
+    if not chunks:
+        await bot.send_message(chat_id, "Пользователи:\n(пусто)")
+        return
+    total = len(chunks)
+    for idx, chunk in enumerate(chunks, start=1):
+        prefix = "Пользователи:\n" if idx == 1 else f"Пользователи (часть {idx}/{total}):\n"
+        await bot.send_message(chat_id, prefix + chunk)
+
+
 async def _send_whoami(chat_id: int, user_id: int, username: str | None):
     """Send whoami message."""
     await bot.send_message(chat_id, f"Ваш Telegram ID: <code>{user_id}</code>\nUsername: @{username or '-'}")
@@ -42,7 +71,7 @@ async def _send_list_users(chat_id: int, actor_id: int):
         if u['telegram_id'] == actor_id and actor_id in ADMIN_IDS:
             display_role = 'admin'
         lines.append(f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} — {u['full_name'] or ''} | role={display_role} | team={u['team_id'] or '-'}")
-    await bot.send_message(chat_id, "Пользователи:\n" + "\n".join(lines))
+    await _send_users_chunked(chat_id, lines)
 
 
 async def _send_list_routes(chat_id: int, actor_id: int):
@@ -151,8 +180,7 @@ async def on_list_users(message: Message):
         if u['telegram_id'] == me and me in ADMIN_IDS:
             display_role = 'admin'
         rendered.append(f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} — {u['full_name'] or ''} | role={display_role} | team={u['team_id'] or '-'}")
-    lines = rendered
-    await message.answer("Пользователи:\n" + "\n".join(lines))
+    await _send_users_chunked(message.chat.id, rendered)
 
 
 @dp.message(Command("manage"))
