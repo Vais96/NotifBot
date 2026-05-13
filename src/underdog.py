@@ -230,6 +230,29 @@ def _resolve_order_owner_handle(order: Dict[str, Any]) -> tuple[Optional[str], O
     return _normalize_handle(raw_handle), raw_handle
 
 
+def _resolve_ticket_recipient_handle(ticket: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """Ник для tg_users: сначала корп. Telegram (как у заказов), иначе личный telegram / handle."""
+    owner = ticket.get("owner") or {}
+    candidates: list[Any] = [
+        owner.get("corporate_telegram"),
+        ticket.get("corporate_telegram"),
+        owner.get("telegram"),
+        owner.get("telegram_handle"),
+        ticket.get("telegram"),
+        ticket.get("telegram_handle"),
+    ]
+    for raw in candidates:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        normalized = _normalize_handle(text)
+        if normalized:
+            return normalized, text
+    return None, None
+
+
 # Статусы заказов дизайна (для уведомлений)
 ORDER_STATUS_TEXTS: Dict[int, str] = {
     0: "обработка",
@@ -2480,16 +2503,33 @@ class TicketNotifier:
             
             if _is_ticket_sent(ticket):
                 continue
-            
-            handle, raw_handle, owner_name = _resolve_owner_fields(ticket)
-            if handle:
+
+            owner = ticket.get("owner") or {}
+            owner_name = owner.get("name")
+            api_telegram_id = _parse_telegram_id(owner)
+            handle, raw_handle = _resolve_ticket_recipient_handle(ticket)
+
+            if api_telegram_id is not None:
+                valid_tickets.append(
+                    {
+                        "ticket": ticket,
+                        "handle": handle,
+                        "raw_handle": raw_handle,
+                        "owner_name": owner_name,
+                        "api_telegram_id": api_telegram_id,
+                    }
+                )
+            elif handle:
                 handles_to_fetch.add(handle)
-                valid_tickets.append({
-                    "ticket": ticket,
-                    "handle": handle,
-                    "raw_handle": raw_handle,
-                    "owner_name": owner_name,
-                })
+                valid_tickets.append(
+                    {
+                        "ticket": ticket,
+                        "handle": handle,
+                        "raw_handle": raw_handle,
+                        "owner_name": owner_name,
+                        "api_telegram_id": None,
+                    }
+                )
             else:
                 stats.missing_contact += 1
                 stats.unknown_items.append(
@@ -2517,13 +2557,40 @@ class TicketNotifier:
         # Обрабатываем каждый тикет индивидуально: получили -> отправили -> пометили
         for entry in valid_tickets:
             ticket = entry["ticket"]
-            handle = entry["handle"]
+            handle = entry.get("handle")
+            raw_handle = entry.get("raw_handle")
+            api_telegram_id = entry.get("api_telegram_id")
             ticket_id = ticket.get("id")
             stats.completed_tickets += 1
-            
-            # Получаем пользователя из кэша
-            user = user_map.get(handle)
-            
+
+            owner = ticket.get("owner") or {}
+            user: Optional[Dict[str, Any]] = None
+
+            if api_telegram_id is not None:
+                db_user = await db.get_user(int(api_telegram_id))
+                if db_user is not None and not bool(db_user.get("is_active")):
+                    stats.unknown_user += 1
+                    stats.no_recipient_mapping += 1
+                    stats.unknown_items.append(
+                        {
+                            "ticket_id": ticket_id,
+                            "type": ticket.get("type") or ticket.get("ticket_type"),
+                            "handle": handle,
+                        }
+                    )
+                    logger.warning(
+                        "Ticket owner is deactivated in tg_users, skip send",
+                        telegram_id=api_telegram_id,
+                        ticket_id=ticket_id,
+                    )
+                    continue
+                user = {
+                    "telegram_id": api_telegram_id,
+                    "username": handle or raw_handle or "",
+                }
+            elif handle:
+                user = user_map.get(handle)
+
             if not user:
                 stats.unknown_user += 1
                 stats.no_recipient_mapping += 1
