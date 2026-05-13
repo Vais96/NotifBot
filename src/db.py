@@ -1,7 +1,7 @@
 import asyncio
 import aiomysql
 from typing import Optional, List, Dict, Any, Tuple, Iterable
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from loguru import logger
 from .config import settings
 import urllib.parse
@@ -226,6 +226,15 @@ SCHEMA_SQL = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # Dedupe admin Telegram alerts (Orders bot etc.): max once per hour per key, then silence after 24h from first send
+    """
+    CREATE TABLE IF NOT EXISTS tg_admin_notify_throttle (
+        dedupe_key VARCHAR(384) NOT NULL PRIMARY KEY,
+        first_sent_at DATETIME NOT NULL,
+        last_sent_at DATETIME NOT NULL,
+        INDEX idx_admin_throttle_first (first_sent_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 
@@ -342,6 +351,71 @@ async def close_pool() -> None:
         _pool.close()
         await _pool.wait_closed()
         _pool = None
+
+
+_ADMIN_ALERT_MIN_INTERVAL = timedelta(hours=1)
+_ADMIN_ALERT_MUTE_AFTER_FIRST = timedelta(hours=24)
+
+
+def _utc_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _dt_as_utc_naive(dt: Any) -> datetime:
+    if not isinstance(dt, datetime):
+        return _utc_naive()
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+async def admin_notify_throttle_allow_send(dedupe_key: str) -> bool:
+    """Отправить ли админский алерт в Telegram. Первый раз пишем в БД; далее не чаще раза в час; спустя 24 ч с первого — больше не слать (пока не clear)."""
+    k = (dedupe_key or "none")[:384]
+    pool = await init_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT first_sent_at, last_sent_at FROM tg_admin_notify_throttle WHERE dedupe_key=%s",
+                    (k,),
+                )
+                row = await cur.fetchone()
+                now = _utc_naive()
+                if row is None:
+                    await cur.execute(
+                        "INSERT INTO tg_admin_notify_throttle (dedupe_key, first_sent_at, last_sent_at) VALUES (%s, %s, %s)",
+                        (k, now, now),
+                    )
+                    return True
+                first_sent = _dt_as_utc_naive(row[0])
+                last_sent = _dt_as_utc_naive(row[1])
+                if now - first_sent >= _ADMIN_ALERT_MUTE_AFTER_FIRST:
+                    return False
+                if now - last_sent < _ADMIN_ALERT_MIN_INTERVAL:
+                    return False
+                await cur.execute(
+                    "UPDATE tg_admin_notify_throttle SET last_sent_at=%s WHERE dedupe_key=%s",
+                    (now, k),
+                )
+                return True
+    except Exception as e:
+        logger.warning("admin_notify_throttle_allow_send failed, allowing send", key=k, error=str(e))
+        return True
+
+
+async def admin_notify_throttle_clear(dedupe_key: str) -> None:
+    """Сбросить троттлинг для ключа (например после успешной доставки заказа)."""
+    k = (dedupe_key or "")[:384]
+    if not k:
+        return
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM tg_admin_notify_throttle WHERE dedupe_key=%s", (k,))
+    except Exception as e:
+        logger.warning("admin_notify_throttle_clear failed", key=k, error=str(e))
 
 
 async def add_design_bot_subscriber(chat_id: int) -> None:

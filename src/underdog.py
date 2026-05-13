@@ -1080,6 +1080,7 @@ class OrderNotifier:
                 )
                 if _telegram_underdog_send_confirmed(msg):
                     await self.underdog.mark_order_telegram_sent(oid)
+                    await db.admin_notify_throttle_clear(f"orders:delivery_err:{oid}")
                     stats.notified += 1
                 elif not _telegram_message_confirmed(msg):
                     stats.errors += 1
@@ -1136,6 +1137,8 @@ class OrderNotifier:
         orders = list(unknown_orders)
         if not self.admin_ids or not orders:
             return
+        if not await db.admin_notify_throttle_allow_send("orders:unknown_digest"):
+            return
         lines = [
             "⚠️ Не смог найти пользователей в боте для заказов:",
             "",
@@ -1164,6 +1167,10 @@ class OrderNotifier:
         error_text: str,
     ) -> None:
         if not self.admin_ids:
+            return
+        oid = order.get("id")
+        dedupe_key = f"orders:delivery_err:{oid}" if oid is not None else "orders:delivery_err:unknown"
+        if not await db.admin_notify_throttle_allow_send(dedupe_key):
             return
         owner = order.get("owner") or {}
         corp_handle, _ = _resolve_order_owner_handle(order)
@@ -1840,6 +1847,9 @@ class DomainNotifier:
                                 domain_id=domain_id,
                                 error=str(exc),
                             )
+                    hk = handle or "none"
+                    await db.admin_notify_throttle_clear(f"domains:delivery_err:h:{hk}")
+                    await db.admin_notify_throttle_clear(f"domains:missing:h:{hk}")
             except Exception as exc:
                 stats.errors += 1
                 stats.delivery_failed += len(domain_entries)
@@ -1875,6 +1885,8 @@ class DomainNotifier:
 
     async def _alert_admins(self, unknown_items: List[Dict[str, Any]]) -> None:
         if not self.admin_ids or not unknown_items:
+            return
+        if not await db.admin_notify_throttle_allow_send("domains:unknown_digest"):
             return
         lines = [
             "⚠️ Не удалось отправить уведомление по доменам:",
@@ -1923,6 +1935,9 @@ class DomainNotifier:
                 owner=owner_name,
             )
             return
+        hk = handle or "none"
+        if not await db.admin_notify_throttle_allow_send(f"domains:missing:h:{hk}"):
+            return
         for admin_id in self.admin_ids:
             try:
                 await limited_send_message(self.bot, int(admin_id), text=text)
@@ -1958,6 +1973,9 @@ class DomainNotifier:
                 handle=handle,
                 error=error_text,
             )
+            return
+        hk = handle or "none"
+        if not await db.admin_notify_throttle_allow_send(f"domains:delivery_err:h:{hk}"):
             return
         for admin_id in self.admin_ids:
             try:
@@ -2279,6 +2297,9 @@ class IPNotifier:
                         ip_entries=ip_entries,
                         stats=stats,
                     )
+                    hk = handle or "none"
+                    await db.admin_notify_throttle_clear(f"ip:delivery_err:h:{hk}")
+                    await db.admin_notify_throttle_clear(f"ip:missing:h:{hk}")
             except (TelegramForbiddenError, TelegramBadRequest) as exc:
                 stats.errors += 1
                 stats.send_failures.append(
@@ -2374,6 +2395,9 @@ class IPNotifier:
                 owner=owner_name,
             )
             return
+        hk = handle or "none"
+        if not await db.admin_notify_throttle_allow_send(f"ip:missing:h:{hk}"):
+            return
         for admin_id in self.admin_ids:
             try:
                 await self._send_admin_dm(int(admin_id), text)
@@ -2411,6 +2435,9 @@ class IPNotifier:
                 error=error_text,
             )
             return
+        hk = handle or "none"
+        if not await db.admin_notify_throttle_allow_send(f"ip:delivery_err:h:{hk}"):
+            return
         for admin_id in self.admin_ids:
             try:
                 await self._send_admin_dm(int(admin_id), text)
@@ -2437,6 +2464,8 @@ class IPNotifier:
         if len(unknown_items) > 20:
             lines.append(f"… и ещё {len(unknown_items) - 20} IP")
         text = "\n".join(lines)
+        if not await db.admin_notify_throttle_allow_send("ip:unknown_digest"):
+            return
         for admin_id in self.admin_ids:
             try:
                 await self._send_admin_dm(int(admin_id), text)
@@ -2621,6 +2650,10 @@ class TicketNotifier:
                     if ticket_id is not None:
                         try:
                             await self.underdog.mark_ticket_telegram_sent(int(ticket_id))
+                            tid = int(ticket_id)
+                            await db.admin_notify_throttle_clear(f"tickets:delivery_err:{tid}")
+                            await db.admin_notify_throttle_clear(f"tickets:mark_err:{tid}")
+                            await db.admin_notify_throttle_clear(f"tickets:missing_user:{tid}")
                         except Exception as exc:
                             stats.errors += 1
                             logger.warning(
@@ -2698,6 +2731,11 @@ class TicketNotifier:
                 owner=owner_name,
             )
             return
+        raw = entries[0].get("raw") if entries else None
+        tid = raw.get("id") if isinstance(raw, dict) else None
+        dedupe_key = f"tickets:missing_user:{tid}" if tid is not None else "tickets:missing_user:unknown"
+        if not await db.admin_notify_throttle_allow_send(dedupe_key):
+            return
         for admin_id in self.admin_ids:
             try:
                 await limited_send_message(self.bot, int(admin_id), text=text)
@@ -2737,6 +2775,8 @@ class TicketNotifier:
                 error=error_text,
             )
             return
+        if not await db.admin_notify_throttle_allow_send(f"tickets:mark_err:{int(ticket_id)}"):
+            return
         for admin_id in self.admin_ids:
             try:
                 await limited_send_message(self.bot, int(admin_id), text=text)
@@ -2773,6 +2813,11 @@ class TicketNotifier:
                 error=error_text,
             )
             return
+        raw = entries[0].get("raw") if entries else None
+        tid = raw.get("id") if isinstance(raw, dict) else None
+        dedupe_key = f"tickets:delivery_err:{tid}" if tid is not None else "tickets:delivery_err:unknown"
+        if not await db.admin_notify_throttle_allow_send(dedupe_key):
+            return
         for admin_id in self.admin_ids:
             try:
                 await limited_send_message(self.bot, int(admin_id), text=text)
@@ -2798,6 +2843,8 @@ class TicketNotifier:
         if len(unknown_items) > 20:
             lines.append(f"… и ещё {len(unknown_items) - 20} тикетов")
         text = "\n".join(lines)
+        if not await db.admin_notify_throttle_allow_send("tickets:unknown_digest"):
+            return
         for admin_id in self.admin_ids:
             try:
                 await limited_send_message(self.bot, int(admin_id), text=text)
