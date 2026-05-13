@@ -221,36 +221,14 @@ def _resolve_owner_fields(record: Dict[str, Any]) -> tuple[Optional[str], Option
 
 
 def _resolve_order_owner_handle(order: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-    """Resolve recipient handle for orders bot from corporate Telegram only."""
+    """Корпоративный Telegram @ (owner или заказ/тикет) — единственный источник для Orders bot.
+
+    Поле ``owner.telegram_id`` из API не используем: там часто устаревший личный аккаунт.
+    Доставка только на chat_id из ``tg_users`` после /start, матч по этому нику.
+    """
     owner = order.get("owner") or {}
-    raw_handle = (
-        owner.get("corporate_telegram")
-        or order.get("corporate_telegram")
-    )
+    raw_handle = owner.get("corporate_telegram") or order.get("corporate_telegram")
     return _normalize_handle(raw_handle), raw_handle
-
-
-def _resolve_ticket_recipient_handle(ticket: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-    """Ник для tg_users: сначала корп. Telegram (как у заказов), иначе личный telegram / handle."""
-    owner = ticket.get("owner") or {}
-    candidates: list[Any] = [
-        owner.get("corporate_telegram"),
-        ticket.get("corporate_telegram"),
-        owner.get("telegram"),
-        owner.get("telegram_handle"),
-        ticket.get("telegram"),
-        ticket.get("telegram_handle"),
-    ]
-    for raw in candidates:
-        if raw is None:
-            continue
-        text = str(raw).strip()
-        if not text:
-            continue
-        normalized = _normalize_handle(text)
-        if normalized:
-            return normalized, text
-    return None, None
 
 
 # Статусы заказов дизайна (для уведомлений)
@@ -1024,59 +1002,52 @@ class OrderNotifier:
 
         for order, handle in zip(orders, handles):
             owner = order.get("owner") or {}
-            _, raw_handle = _resolve_order_owner_handle(order)
-            # Если API отдаёт telegram_id у owner — используем его, иначе ищем по нику в БД
-            user_telegram_id: Optional[int] = _parse_telegram_id(owner)
-            if user_telegram_id is not None:
-                # Внутреннее "мягкое удаление" (is_active=0) должно отключать любые рассылки этому пользователю.
-                db_user = await db.get_user(int(user_telegram_id))
-                if db_user is not None and not bool(db_user.get("is_active")):
-                    stats.unknown_user += 1
-                    stats.no_recipient_mapping += 1
-                    stats.unknown_orders.append(
-                        {
-                            "order_id": order.get("id"),
-                            "owner": owner.get("name"),
-                            "handle": handle,
-                            "total": order.get("total"),
-                            "name": order.get("name"),
-                        }
-                    )
-                    logger.warning(
-                        "Order owner is deactivated in tg_users, skip send",
-                        telegram_id=user_telegram_id,
-                        order_id=order.get("id"),
-                    )
-                    continue
-                user = {"telegram_id": user_telegram_id, "username": handle or raw_handle or ""}
-            else:
-                if not handle:
-                    stats.missing_contact += 1
-                    logger.warning("Order lacks Telegram handle", order_id=order.get("id"))
-                    continue
-                user = user_map.get(handle)
-                if not user:
-                    stats.unknown_user += 1
-                    stats.no_recipient_mapping += 1
-                    stats.unknown_orders.append(
-                        {
-                            "order_id": order.get("id"),
-                            "owner": owner.get("name"),
-                            "handle": handle,
-                            "total": order.get("total"),
-                            "name": order.get("name"),
-                        }
-                    )
-                    logger.warning(
-                        "Telegram handle not found among bot users",
-                        handle=handle,
-                        order_id=order.get("id"),
-                    )
-                    continue
-                try:
-                    user_telegram_id = int(user.get("telegram_id"))
-                except Exception:
-                    user_telegram_id = None
+            if not handle:
+                stats.missing_contact += 1
+                logger.warning("Order lacks corporate Telegram handle", order_id=order.get("id"))
+                continue
+            user = user_map.get(handle)
+            if not user:
+                stats.unknown_user += 1
+                stats.no_recipient_mapping += 1
+                stats.unknown_orders.append(
+                    {
+                        "order_id": order.get("id"),
+                        "owner": owner.get("name"),
+                        "handle": handle,
+                        "total": order.get("total"),
+                        "name": order.get("name"),
+                    }
+                )
+                logger.warning(
+                    "Telegram handle not found among bot users (corporate @ must match username after /start)",
+                    handle=handle,
+                    order_id=order.get("id"),
+                )
+                continue
+            db_user = await db.get_user(int(user["telegram_id"]))
+            if db_user is not None and not bool(db_user.get("is_active")):
+                stats.unknown_user += 1
+                stats.no_recipient_mapping += 1
+                stats.unknown_orders.append(
+                    {
+                        "order_id": order.get("id"),
+                        "owner": owner.get("name"),
+                        "handle": handle,
+                        "total": order.get("total"),
+                        "name": order.get("name"),
+                    }
+                )
+                logger.warning(
+                    "Order recipient is deactivated in tg_users, skip send",
+                    telegram_id=user.get("telegram_id"),
+                    order_id=order.get("id"),
+                )
+                continue
+            try:
+                user_telegram_id = int(user.get("telegram_id"))
+            except Exception:
+                user_telegram_id = None
 
             if limit_set is not None and (user_telegram_id not in limit_set):
                 continue
@@ -1195,12 +1166,12 @@ class OrderNotifier:
         if not self.admin_ids:
             return
         owner = order.get("owner") or {}
-        normalized_handle = _normalize_handle(owner.get("telegram") or owner.get("telegram_handle"))
+        corp_handle, _ = _resolve_order_owner_handle(order)
         lines = [
             "⚠️ Ошибка отправки уведомления о заказе",
             f"ID: {order.get('id')}",
             f"Покупатель: {owner.get('name') or '—'}",
-            f"Username: @{normalized_handle}" if normalized_handle else "Username: (не указан)",
+            f"Корп. Telegram @: @{corp_handle}" if corp_handle else "Корп. Telegram: (не указан)",
             f"Сумма: {order.get('total') or order.get('price') or '0'}",
             f"Ошибка: {error_text}",
         ]
@@ -2506,20 +2477,9 @@ class TicketNotifier:
 
             owner = ticket.get("owner") or {}
             owner_name = owner.get("name")
-            api_telegram_id = _parse_telegram_id(owner)
-            handle, raw_handle = _resolve_ticket_recipient_handle(ticket)
+            handle, raw_handle = _resolve_order_owner_handle(ticket)
 
-            if api_telegram_id is not None:
-                valid_tickets.append(
-                    {
-                        "ticket": ticket,
-                        "handle": handle,
-                        "raw_handle": raw_handle,
-                        "owner_name": owner_name,
-                        "api_telegram_id": api_telegram_id,
-                    }
-                )
-            elif handle:
+            if handle:
                 handles_to_fetch.add(handle)
                 valid_tickets.append(
                     {
@@ -2527,7 +2487,6 @@ class TicketNotifier:
                         "handle": handle,
                         "raw_handle": raw_handle,
                         "owner_name": owner_name,
-                        "api_telegram_id": None,
                     }
                 )
             else:
@@ -2558,16 +2517,12 @@ class TicketNotifier:
         for entry in valid_tickets:
             ticket = entry["ticket"]
             handle = entry.get("handle")
-            raw_handle = entry.get("raw_handle")
-            api_telegram_id = entry.get("api_telegram_id")
             ticket_id = ticket.get("id")
             stats.completed_tickets += 1
 
-            owner = ticket.get("owner") or {}
-            user: Optional[Dict[str, Any]] = None
-
-            if api_telegram_id is not None:
-                db_user = await db.get_user(int(api_telegram_id))
+            user = user_map.get(handle) if handle else None
+            if user is not None:
+                db_user = await db.get_user(int(user["telegram_id"]))
                 if db_user is not None and not bool(db_user.get("is_active")):
                     stats.unknown_user += 1
                     stats.no_recipient_mapping += 1
@@ -2579,17 +2534,11 @@ class TicketNotifier:
                         }
                     )
                     logger.warning(
-                        "Ticket owner is deactivated in tg_users, skip send",
-                        telegram_id=api_telegram_id,
+                        "Ticket recipient is deactivated in tg_users, skip send",
+                        telegram_id=user.get("telegram_id"),
                         ticket_id=ticket_id,
                     )
                     continue
-                user = {
-                    "telegram_id": api_telegram_id,
-                    "username": handle or raw_handle or "",
-                }
-            elif handle:
-                user = user_map.get(handle)
 
             if not user:
                 stats.unknown_user += 1
