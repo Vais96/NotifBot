@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from datetime import datetime, timezone, date
 from typing import Dict, Tuple, Optional
 
@@ -116,6 +117,83 @@ async def _resolve_daily_counter(user_id: int, db_value: int | None) -> int:
             display_value=display,
         )
     return display
+
+_SALE_LIKE_STATUSES = frozenset(
+    {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
+)
+
+
+def _keitaro_raw_status(data: dict) -> str:
+    raw_status_value = (
+        data.get("status")
+        or data.get("conversion_status")
+        or data.get("conversion.status")
+        or data.get("status_name")
+        or data.get("state")
+        or data.get("action")
+        or ""
+    )
+    return str(raw_status_value).lower()
+
+
+def _keitaro_is_sale(data: dict) -> bool:
+    return _keitaro_raw_status(data) in _SALE_LIKE_STATUSES
+
+
+def _keitaro_sale_postback_fingerprint(data: dict) -> str | None:
+    """Stable idempotency key for sale postbacks (SHA-256 hex). None if click/sub id missing."""
+    conv_id = (
+        data.get("conversion_id")
+        or data.get("conversion.id")
+        or data.get("external_id")
+        or data.get("external_conversion_id")
+    )
+    if conv_id is not None:
+        s = str(conv_id).strip()
+        if s and not _is_unexpanded_placeholder(s):
+            basis = f"conv:{s}"
+            return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+    clickid = (
+        data.get("subid")
+        or data.get("sub_id")
+        or data.get("clickid")
+        or data.get("click_id")
+        or data.get("tid")
+    )
+    if clickid is None or not str(clickid).strip():
+        return None
+    s_click = str(clickid).strip()
+
+    payout_raw = (
+        data.get("profit")
+        or data.get("payout")
+        or data.get("revenue")
+        or data.get("conversion_revenue")
+    )
+    payout_s = ""
+    if payout_raw not in (None, ""):
+        try:
+            payout_s = f"{float(str(payout_raw).replace(',', '.')):.6f}"
+        except Exception:
+            payout_s = str(payout_raw).strip()
+
+    offer_key = (
+        data.get("offer_id")
+        or data.get("offer.id")
+        or data.get("offer_name")
+        or data.get("offer")
+        or ""
+    )
+    if not isinstance(offer_key, str):
+        offer_key = str(offer_key)
+    offer_key = offer_key.strip()
+    if len(offer_key) > 160:
+        offer_key = offer_key[:160]
+
+    basis = f"click:{s_click}|p:{payout_s}|o:{offer_key}"
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
 
 def _has_meaningful_postback_fields(data: dict) -> bool:
     if not data:
@@ -250,12 +328,36 @@ async def _run_keitaro_postback_job(data: dict) -> None:
             subid=data.get("subid") or data.get("sub_id"),
             routed=result.get("routed"),
             sale=result.get("sale"),
+            duplicate=result.get("duplicate"),
         )
     except Exception:
         logger.exception("Keitaro postback background job failed")
 
 
 async def _process_keitaro_postback(data: dict) -> dict:
+    if _keitaro_is_sale(data):
+        fp = _keitaro_sale_postback_fingerprint(data)
+        if fp:
+            try:
+                first = await db.claim_keitaro_sale_postback(fp)
+            except Exception as e:
+                logger.warning(f"Keitaro sale dedupe failed, processing anyway: {e}")
+                first = True
+            if not first:
+                logger.info(
+                    "Duplicate Keitaro sale postback ignored",
+                    fingerprint=fp,
+                    subid=data.get("subid") or data.get("sub_id"),
+                )
+                return {
+                    "ok": True,
+                    "duplicate": True,
+                    "routed": False,
+                    "buyer_id": None,
+                    "fallback": False,
+                    "sale": True,
+                }
+
     # Try alias-based routing by campaign_name prefix
     campaign_name = data.get("campaign_name") or data.get("campaign")
     alias_key = None
@@ -316,18 +418,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
     # do not return early: admins should still receive notifications even if not routed
 
     # Map status and accept only sale-like statuses
-    raw_status_value = (
-        data.get("status")
-        or data.get("conversion_status")
-        or data.get("conversion.status")
-        or data.get("status_name")
-        or data.get("state")
-        or data.get("action")
-        or ""
-    )
-    raw_status = str(raw_status_value).lower()
-    sale_like = {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
-    is_sale = raw_status in sale_like
+    is_sale = _keitaro_is_sale(data)
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
     offer_id = data.get("offer_id") or data.get("offer.id")

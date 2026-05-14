@@ -235,6 +235,13 @@ SCHEMA_SQL = [
         INDEX idx_admin_throttle_first (first_sent_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # Keitaro may send the same sale S2S postback twice; fingerprint prevents double log + notify + daily count
+    """
+    CREATE TABLE IF NOT EXISTS tg_keitaro_sale_dedupe (
+        dedupe_key CHAR(64) NOT NULL PRIMARY KEY,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 
@@ -947,6 +954,18 @@ async def find_user_for_postback(offer: Optional[str], country: Optional[str], s
             )
             row = await cur.fetchone()
             return int(row[0]) if row else None
+
+async def claim_keitaro_sale_postback(fingerprint: str) -> bool:
+    """Return True if this sale postback should be processed (first occurrence); False if duplicate."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT IGNORE INTO tg_keitaro_sale_dedupe (dedupe_key) VALUES (%s)",
+                (fingerprint,),
+            )
+            return int(cur.rowcount or 0) == 1
+
 
 async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
     pool = await init_pool()
