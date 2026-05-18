@@ -20,6 +20,13 @@ class Settings(BaseModel):
     orders_webhook_path: str = Field(default="/telegram/orders-webhook", validation_alias="ORDERS_WEBHOOK_PATH")
     design_webhook_path: str = Field(default="/telegram/design-webhook", validation_alias="DESIGN_WEBHOOK_PATH")
     admins: List[int] = Field(default_factory=list, validation_alias="ADMINS")
+    # Алерты Underdog (IP/домены/заказы/тикеты): отдельно от ADMINS Keitaro-бота
+    underdog_notify_admins: List[int] = Field(default_factory=list, validation_alias="UNDERDOG_NOTIFY_ADMINS")
+    # Usernames из UNDERDOG_NOTIFY_ADMINS (не числа) — резолвятся в telegram_id через tg_users
+    underdog_notify_admin_usernames: List[str] = Field(
+        default_factory=list,
+        validation_alias="UNDERDOG_NOTIFY_ADMIN_USERNAMES",
+    )
     port: int = Field(default=8080, validation_alias="PORT")
     postback_token: str = Field(default="", validation_alias="POSTBACK_TOKEN")
     keitaro_api_key: str = Field(default="", validation_alias="KEITARO_API_KEY")
@@ -38,16 +45,41 @@ class Settings(BaseModel):
 
     @classmethod
     def load(cls) -> "Settings":
-        admins = []
-        admins_env = os.getenv("ADMINS", "").strip()
-        if admins_env:
-            for part in admins_env.split(","):
+        def _parse_id_list(env_name: str) -> List[int]:
+            ids: List[int] = []
+            raw = os.getenv(env_name, "").strip()
+            if not raw:
+                return ids
+            for part in raw.split(","):
                 part = part.strip()
-                if part:
-                    try:
-                        admins.append(int(part))
-                    except ValueError:
-                        pass
+                if not part:
+                    continue
+                try:
+                    ids.append(int(part))
+                except ValueError:
+                    pass
+            return ids
+
+        def _parse_underdog_notify_admins(env_name: str) -> tuple[List[int], List[str]]:
+            ids: List[int] = []
+            names: List[str] = []
+            raw = os.getenv(env_name, "").strip()
+            if not raw:
+                return ids, names
+            for part in raw.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    ids.append(int(part))
+                except ValueError:
+                    names.append(part.lstrip("@").lower())
+            return ids, names
+
+        admins = _parse_id_list("ADMINS")
+        underdog_notify_admins, underdog_notify_admin_usernames = _parse_underdog_notify_admins(
+            "UNDERDOG_NOTIFY_ADMINS"
+        )
         design_broadcast = []
         broadcast_env = os.getenv("DESIGN_BROADCAST_CHAT_IDS", "").strip()
         if broadcast_env:
@@ -68,6 +100,8 @@ class Settings(BaseModel):
             "ORDERS_WEBHOOK_PATH": os.getenv("ORDERS_WEBHOOK_PATH", "/telegram/orders-webhook"),
             "DESIGN_WEBHOOK_PATH": os.getenv("DESIGN_WEBHOOK_PATH", "/telegram/design-webhook"),
             "ADMINS": admins,
+            "UNDERDOG_NOTIFY_ADMINS": underdog_notify_admins,
+            "UNDERDOG_NOTIFY_ADMIN_USERNAMES": underdog_notify_admin_usernames,
             "PORT": int(os.getenv("PORT", "8080")),
             "POSTBACK_TOKEN": os.getenv("POSTBACK_TOKEN", ""),
             "KEITARO_API_KEY": os.getenv("KEITARO_API_KEY", ""),

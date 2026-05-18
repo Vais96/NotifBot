@@ -207,17 +207,45 @@ def _parse_telegram_id(person: Dict[str, Any]) -> Optional[int]:
     return None
 
 
-def _resolve_owner_fields(record: Dict[str, Any]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+def _resolve_corporate_owner_fields(record: Dict[str, Any]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Корпоративный @ из Underdog — единственный канал для IP/доменов (как заказы/тикеты)."""
     owner = record.get("owner") or {}
-    raw_handle = (
-        owner.get("telegram")
-        or owner.get("telegram_handle")
-        or record.get("telegram")
-        or record.get("telegram_handle")
-    )
+    raw_handle = owner.get("corporate_telegram") or record.get("corporate_telegram")
     normalized = _normalize_handle(raw_handle)
     owner_name = owner.get("name")
     return normalized, raw_handle, owner_name
+
+
+def _corp_handle_admin_line(handle: Optional[str]) -> str:
+    if handle:
+        return f"Корп. Telegram: @{handle}"
+    return "Корп. Telegram: (не указан)"
+
+
+async def resolve_underdog_notify_admin_ids() -> List[int]:
+    """Telegram IDs для алертов Underdog: числа и @username из UNDERDOG_NOTIFY_ADMINS."""
+    ids: List[int] = list(settings.underdog_notify_admins)
+    names = list(settings.underdog_notify_admin_usernames)
+    if names:
+        user_map = await db.fetch_users_by_usernames(names)
+        for uname in names:
+            row = user_map.get(uname.strip().lstrip("@").lower())
+            if row and row.get("telegram_id") is not None:
+                ids.append(int(row["telegram_id"]))
+            else:
+                logger.warning(
+                    "Underdog notify admin @username not found in tg_users (нужен /start в боте)",
+                    username=uname,
+                )
+    if ids:
+        seen: set[int] = set()
+        unique: List[int] = []
+        for uid in ids:
+            if uid not in seen:
+                seen.add(uid)
+                unique.append(uid)
+        return unique
+    return list(settings.admins)
 
 
 def _resolve_order_owner_handle(order: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
@@ -1217,7 +1245,7 @@ class DesignAssignmentNotifier:
         logger.info(
             "Design notify",
             orders=len(orders),
-            admin_ids=list(self.admin_ids) if self.admin_ids else "[] (set ADMINS env for admin copies)",
+            admin_ids=list(self.admin_ids) if self.admin_ids else "[] (set UNDERDOG_NOTIFY_ADMINS or ADMINS)",
             design_bot_token_set=bool(settings.design_bot_token),
             broadcast_chats=len(self.broadcast_chat_ids),
             subscribers_count=len(subscribers),
@@ -1337,7 +1365,10 @@ class DesignAssignmentNotifier:
                             error=str(exc),
                         )
             else:
-                logger.warning("No admin_ids configured (ADMINS env): admin copy not sent", order_id=order_id)
+                logger.warning(
+                    "No admin_ids configured (UNDERDOG_NOTIFY_ADMINS / ADMINS): admin copy not sent",
+                    order_id=order_id,
+                )
 
             await db.mark_design_assignment_sent(int(order_id))
             stats.matched_users += 1
@@ -1739,7 +1770,7 @@ class DomainNotifier:
             if expires_at is not None and expires_at > cutoff:
                 continue
             stats.expiring_domains += 1
-            handle, raw_handle, owner_name = _resolve_owner_fields(domain)
+            handle, raw_handle, owner_name = _resolve_corporate_owner_fields(domain)
             if not handle:
                 stats.missing_contact += 1
                 stats.unknown_items.append(
@@ -1924,7 +1955,7 @@ class DomainNotifier:
         ]
         if owner_name:
             header_lines.append(f"Владелец: {owner_name}")
-        header_lines.append(f"Username: @{handle}" if handle else "Username: (не указан)")
+        header_lines.append(_corp_handle_admin_line(handle))
         header_lines.append("")
         header_lines.append(_build_domain_notification(entries))
         text = "\n".join(header_lines)
@@ -1961,7 +1992,7 @@ class DomainNotifier:
             return
         lines = [
             "⚠️ Ошибка отправки уведомления о доменах",
-            f"Username: @{handle}" if handle else "Username: (не указан)",
+            _corp_handle_admin_line(handle),
             f"Ошибка: {error_text}",
             "",
             _build_domain_notification(entries),
@@ -2128,7 +2159,7 @@ class IPNotifier:
         for ip_entry in ips:
             if _is_ip_sent(ip_entry):
                 continue
-            handle, raw_handle, owner_name = _resolve_owner_fields(ip_entry)
+            handle, raw_handle, owner_name = _resolve_corporate_owner_fields(ip_entry)
             expires_at = _parse_date(
                 ip_entry.get("expires_at")
                 or ip_entry.get("expires")
@@ -2384,7 +2415,7 @@ class IPNotifier:
         owner_name = entries[0].get("owner_name")
         if owner_name:
             header_lines.append(f"Владелец: {owner_name}")
-        header_lines.append(f"Username: @{handle}" if handle else "Username: (не указан)")
+        header_lines.append(_corp_handle_admin_line(handle))
         header_lines.append("")
         header_lines.append(_build_ip_notification(entries))
         text = "\n".join(header_lines)
@@ -2422,7 +2453,7 @@ class IPNotifier:
             return
         lines = [
             "⚠️ Ошибка отправки уведомления об IP",
-            f"Username: @{handle}" if handle else "Username: (не указан)",
+            _corp_handle_admin_line(handle),
             f"Ошибка: {error_text}",
             "",
             _build_ip_notification(entries),
@@ -2720,7 +2751,7 @@ class TicketNotifier:
         ]
         if owner_name:
             header_lines.append(f"Владелец: {owner_name}")
-        header_lines.append(f"Username: @{handle}" if handle else "Username: (не указан)")
+        header_lines.append(_corp_handle_admin_line(handle))
         header_lines.append("")
         header_lines.append(_build_ticket_notification(entries))
         text = "\n".join(header_lines)
@@ -2761,7 +2792,7 @@ class TicketNotifier:
         lines = [
             "⚠️ Ошибка пометки тикета как отправленного",
             f"Тикет ID: {ticket_id}",
-            f"Username: @{handle}" if handle else "Username: (не указан)",
+            _corp_handle_admin_line(handle),
             f"Ошибка: {error_text}",
             "",
             "Тикет был отправлен пользователю, но не был помечен как отправленный в системе.",
@@ -2800,7 +2831,7 @@ class TicketNotifier:
             return
         lines = [
             "⚠️ Ошибка отправки уведомления о тикете",
-            f"Username: @{handle}" if handle else "Username: (не указан)",
+            _corp_handle_admin_line(handle),
             f"Ошибка: {error_text}",
             "",
             _build_ticket_notification(entries),
@@ -3183,14 +3214,14 @@ async def notify_ready_orders(
 ) -> Dict[str, Any]:
     async with UnderdogClient.from_settings() as client:
         if bot_instance is not None:
-            notifier = OrderNotifier(client, bot_instance, settings.admins)
+            notifier = OrderNotifier(client, bot_instance, await resolve_underdog_notify_admin_ids())
             stats = await notifier.notify_ready_orders(
                 dry_run=dry_run,
                 limit_user_ids=limit_user_ids,
             )
             return stats.to_dict(dry_run=dry_run)
         async with _create_bot() as owned_bot:
-            notifier = OrderNotifier(client, owned_bot, settings.admins)
+            notifier = OrderNotifier(client, owned_bot, await resolve_underdog_notify_admin_ids())
             stats = await notifier.notify_ready_orders(
                 dry_run=dry_run,
                 limit_user_ids=limit_user_ids,
@@ -3205,11 +3236,11 @@ async def notify_design_assignments(
     """Уведомлять дизайнера, когда ему ставят таск (order_status=0). Результат по contractor_id -> telegram."""
     async with UnderdogClient.from_settings() as client:
         if bot_instance is not None:
-            notifier = DesignAssignmentNotifier(client, bot_instance, settings.admins, settings.design_broadcast_chat_ids)
+            notifier = DesignAssignmentNotifier(client, bot_instance, await resolve_underdog_notify_admin_ids(), settings.design_broadcast_chat_ids)
             stats = await notifier.notify_design_assignments(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
         async with _create_design_bot() as owned_bot:
-            notifier = DesignAssignmentNotifier(client, owned_bot, settings.admins, settings.design_broadcast_chat_ids)
+            notifier = DesignAssignmentNotifier(client, owned_bot, await resolve_underdog_notify_admin_ids(), settings.design_broadcast_chat_ids)
             stats = await notifier.notify_design_assignments(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
 
@@ -3224,7 +3255,7 @@ async def notify_design_completions(
             notifier = DesignCompletionNotifier(
                 client,
                 bot_instance,
-                settings.admins,
+                await resolve_underdog_notify_admin_ids(),
                 settings.design_broadcast_chat_ids,
             )
             stats = await notifier.notify_design_completions(dry_run=dry_run)
@@ -3233,7 +3264,7 @@ async def notify_design_completions(
             notifier = DesignCompletionNotifier(
                 client,
                 owned_bot,
-                settings.admins,
+                await resolve_underdog_notify_admin_ids(),
                 settings.design_broadcast_chat_ids,
             )
             stats = await notifier.notify_design_completions(dry_run=dry_run)
@@ -3250,7 +3281,7 @@ async def notify_design_sla_24h(
             notifier = DesignSLA24hNotifier(
                 client,
                 bot_instance,
-                settings.admins,
+                await resolve_underdog_notify_admin_ids(),
                 settings.design_broadcast_chat_ids,
             )
             stats = await notifier.notify_design_sla_24h(dry_run=dry_run)
@@ -3259,7 +3290,7 @@ async def notify_design_sla_24h(
             notifier = DesignSLA24hNotifier(
                 client,
                 owned_bot,
-                settings.admins,
+                await resolve_underdog_notify_admin_ids(),
                 settings.design_broadcast_chat_ids,
             )
             stats = await notifier.notify_design_sla_24h(dry_run=dry_run)
@@ -3290,11 +3321,11 @@ async def notify_expiring_domains(
 ) -> Dict[str, Any]:
     async with UnderdogClient.from_settings() as client:
         if bot_instance is not None:
-            notifier = DomainNotifier(client, bot_instance, settings.admins)
+            notifier = DomainNotifier(client, bot_instance, await resolve_underdog_notify_admin_ids())
             stats = await notifier.notify_expiring_domains(dry_run=dry_run, days=days)
             return stats.to_dict(dry_run=dry_run)
         async with _create_bot() as owned_bot:
-            notifier = DomainNotifier(client, owned_bot, settings.admins)
+            notifier = DomainNotifier(client, owned_bot, await resolve_underdog_notify_admin_ids())
             stats = await notifier.notify_expiring_domains(dry_run=dry_run, days=days)
             return stats.to_dict(dry_run=dry_run)
 
@@ -3311,7 +3342,7 @@ async def notify_expiring_ips(
             notifier = IPNotifier(
                 client,
                 bot_instance,
-                settings.admins,
+                await resolve_underdog_notify_admin_ids(),
                 admin_bot=admin_bot_instance,
             )
             stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
@@ -3321,7 +3352,7 @@ async def notify_expiring_ips(
                 notifier = IPNotifier(
                     client,
                     owned_bot,
-                    settings.admins,
+                    await resolve_underdog_notify_admin_ids(),
                     admin_bot=admin_bot_instance,
                 )
                 stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
@@ -3331,12 +3362,12 @@ async def notify_expiring_ips(
                     notifier = IPNotifier(
                         client,
                         owned_bot,
-                        settings.admins,
+                        await resolve_underdog_notify_admin_ids(),
                         admin_bot=main_bot,
                     )
                     stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
                     return stats.to_dict(dry_run=dry_run)
-            notifier = IPNotifier(client, owned_bot, settings.admins, admin_bot=None)
+            notifier = IPNotifier(client, owned_bot, await resolve_underdog_notify_admin_ids(), admin_bot=None)
             stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=days)
             return stats.to_dict(dry_run=dry_run)
 
@@ -3348,11 +3379,11 @@ async def notify_completed_tickets(
 ) -> Dict[str, Any]:
     async with UnderdogClient.from_settings() as client:
         if bot_instance is not None:
-            notifier = TicketNotifier(client, bot_instance, settings.admins)
+            notifier = TicketNotifier(client, bot_instance, await resolve_underdog_notify_admin_ids())
             stats = await notifier.notify_completed_tickets(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
         async with _create_bot() as owned_bot:
-            notifier = TicketNotifier(client, owned_bot, settings.admins)
+            notifier = TicketNotifier(client, owned_bot, await resolve_underdog_notify_admin_ids())
             stats = await notifier.notify_completed_tickets(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
 
@@ -3418,7 +3449,7 @@ async def _amain() -> None:
         if args.notify:
             dry_run = not args.apply
             async with _create_bot() as bot_instance:
-                notifier = OrderNotifier(client, bot_instance, settings.admins)
+                notifier = OrderNotifier(client, bot_instance, await resolve_underdog_notify_admin_ids())
                 stats = await notifier.notify_ready_orders(dry_run=dry_run)
             print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
             return
@@ -3427,13 +3458,13 @@ async def _amain() -> None:
             dry_run = not args.apply
             async with _create_design_bot() as bot_instance:
                 assignment_notifier = DesignAssignmentNotifier(
-                    client, bot_instance, settings.admins, settings.design_broadcast_chat_ids
+                    client, bot_instance, await resolve_underdog_notify_admin_ids(), settings.design_broadcast_chat_ids
                 )
                 completion_notifier = DesignCompletionNotifier(
-                    client, bot_instance, settings.admins, settings.design_broadcast_chat_ids
+                    client, bot_instance, await resolve_underdog_notify_admin_ids(), settings.design_broadcast_chat_ids
                 )
                 sla_notifier = DesignSLA24hNotifier(
-                    client, bot_instance, settings.admins, settings.design_broadcast_chat_ids
+                    client, bot_instance, await resolve_underdog_notify_admin_ids(), settings.design_broadcast_chat_ids
                 )
                 not_in_progress_48h_notifier = DesignNotInProgress48hNotifier(
                     client, bot_instance
@@ -3466,7 +3497,7 @@ async def _amain() -> None:
         if args.notify_domains:
             dry_run = not args.apply
             async with _create_bot() as bot_instance:
-                notifier = DomainNotifier(client, bot_instance, settings.admins)
+                notifier = DomainNotifier(client, bot_instance, await resolve_underdog_notify_admin_ids())
                 stats = await notifier.notify_expiring_domains(dry_run=dry_run, days=max(0, args.days))
             print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
             return
@@ -3490,7 +3521,7 @@ async def _amain() -> None:
                         notifier = IPNotifier(
                             client,
                             bot_instance,
-                            settings.admins,
+                            await resolve_underdog_notify_admin_ids(),
                             admin_bot=admin_bot,
                         )
                         stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=horizon)
@@ -3498,7 +3529,7 @@ async def _amain() -> None:
                     notifier = IPNotifier(
                         client,
                         bot_instance,
-                        settings.admins,
+                        await resolve_underdog_notify_admin_ids(),
                         admin_bot=None,
                     )
                     stats = await notifier.notify_expiring_ips(dry_run=dry_run, days=horizon)
@@ -3513,7 +3544,7 @@ async def _amain() -> None:
         if args.notify_tickets:
             dry_run = not args.apply
             async with _create_bot() as bot_instance:
-                notifier = TicketNotifier(client, bot_instance, settings.admins)
+                notifier = TicketNotifier(client, bot_instance, await resolve_underdog_notify_admin_ids())
                 stats = await notifier.notify_completed_tickets(dry_run=dry_run)
             print(json.dumps(stats.to_dict(dry_run=dry_run), ensure_ascii=False, indent=2))
             return
