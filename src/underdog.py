@@ -2915,7 +2915,7 @@ def _build_domain_notification(entries: List[Dict[str, Any]]) -> str:
     lines.extend(
         [
             "",
-            "Для продления домена напишите в личку @apr1cot",
+            "Для продления домена напишите в личку @PolinaUnderdog",
         ]
     )
     return "\n".join(lines)
