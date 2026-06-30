@@ -21,7 +21,14 @@ design_dp = Dispatcher()
 async def on_design_start(message: Message) -> None:
     """Регистрируем подписчика (tg_design_bot_chats) и приветствуем — без этого в рассылку не попадёте."""
     chat_id = message.chat.id
+    user = message.from_user
     try:
+        if user:
+            await db.upsert_user(
+                chat_id,
+                user.username,
+                " ".join(filter(None, [user.first_name, user.last_name])) or None,
+            )
         await db.add_design_bot_subscriber(chat_id)
         count = len(await db.list_design_bot_subscribers())
         logger.info(

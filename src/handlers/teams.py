@@ -8,6 +8,69 @@ from ..dispatcher import ADMIN_IDS, bot, dp
 from .. import db
 from ..handlers.users import _resolve_user_id
 
+TEAM_PICKER_PAGE_SIZE = 40
+
+
+def _same_team(user_team_id, team_id: int) -> bool:
+    if user_team_id is None:
+        return False
+    return int(user_team_id) == int(team_id)
+
+
+def _user_picker_label(user: dict) -> str:
+    username = user.get("username")
+    if username:
+        return f"@{username}"
+    return str(user["telegram_id"])
+
+
+def _team_add_picker_kb(team_id: int, users: list[dict], page: int = 0) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    total = len(users)
+    pages = max((total - 1) // TEAM_PICKER_PAGE_SIZE + 1, 1)
+    page = max(0, min(page, pages - 1))
+    start = page * TEAM_PICKER_PAGE_SIZE
+    for u in users[start : start + TEAM_PICKER_PAGE_SIZE]:
+        rows.append([
+            InlineKeyboardButton(
+                text=f"Добавить {_user_picker_label(u)}",
+                callback_data=f"team:add:{team_id}:{u['telegram_id']}",
+            )
+        ])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"team:add_page:{team_id}:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="team:noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"team:add_page:{team_id}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _team_remove_picker_kb(team_id: int, users: list[dict], page: int = 0) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    total = len(users)
+    pages = max((total - 1) // TEAM_PICKER_PAGE_SIZE + 1, 1)
+    page = max(0, min(page, pages - 1))
+    start = page * TEAM_PICKER_PAGE_SIZE
+    for u in users[start : start + TEAM_PICKER_PAGE_SIZE]:
+        rows.append([
+            InlineKeyboardButton(
+                text=f"Убрать {_user_picker_label(u)}",
+                callback_data=f"team:remove:{team_id}:{u['telegram_id']}",
+            )
+        ])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"team:remove_page:{team_id}:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="team:noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"team:remove_page:{team_id}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def _myteam_menu() -> InlineKeyboardMarkup:
     """Build my team menu keyboard."""
@@ -189,23 +252,69 @@ async def cb_team_members_manage(call: CallbackQuery):
         return await call.answer("Нет прав", show_alert=True)
     team_id = int(call.data.split(":", 2)[2])
     users = await db.list_users()
-    members = [u for u in users if u.get("team_id") == team_id]
-    non_members = [u for u in users if u.get("team_id") != team_id]
-    # render lists in chunks
+    members = [u for u in users if _same_team(u.get("team_id"), team_id)]
+    non_members = [u for u in users if not _same_team(u.get("team_id"), team_id)]
     if members:
-        await call.message.answer("Участники:\n" + "\n".join(f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} ({u['role']})" for u in members[:50]))
+        await call.message.answer("Участники:\n" + "\n".join(f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} ({u['role']})" for u in members))
     else:
         await call.message.answer("Участники: пусто")
-    # controls
-    add_buttons = [[InlineKeyboardButton(text=f"Добавить @{u['username'] or u['telegram_id']}", callback_data=f"team:add:{team_id}:{u['telegram_id']}")] for u in non_members[:25]]
-    remove_buttons = [[InlineKeyboardButton(text=f"Убрать @{u['username'] or u['telegram_id']}", callback_data=f"team:remove:{team_id}:{u['telegram_id']}")] for u in members[:25]]
-    action_buttons = [[InlineKeyboardButton(text="Обновить имена", callback_data=f"team:refresh_names:{team_id}")]]
-    if add_buttons:
-        await call.message.answer("Добавить в команду:", reply_markup=InlineKeyboardMarkup(inline_keyboard=add_buttons))
-    if remove_buttons:
-        await call.message.answer("Убрать из команды:", reply_markup=InlineKeyboardMarkup(inline_keyboard=remove_buttons))
-    # refresh button
-    await call.message.answer("Действия:", reply_markup=InlineKeyboardMarkup(inline_keyboard=action_buttons))
+    if non_members:
+        total_pages = max((len(non_members) - 1) // TEAM_PICKER_PAGE_SIZE + 1, 1)
+        header = "Добавить в команду:"
+        if total_pages > 1:
+            header += f" (всего {len(non_members)}, стр. 1/{total_pages})"
+        await call.message.answer(header, reply_markup=_team_add_picker_kb(team_id, non_members))
+    if members:
+        total_pages = max((len(members) - 1) // TEAM_PICKER_PAGE_SIZE + 1, 1)
+        header = "Убрать из команды:"
+        if total_pages > 1:
+            header += f" (всего {len(members)}, стр. 1/{total_pages})"
+        await call.message.answer(header, reply_markup=_team_remove_picker_kb(team_id, members))
+    await call.message.answer(
+        "Действия:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Обновить имена", callback_data=f"team:refresh_names:{team_id}")]
+        ]),
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data == "team:noop")
+async def cb_team_noop(call: CallbackQuery):
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("team:add_page:"))
+async def cb_team_add_page(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    _, _, team_id, page_raw = call.data.split(":", 3)
+    team_id_i = int(team_id)
+    page = int(page_raw)
+    users = await db.list_users()
+    non_members = [u for u in users if not _same_team(u.get("team_id"), team_id_i)]
+    total_pages = max((len(non_members) - 1) // TEAM_PICKER_PAGE_SIZE + 1, 1)
+    header = "Добавить в команду:"
+    if total_pages > 1:
+        header += f" (всего {len(non_members)}, стр. {page + 1}/{total_pages})"
+    await call.message.edit_text(header, reply_markup=_team_add_picker_kb(team_id_i, non_members, page))
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("team:remove_page:"))
+async def cb_team_remove_page(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        return await call.answer("Нет прав", show_alert=True)
+    _, _, team_id, page_raw = call.data.split(":", 3)
+    team_id_i = int(team_id)
+    page = int(page_raw)
+    users = await db.list_users()
+    members = [u for u in users if _same_team(u.get("team_id"), team_id_i)]
+    total_pages = max((len(members) - 1) // TEAM_PICKER_PAGE_SIZE + 1, 1)
+    header = "Убрать из команды:"
+    if total_pages > 1:
+        header += f" (всего {len(members)}, стр. {page + 1}/{total_pages})"
+    await call.message.edit_text(header, reply_markup=_team_remove_picker_kb(team_id_i, members, page))
     await call.answer()
 
 
@@ -216,7 +325,7 @@ async def cb_team_refresh_names(call: CallbackQuery):
         return await call.answer("Нет прав", show_alert=True)
     team_id = int(call.data.split(":", 2)[2])
     users = await db.list_users()
-    members = [u for u in users if u.get("team_id") == team_id]
+    members = [u for u in users if _same_team(u.get("team_id"), team_id)]
     updated = 0
     for u in members:
         uid = int(u["telegram_id"])  # type: ignore

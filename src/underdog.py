@@ -1696,15 +1696,11 @@ class DesignNotInProgress48hNotifier:
                 designer_telegram_id = await db.get_contractor_telegram_id(contractor_id)
 
             if designer_telegram_id is None or designer_telegram_id not in subscribers_set:
-                stats.no_recipient_mapping += 1
-                stats.unknown_user += 1
-                stats.unknown_orders.append(
-                    {
-                        "order_id": order_id,
-                        "contractor_id": contractor_id,
-                        "telegram": telegram_from_order or None,
-                        "reason": "designer_not_found_or_not_subscribed",
-                    }
+                logger.debug(
+                    "Design 48h reminder skipped: designer not linked or not subscribed to DesignBot",
+                    order_id=order_id,
+                    contractor_id=contractor_id,
+                    telegram=telegram_from_order or None,
                 )
                 continue
 
