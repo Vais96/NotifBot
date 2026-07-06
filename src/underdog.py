@@ -409,22 +409,42 @@ def _build_design_not_in_progress_48h_message(
     order: Dict[str, Any],
     *,
     passed_text: str,
+    reminder_days: int = 2,
 ) -> str:
     order_id = order.get("id")
     name = order.get("name") or order.get("type") or "—"
     status_text = _order_status_text(order.get("status_id"))
+    days_label = f"{reminder_days} дня" if reminder_days == 2 else f"{reminder_days} дн."
     return "\n".join(
         [
-            "⏰ Напоминание: таск все еще не взят в работу.",
+            f"⏰ Напоминание: прошло {days_label}, а таск еще не взят в работу.",
             "",
             f"ID заказа: {order_id}",
             f"Название: {name}",
             f"Текущий статус: {status_text}",
             f"Прошло с назначения: {passed_text}",
             "",
-            "Пожалуйста, переведите таск в статус «в работе» или обновите статус по факту.",
+            "Пожалуйста, переведите таск в статус «в работе» в Underdog.",
         ]
     )
+
+
+async def _resolve_designer_telegram_id_from_order(order: Dict[str, Any]) -> tuple[Optional[int], Optional[str], Optional[str], Optional[str]]:
+    contractor = order.get("contractor") or {}
+    contractor_id = order.get("contractor_id")
+    if contractor_id is not None:
+        contractor_id = str(contractor_id).strip() or None
+    telegram_from_order = (contractor.get("telegram") or contractor.get("telegram_handle") or "").strip().lstrip("@") or None
+    designer_name: Optional[str] = contractor.get("name")
+
+    designer_telegram_id: Optional[int] = _parse_telegram_id(contractor)
+    if designer_telegram_id is None and telegram_from_order:
+        user = await db.find_user_by_username(telegram_from_order)
+        if user:
+            designer_telegram_id = int(user.get("telegram_id"))
+    if designer_telegram_id is None and contractor_id:
+        designer_telegram_id = await db.get_contractor_telegram_id(contractor_id)
+    return designer_telegram_id, contractor_id, telegram_from_order, designer_name
 
 
 def _to_utc_aware(dt: datetime) -> datetime:
@@ -452,15 +472,23 @@ def _is_design_order_completed(order: Dict[str, Any]) -> bool:
     return False
 
 
-def _is_design_order_in_progress_or_completed(order: Dict[str, Any]) -> bool:
-    """Treat status_id in (1, 2) as already accepted into work-flow."""
+def _is_design_order_awaiting_take_in_progress(order: Dict[str, Any]) -> bool:
+    """True while task is still in initial 'обработка' and not yet taken in work."""
+    if _is_design_order_completed(order):
+        return False
     status_id = order.get("status_id")
     try:
-        if status_id is not None and int(status_id) in (1, 2):
-            return True
-    except Exception:
+        if status_id is not None:
+            return int(status_id) == 0
+    except (TypeError, ValueError):
         pass
-    return _is_design_order_completed(order)
+    order_status = order.get("order_status")
+    try:
+        if order_status is not None:
+            return int(order_status) == 0
+    except (TypeError, ValueError):
+        pass
+    return False
 
 
 def _yesterday() -> date:
@@ -1640,10 +1668,12 @@ class DesignSLA24hNotifier:
 
 @dataclass(slots=True)
 class DesignNotInProgress48hNotifier:
-    """Reminder: 48h passed from assignment, but task is still not in 'in progress'."""
+    """Reminder: 2 days passed from assignment, but task is still not taken in work."""
 
     underdog: UnderdogClient
     bot: Bot
+    admin_ids: Sequence[int] = ()
+    broadcast_chat_ids: Sequence[int] = ()
     reminder_hours: int = 48
 
     async def notify_design_not_in_progress_48h(
@@ -1657,7 +1687,7 @@ class DesignNotInProgress48hNotifier:
             oid = o.get("id")
             if oid is None:
                 continue
-            if _is_design_order_in_progress_or_completed(o):
+            if not _is_design_order_awaiting_take_in_progress(o):
                 continue
             orders_by_id[int(oid)] = o
 
@@ -1668,6 +1698,7 @@ class DesignNotInProgress48hNotifier:
         subscribers_set = set(await db.list_design_bot_subscribers())
         now = datetime.now(timezone.utc)
         reminder_delta = timedelta(hours=int(self.reminder_hours))
+        reminder_days = max(1, int(self.reminder_hours // 24))
 
         for order_id, order in orders_by_id.items():
             if await db.is_design_not_in_progress_48h_sent(order_id):
@@ -1681,53 +1712,88 @@ class DesignNotInProgress48hNotifier:
             if passed < reminder_delta:
                 continue
 
-            contractor = order.get("contractor") or {}
-            contractor_id = order.get("contractor_id")
-            if contractor_id is not None:
-                contractor_id = str(contractor_id).strip()
-            telegram_from_order = (contractor.get("telegram") or contractor.get("telegram_handle") or "").strip().lstrip("@")
+            designer_telegram_id, contractor_id, telegram_from_order, designer_name = (
+                await _resolve_designer_telegram_id_from_order(order)
+            )
 
-            designer_telegram_id: Optional[int] = _parse_telegram_id(contractor)
-            if designer_telegram_id is None and telegram_from_order:
-                user = await db.find_user_by_username(telegram_from_order)
-                if user:
-                    designer_telegram_id = int(user.get("telegram_id"))
-            if designer_telegram_id is None and contractor_id:
-                designer_telegram_id = await db.get_contractor_telegram_id(contractor_id)
-
-            if designer_telegram_id is None or designer_telegram_id not in subscribers_set:
-                logger.debug(
-                    "Design 48h reminder skipped: designer not linked or not subscribed to DesignBot",
-                    order_id=order_id,
-                    contractor_id=contractor_id,
-                    telegram=telegram_from_order or None,
-                )
-                continue
-
+            passed_text = _format_duration_ru(passed)
             message_personal = _build_design_not_in_progress_48h_message(
                 order,
-                passed_text=_format_duration_ru(passed),
+                passed_text=passed_text,
+                reminder_days=reminder_days,
             )
+
+            assigned_to_mention_html: Optional[str] = None
+            if designer_telegram_id is not None:
+                label = (
+                    f"@{telegram_from_order}"
+                    if telegram_from_order
+                    else (designer_name or f"id{designer_telegram_id}")
+                )
+                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{label}</a>'
+
+            message_for_broadcast = message_personal
+            if assigned_to_mention_html is not None:
+                message_for_broadcast = f"{message_personal}\nДизайнер: {assigned_to_mention_html}"
+            admin_message = f"📋 Копия админу:\n\n{message_for_broadcast}"
 
             if dry_run:
                 stats.matched_users += 1
-                stats.notified += 1
+                if designer_telegram_id is not None and designer_telegram_id in subscribers_set:
+                    stats.notified += 1
+                stats.notified += len(self.broadcast_chat_ids) + len(self.admin_ids)
                 continue
 
-            try:
-                await limited_send_message(self.bot, designer_telegram_id, text=message_personal)
-                stats.notified += 1
-                stats.matched_users += 1
-                await db.mark_design_not_in_progress_48h_sent(order_id)
-            except Exception as exc:  # pragma: no cover
-                stats.errors += 1
-                stats.delivery_failed += 1
-                logger.warning(
-                    "Failed to send 48h not-in-progress reminder to designer",
+            if designer_telegram_id is not None and designer_telegram_id in subscribers_set:
+                try:
+                    await limited_send_message(self.bot, designer_telegram_id, text=message_personal)
+                    stats.notified += 1
+                except Exception as exc:  # pragma: no cover
+                    stats.errors += 1
+                    stats.delivery_failed += 1
+                    logger.warning(
+                        "Failed to send take-in-progress reminder to designer",
+                        order_id=order_id,
+                        designer_telegram_id=designer_telegram_id,
+                        error=str(exc),
+                    )
+            else:
+                logger.debug(
+                    "Design take-in-progress reminder skipped for designer DM: not linked or not subscribed",
                     order_id=order_id,
-                    designer_telegram_id=designer_telegram_id,
-                    error=str(exc),
+                    contractor_id=contractor_id,
+                    telegram=telegram_from_order,
                 )
+
+            for chat_id in self.broadcast_chat_ids:
+                try:
+                    await limited_send_message(self.bot, int(chat_id), text=message_for_broadcast)
+                    stats.notified += 1
+                except Exception as exc:  # pragma: no cover
+                    stats.errors += 1
+                    logger.warning(
+                        "Failed to send take-in-progress reminder to broadcast chat",
+                        order_id=order_id,
+                        chat_id=chat_id,
+                        error=str(exc),
+                    )
+
+            if self.admin_ids:
+                for admin_id in self.admin_ids:
+                    try:
+                        await limited_send_message(self.bot, int(admin_id), text=admin_message)
+                        stats.notified += 1
+                    except Exception as exc:  # pragma: no cover
+                        stats.errors += 1
+                        logger.warning(
+                            "Failed to send take-in-progress reminder copy to admin",
+                            order_id=order_id,
+                            admin_id=admin_id,
+                            error=str(exc),
+                        )
+
+            await db.mark_design_not_in_progress_48h_sent(order_id)
+            stats.matched_users += 1
 
         return stats
 
@@ -3297,14 +3363,27 @@ async def notify_design_not_in_progress_48h(
     dry_run: bool = True,
     bot_instance: Optional[Bot] = None,
 ) -> Dict[str, Any]:
-    """Напоминать через 48ч после назначения, если таск не переведен в статус 'в работе'."""
+    """Напоминать через 2 дня после назначения, если таск не переведен в статус «в работе»."""
+    reminder_hours = settings.design_take_in_progress_reminder_hours
     async with UnderdogClient.from_settings() as client:
         if bot_instance is not None:
-            notifier = DesignNotInProgress48hNotifier(client, bot_instance)
+            notifier = DesignNotInProgress48hNotifier(
+                client,
+                bot_instance,
+                await resolve_underdog_notify_admin_ids(),
+                settings.design_broadcast_chat_ids,
+                reminder_hours=reminder_hours,
+            )
             stats = await notifier.notify_design_not_in_progress_48h(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
         async with _create_design_bot() as owned_bot:
-            notifier = DesignNotInProgress48hNotifier(client, owned_bot)
+            notifier = DesignNotInProgress48hNotifier(
+                client,
+                owned_bot,
+                await resolve_underdog_notify_admin_ids(),
+                settings.design_broadcast_chat_ids,
+                reminder_hours=reminder_hours,
+            )
             stats = await notifier.notify_design_not_in_progress_48h(dry_run=dry_run)
             return stats.to_dict(dry_run=dry_run)
 
@@ -3463,7 +3542,11 @@ async def _amain() -> None:
                     client, bot_instance, await resolve_underdog_notify_admin_ids(), settings.design_broadcast_chat_ids
                 )
                 not_in_progress_48h_notifier = DesignNotInProgress48hNotifier(
-                    client, bot_instance
+                    client,
+                    bot_instance,
+                    await resolve_underdog_notify_admin_ids(),
+                    settings.design_broadcast_chat_ids,
+                    reminder_hours=settings.design_take_in_progress_reminder_hours,
                 )
                 assignments = await assignment_notifier.notify_design_assignments(dry_run=dry_run)
                 completions = await completion_notifier.notify_design_completions(dry_run=dry_run)

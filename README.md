@@ -156,6 +156,10 @@ python -m src.underdog --notify-design --apply
 ```
 Без `--apply` — dry-run.
 
+**Напоминания по срокам** (в той же команде крона):
+- **24ч** — таск не выполнен (SLA).
+- **2 дня** — таск всё ещё в статусе «обработка» и не переведён в «в работе» (лично дизайнеру + копия админам/в broadcast-чат). Порог: `DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS=48` (по умолчанию).
+
 **Проверка API:** `python -m src.underdog --orders-design-new` — список новых тасков (order_status=0).
 
 **HTTP:** `POST /underdog/design/notify` (как у domains: `dry_run`, Bearer POSTBACK_TOKEN или `token` в body).

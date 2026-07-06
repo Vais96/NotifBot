@@ -42,6 +42,11 @@ class Settings(BaseModel):
     underdog_token_ttl: int = Field(default=3600, validation_alias="UNDERDOG_TOKEN_TTL")
     # Чат(ы) для рассылки design-уведомлений (группа/канал). Все участники видят сообщение. Через запятую: -100123, -100456
     design_broadcast_chat_ids: List[int] = Field(default_factory=list, validation_alias="DESIGN_BROADCAST_CHAT_IDS")
+    # Через сколько часов после назначения напомнить взять таск в работу (по умолчанию 48 = 2 дня)
+    design_take_in_progress_reminder_hours: int = Field(
+        default=48,
+        validation_alias="DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS",
+    )
 
     @classmethod
     def load(cls) -> "Settings":
@@ -116,6 +121,9 @@ class Settings(BaseModel):
             "UNDERDOG_PASSWORD": os.getenv("UNDERDOG_PASSWORD", ""),
             "UNDERDOG_TOKEN_TTL": int(os.getenv("UNDERDOG_TOKEN_TTL", "3600")),
             "DESIGN_BROADCAST_CHAT_IDS": design_broadcast,
+            "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": int(
+                os.getenv("DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS", "48")
+            ),
         }
         return cls.model_validate(raw)
 
