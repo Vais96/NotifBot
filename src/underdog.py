@@ -429,7 +429,11 @@ def _build_design_not_in_progress_48h_message(
     )
 
 
-async def _resolve_designer_telegram_id_from_order(order: Dict[str, Any]) -> tuple[Optional[int], Optional[str], Optional[str], Optional[str]]:
+async def _resolve_designer_telegram_id_from_order(
+    order: Dict[str, Any],
+    *,
+    subscriber_ids: Optional[Iterable[int]] = None,
+) -> tuple[Optional[int], Optional[str], Optional[str], Optional[str]]:
     contractor = order.get("contractor") or {}
     contractor_id = order.get("contractor_id")
     if contractor_id is not None:
@@ -444,6 +448,11 @@ async def _resolve_designer_telegram_id_from_order(order: Dict[str, Any]) -> tup
             designer_telegram_id = int(user.get("telegram_id"))
     if designer_telegram_id is None and contractor_id:
         designer_telegram_id = await db.get_contractor_telegram_id(contractor_id)
+    if designer_telegram_id is None and telegram_from_order and subscriber_ids:
+        designer_telegram_id = await db.find_telegram_id_among_subscribers_by_username(
+            telegram_from_order,
+            subscriber_ids,
+        )
     return designer_telegram_id, contractor_id, telegram_from_order, designer_name
 
 
@@ -472,23 +481,33 @@ def _is_design_order_completed(order: Dict[str, Any]) -> bool:
     return False
 
 
-def _is_design_order_awaiting_take_in_progress(order: Dict[str, Any]) -> bool:
-    """True while task is still in initial 'обработка' and not yet taken in work."""
+def _is_design_order_taken_in_progress(order: Dict[str, Any]) -> bool:
+    """True when designer already moved task to 'в работе' or further in workflow."""
     if _is_design_order_completed(order):
-        return False
+        return True
     status_id = order.get("status_id")
     try:
         if status_id is not None:
-            return int(status_id) == 0
+            sid = int(status_id)
+            if sid == 2:
+                return True
+            if sid >= 3:
+                return True
     except (TypeError, ValueError):
         pass
-    order_status = order.get("order_status")
-    try:
-        if order_status is not None:
-            return int(order_status) == 0
-    except (TypeError, ValueError):
-        pass
+    for key in ("status", "state", "status_name", "statusName"):
+        raw = order.get(key)
+        if not raw:
+            continue
+        s = str(raw).strip().lower()
+        if "в работе" in s or "in progress" in s or s in ("in_progress", "working", "in work"):
+            return True
     return False
+
+
+def _is_design_order_awaiting_take_in_progress(order: Dict[str, Any]) -> bool:
+    """True while task is still not taken in work."""
+    return not _is_design_order_taken_in_progress(order)
 
 
 def _yesterday() -> date:
@@ -1681,31 +1700,52 @@ class DesignNotInProgress48hNotifier:
         *,
         dry_run: bool = True,
     ) -> NotificationStats:
-        orders_all = await self.underdog.fetch_design_orders_for_statuses(range(0, 8))
-        orders_by_id: Dict[int, Dict[str, Any]] = {}
-        for o in orders_all:
+        pending_assignments = await db.list_design_assignments_pending_take_in_progress_reminder(
+            self.reminder_hours
+        )
+        new_tasks = await self.underdog.fetch_design_new_tasks()
+        new_tasks_by_id: Dict[int, Dict[str, Any]] = {}
+        for o in new_tasks:
             oid = o.get("id")
             if oid is None:
                 continue
-            if not _is_design_order_awaiting_take_in_progress(o):
-                continue
-            orders_by_id[int(oid)] = o
+            new_tasks_by_id[int(oid)] = o
 
-        stats = NotificationStats(total_orders=len(orders_by_id))
-        if not orders_by_id:
+        stats = NotificationStats(total_orders=len(pending_assignments))
+        if not pending_assignments:
             return stats
 
-        subscribers_set = set(await db.list_design_bot_subscribers())
+        subscribers = await db.list_design_bot_subscribers()
+        subscribers_set = set(subscribers)
         now = datetime.now(timezone.utc)
         reminder_delta = timedelta(hours=int(self.reminder_hours))
         reminder_days = max(1, int(self.reminder_hours // 24))
 
-        for order_id, order in orders_by_id.items():
+        for row in pending_assignments:
+            order_id = int(row["order_id"])
             if await db.is_design_not_in_progress_48h_sent(order_id):
                 continue
 
-            assigned_at = await db.get_design_assignment_sent_at(order_id)
+            order = new_tasks_by_id.get(order_id)
+            if order is None:
+                logger.debug(
+                    "Take-in-progress reminder skipped: order not in order_status=0",
+                    order_id=order_id,
+                )
+                continue
+            if not _is_design_order_awaiting_take_in_progress(order):
+                logger.debug(
+                    "Take-in-progress reminder skipped: task already in progress",
+                    order_id=order_id,
+                    status_id=order.get("status_id"),
+                )
+                continue
+
+            assigned_at = row.get("created_at")
             if assigned_at is None:
+                assigned_at = await db.get_design_assignment_sent_at(order_id)
+            if assigned_at is None:
+                logger.debug("Take-in-progress reminder skipped: no assignment timestamp", order_id=order_id)
                 continue
 
             passed = now - _to_utc_aware(assigned_at)
@@ -1713,7 +1753,7 @@ class DesignNotInProgress48hNotifier:
                 continue
 
             designer_telegram_id, contractor_id, telegram_from_order, designer_name = (
-                await _resolve_designer_telegram_id_from_order(order)
+                await _resolve_designer_telegram_id_from_order(order, subscriber_ids=subscribers)
             )
 
             passed_text = _format_duration_ru(passed)
@@ -1744,10 +1784,18 @@ class DesignNotInProgress48hNotifier:
                 stats.notified += len(self.broadcast_chat_ids) + len(self.admin_ids)
                 continue
 
+            designer_delivered = False
+
             if designer_telegram_id is not None and designer_telegram_id in subscribers_set:
                 try:
                     await limited_send_message(self.bot, designer_telegram_id, text=message_personal)
                     stats.notified += 1
+                    designer_delivered = True
+                    logger.info(
+                        "Design take-in-progress reminder sent to designer",
+                        order_id=order_id,
+                        designer_telegram_id=designer_telegram_id,
+                    )
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
                     stats.delivery_failed += 1
@@ -1758,8 +1806,8 @@ class DesignNotInProgress48hNotifier:
                         error=str(exc),
                     )
             else:
-                logger.debug(
-                    "Design take-in-progress reminder skipped for designer DM: not linked or not subscribed",
+                logger.info(
+                    "Design take-in-progress reminder: designer DM skipped (not linked or not subscribed)",
                     order_id=order_id,
                     contractor_id=contractor_id,
                     telegram=telegram_from_order,
@@ -1792,8 +1840,16 @@ class DesignNotInProgress48hNotifier:
                             error=str(exc),
                         )
 
-            await db.mark_design_not_in_progress_48h_sent(order_id)
-            stats.matched_users += 1
+            if designer_delivered:
+                await db.mark_design_not_in_progress_48h_sent(order_id)
+                stats.matched_users += 1
+            else:
+                logger.warning(
+                    "Take-in-progress reminder not marked sent: designer delivery failed or skipped",
+                    order_id=order_id,
+                    contractor_id=contractor_id,
+                    telegram=telegram_from_order,
+                )
 
         return stats
 
