@@ -50,6 +50,36 @@ MEANINGFUL_KEYS = (
     "country", "geo", "source", "traffic_source_name", "traffic_source", "affiliate",
 )
 
+_EGOR_KUMZIN_USERNAME = "egorkunderdog"
+_EGOR_KUMZIN_DEPOSIT_FOOTER = (
+    "\n\nНИХУЯ ТЫ ЕБАШИШЬ БРАТАН! ГАЗУЙ ГАЗУЙ ЛУЧШИ!!! БМВ НЕ СУЩЕСТВУЕТ!!!!"
+)
+
+
+def _is_egor_kumzin(user: dict | None) -> bool:
+    if not user:
+        return False
+    username = (user.get("username") or "").strip().lstrip("@").lower()
+    return username == _EGOR_KUMZIN_USERNAME
+
+
+def _deposit_message_for_recipient(
+    base_text: str,
+    *,
+    recipient_id: int,
+    buyer_id: int | None,
+    buyer_user: dict | None,
+    is_sale: bool,
+) -> str:
+    if (
+        is_sale
+        and buyer_id is not None
+        and recipient_id == int(buyer_id)
+        and _is_egor_kumzin(buyer_user)
+    ):
+        return base_text + _EGOR_KUMZIN_DEPOSIT_FOOTER
+    return base_text
+
 
 class DomainNotifyRequest(BaseModel):
     days: int = Field(default=30, ge=0, le=365)
@@ -470,6 +500,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
 
     # Determine recipients
     recipient_ids: set[int] = set()
+    buyer_user: dict | None = None
     try:
         users = await db.list_users()
         # admins always receive all notifications
@@ -526,7 +557,14 @@ async def _process_keitaro_postback(data: dict) -> dict:
     # Send message to all recipients (deduped)
     for rid in recipient_ids:
         try:
-            await notify_buyer(rid, text)
+            message_text = _deposit_message_for_recipient(
+                text,
+                recipient_id=rid,
+                buyer_id=int(buyer_id) if buyer_id else None,
+                buyer_user=buyer_user,
+                is_sale=is_sale,
+            )
+            await notify_buyer(rid, message_text)
         except Exception as e:
             logger.warning(f"Notify failed for {rid}: {e}")
     return {"ok": True, "routed": bool(buyer_id), "buyer_id": buyer_id, "fallback": used_fallback, "sale": is_sale}
