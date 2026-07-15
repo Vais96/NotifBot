@@ -50,17 +50,21 @@ MEANINGFUL_KEYS = (
     "country", "geo", "source", "traffic_source_name", "traffic_source", "affiliate",
 )
 
-_EGOR_KUMZIN_USERNAME = "egorkunderdog"
-_EGOR_KUMZIN_DEPOSIT_FOOTER = (
-    "\n\nНИХУЯ ТЫ ЕБАШИШЬ БРАТАН! ГАЗУЙ ГАЗУЙ ЛУЧШИ!!! БМВ НЕ СУЩЕСТВУЕТ!!!!"
-)
+_DEPOSIT_FOOTERS_BY_USERNAME: dict[str, str] = {
+    "egorkunderdog": (
+        "\n\nНИХУЯ ТЫ ЕБАШИШЬ БРАТАН! ГАЗУЙ ГАЗУЙ ЛУЧШИ!!! БМВ НЕ СУЩЕСТВУЕТ!!!!"
+    ),
+    "uladzislau_underdog": (
+        "\n\nВибрация прикосновений. Расствориться в моменте...чувствовать еще сильнее..."
+    ),
+}
 
 
-def _is_egor_kumzin(user: dict | None) -> bool:
+def _buyer_username(user: dict | None) -> str | None:
     if not user:
-        return False
+        return None
     username = (user.get("username") or "").strip().lstrip("@").lower()
-    return username == _EGOR_KUMZIN_USERNAME
+    return username or None
 
 
 def _deposit_message_for_recipient(
@@ -71,13 +75,10 @@ def _deposit_message_for_recipient(
     buyer_user: dict | None,
     is_sale: bool,
 ) -> str:
-    if (
-        is_sale
-        and buyer_id is not None
-        and recipient_id == int(buyer_id)
-        and _is_egor_kumzin(buyer_user)
-    ):
-        return base_text + _EGOR_KUMZIN_DEPOSIT_FOOTER
+    if is_sale and buyer_id is not None and recipient_id == int(buyer_id):
+        footer = _DEPOSIT_FOOTERS_BY_USERNAME.get(_buyer_username(buyer_user) or "")
+        if footer:
+            return base_text + footer
     return base_text
 
 
