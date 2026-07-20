@@ -450,6 +450,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
     alias = await db.find_alias(alias_key)
 
     buyer_id = alias.get("buyer_id") if alias else None
+    routed_via_alias = buyer_id is not None
     if not buyer_id:
         buyer_id = await db.find_user_for_postback(
             offer=data.get("offer") or data.get("offer_name") or data.get("campaign") or data.get("campaign_name"),
@@ -474,12 +475,13 @@ async def _process_keitaro_postback(data: dict) -> dict:
             except Exception:
                 pass
     routed_id = None
-    # Log event with final routed user id only if it's a real performer (buyer/lead/mentor); avoid fallback and admin/head
+    # An explicit alias assignment is authoritative even when that Telegram user also has
+    # an admin/head role. Only role-filter recipients found through generic routes.
     try:
         routed_id = buyer_id
         if used_fallback and routed_id:
             routed_id = None
-        else:
+        elif not routed_via_alias:
             try:
                 users = await db.list_users()
                 ru = next((u for u in users if u["telegram_id"] == routed_id), None)

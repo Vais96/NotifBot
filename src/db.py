@@ -1051,7 +1051,7 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
             )
 
 async def count_today_user_sales(user_id: int) -> int:
-    """Return number of sale-like events for the user since UTC midnight (inclusive)."""
+    """Return today's sales routed to the user or assigned to one of their aliases."""
     from datetime import datetime, timezone, timedelta
     pool = await init_pool()
     now_utc = datetime.now(timezone.utc)
@@ -1064,14 +1064,27 @@ async def count_today_user_sales(user_id: int) -> int:
     query = f"""
         SELECT COUNT(*)
         FROM tg_events
-        WHERE routed_user_id=%s
+        WHERE (
+                routed_user_id=%s
+                OR EXISTS (
+                    SELECT 1
+                    FROM tg_aliases a
+                    WHERE a.buyer_id=%s
+                      AND a.alias = LOWER(TRIM(SUBSTRING_INDEX(COALESCE(
+                          JSON_UNQUOTE(JSON_EXTRACT(tg_events.raw, '$.campaign_name')),
+                          JSON_UNQUOTE(JSON_EXTRACT(tg_events.raw, '$."campaign.name"')),
+                          JSON_UNQUOTE(JSON_EXTRACT(tg_events.raw, '$.campaign')),
+                          ''
+                      ), '_', 1)))
+                )
+              )
           AND created_at >= %s AND created_at < %s
           AND LOWER(TRIM(COALESCE(status, ''))) IN ({placeholders})
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
     # cached Keitaro campaigns for domain lookups
-            await cur.execute(query, (user_id, start, end, *sale_like))
+            await cur.execute(query, (user_id, user_id, start, end, *sale_like))
             row = await cur.fetchone()
             return int(row[0]) if row else 0
 
