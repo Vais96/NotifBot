@@ -47,6 +47,11 @@ class Settings(BaseModel):
         default=48,
         validation_alias="DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS",
     )
+    # Как часто веб-процесс сам проверяет design-уведомления. 0 отключает встроенный цикл.
+    design_notify_interval_seconds: int = Field(
+        default=3600,
+        validation_alias="DESIGN_NOTIFY_INTERVAL_SECONDS",
+    )
 
     @classmethod
     def load(cls) -> "Settings":
@@ -123,6 +128,9 @@ class Settings(BaseModel):
             "DESIGN_BROADCAST_CHAT_IDS": design_broadcast,
             "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": int(
                 os.getenv("DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS", "48")
+            ),
+            "DESIGN_NOTIFY_INTERVAL_SECONDS": int(
+                os.getenv("DESIGN_NOTIFY_INTERVAL_SECONDS", "3600")
             ),
         }
         return cls.model_validate(raw)

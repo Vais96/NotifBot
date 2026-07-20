@@ -150,15 +150,17 @@ Note: The `tickets` process in Procfile is for a persistent worker, not for sche
 
 **Маппинг contractor → Telegram:** таблица `tg_underdog_contractor_telegram` (contractor_id, telegram_username или telegram_id). Если в ответе API по заказу приходит объект `contractor` с полем `telegram`, он тоже используется.
 
-**Одна команда для крона:**
+Веб-процесс автоматически проверяет design-уведомления раз в час. Интервал задаётся через `DESIGN_NOTIFY_INTERVAL_SECONDS=3600`; значение `0` отключает встроенную проверку.
+
+**Альтернативно — одна команда для внешнего крона:**
 ```bash
 python -m src.underdog --notify-design --apply
 ```
 Без `--apply` — dry-run.
 
-**Напоминания по срокам** (в той же команде крона):
+**Напоминания по срокам** (при каждой автоматической проверке или запуске команды):
 - **24ч** — таск не выполнен (SLA).
-- **2 дня** — таск всё ещё в статусе «обработка» и не переведён в «в работе» (лично дизайнеру + копия админам/в broadcast-чат). Порог: `DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS=48` (по умолчанию).
+- **48 часов** — таск всё ещё в статусе «обработка» и не переведён в «в работе» (лично назначенному дизайнеру + копия админам/в broadcast-чат). Порог: `DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS=48` (по умолчанию).
 
 **Проверка API:** `python -m src.underdog --orders-design-new` — список новых тасков (order_status=0).
 

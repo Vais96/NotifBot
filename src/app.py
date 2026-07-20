@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from contextlib import suppress
 from datetime import datetime, timezone, date
 from typing import Dict, Tuple, Optional
 
@@ -30,6 +31,46 @@ if not DESIGN_WEBHOOK_PATH.startswith("/"):
     DESIGN_WEBHOOK_PATH = "/" + DESIGN_WEBHOOK_PATH
 
 app = FastAPI(title="Keitaro Telegram Notifier")
+_design_notify_task: asyncio.Task | None = None
+
+
+async def _run_design_notifications() -> None:
+    """Run all DesignBot notification checks once."""
+    assignment_stats = await underdog.notify_design_assignments(
+        dry_run=False,
+        bot_instance=design_bot,
+    )
+    completion_stats = await underdog.notify_design_completions(
+        dry_run=False,
+        bot_instance=design_bot,
+    )
+    sla_stats = await underdog.notify_design_sla_24h(
+        dry_run=False,
+        bot_instance=design_bot,
+    )
+    reminder_stats = await underdog.notify_design_not_in_progress_48h(
+        dry_run=False,
+        bot_instance=design_bot,
+    )
+    logger.info(
+        "Scheduled DesignBot notification check completed",
+        assignments=assignment_stats,
+        completions=completion_stats,
+        sla_24h=sla_stats,
+        not_in_progress_48h=reminder_stats,
+    )
+
+
+async def _design_notification_loop(interval_seconds: int) -> None:
+    """Keep DesignBot notifications working without an external cron process."""
+    while True:
+        try:
+            await _run_design_notifications()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Scheduled DesignBot notification check failed", error=str(exc))
+        await asyncio.sleep(interval_seconds)
 
 # Helpers to detect unexpanded placeholders and empty postbacks
 def _is_unexpanded_placeholder(v: str) -> bool:
@@ -585,6 +626,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
 
 @app.on_event("startup")
 async def on_startup():
+    global _design_notify_task
     try:
         await db.init_pool()
     except Exception as e:
@@ -654,8 +696,23 @@ async def on_startup():
         except Exception as e:
             logger.warning(f"Failed to set design bot commands: {e}")
 
+    interval = max(0, int(settings.design_notify_interval_seconds))
+    if design_token and interval > 0:
+        # Telegram delivery is deduplicated in DB, so the first check can run immediately.
+        _design_notify_task = asyncio.create_task(
+            _design_notification_loop(max(60, interval)),
+            name="design-notification-loop",
+        )
+        logger.info("DesignBot scheduled checks enabled", interval_seconds=max(60, interval))
+
 @app.on_event("shutdown")
 async def on_shutdown():
+    global _design_notify_task
+    if _design_notify_task is not None:
+        _design_notify_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _design_notify_task
+        _design_notify_task = None
     await db.close_pool()
     # Close aiogram bot aiohttp sessions to avoid "Unclosed client session" warnings
     for bot_instance in (bot, orders_bot, design_bot):

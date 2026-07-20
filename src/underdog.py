@@ -409,17 +409,16 @@ def _build_design_not_in_progress_48h_message(
     order: Dict[str, Any],
     *,
     passed_text: str,
-    reminder_days: int = 2,
+    reminder_hours: int = 48,
 ) -> str:
     order_id = order.get("id")
     name = order.get("name") or order.get("type") or "—"
     status_text = _order_status_text(order.get("status_id"))
-    days_label = f"{reminder_days} дня" if reminder_days == 2 else f"{reminder_days} дн."
     return "\n".join(
         [
-            f"⏰ Напоминание: прошло {days_label}, а таск еще не взят в работу.",
+            f"⚠️ ОБНОВИТЕ СТАТУС ЗАДАЧИ #{order_id}",
             "",
-            f"ID заказа: {order_id}",
+            f"Прошло {reminder_hours} часов после назначения, а задача ещё не взята в работу.",
             f"Название: {name}",
             f"Текущий статус: {status_text}",
             f"Прошло с назначения: {passed_text}",
@@ -1719,7 +1718,6 @@ class DesignNotInProgress48hNotifier:
         subscribers_set = set(subscribers)
         now = datetime.now(timezone.utc)
         reminder_delta = timedelta(hours=int(self.reminder_hours))
-        reminder_days = max(1, int(self.reminder_hours // 24))
 
         for row in pending_assignments:
             order_id = int(row["order_id"])
@@ -1760,7 +1758,7 @@ class DesignNotInProgress48hNotifier:
             message_personal = _build_design_not_in_progress_48h_message(
                 order,
                 passed_text=passed_text,
-                reminder_days=reminder_days,
+                reminder_hours=int(self.reminder_hours),
             )
 
             assigned_to_mention_html: Optional[str] = None
