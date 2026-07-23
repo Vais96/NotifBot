@@ -247,35 +247,9 @@ def _keitaro_sale_postback_fingerprint(data: dict) -> str | None:
     )
     if clickid is None or not str(clickid).strip():
         return None
-    s_click = str(clickid).strip()
-
-    payout_raw = (
-        data.get("profit")
-        or data.get("payout")
-        or data.get("revenue")
-        or data.get("conversion_revenue")
-    )
-    payout_s = ""
-    if payout_raw not in (None, ""):
-        try:
-            payout_s = f"{float(str(payout_raw).replace(',', '.')):.6f}"
-        except Exception:
-            payout_s = str(payout_raw).strip()
-
-    offer_key = (
-        data.get("offer_id")
-        or data.get("offer.id")
-        or data.get("offer_name")
-        or data.get("offer")
-        or ""
-    )
-    if not isinstance(offer_key, str):
-        offer_key = str(offer_key)
-    offer_key = offer_key.strip()
-    if len(offer_key) > 160:
-        offer_key = offer_key[:160]
-
-    basis = f"click:{s_click}|p:{payout_s}|o:{offer_key}"
+    # Trackers may correct payout or conversion time when retrying the same sale.
+    # Without a stable conversion_id, SubID/click ID is the only reliable identity.
+    basis = f"click:{str(clickid).strip()}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
@@ -422,8 +396,18 @@ async def _process_keitaro_postback(data: dict) -> dict:
     if _keitaro_is_sale(data):
         fp = _keitaro_sale_postback_fingerprint(data)
         if fp:
+            click_id = (
+                data.get("subid")
+                or data.get("sub_id")
+                or data.get("clickid")
+                or data.get("click_id")
+                or data.get("tid")
+            )
             try:
-                first = await db.claim_keitaro_sale_postback(fp)
+                first = await db.claim_keitaro_sale_postback(
+                    fp,
+                    click_id=str(click_id).strip() if click_id is not None else None,
+                )
             except Exception as e:
                 logger.warning(f"Keitaro sale dedupe failed, processing anyway: {e}")
                 first = True

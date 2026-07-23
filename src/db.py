@@ -1008,8 +1008,12 @@ async def find_user_for_postback(offer: Optional[str], country: Optional[str], s
             row = await cur.fetchone()
             return int(row[0]) if row else None
 
-async def claim_keitaro_sale_postback(fingerprint: str) -> bool:
-    """Return True if this sale postback should be processed (first occurrence); False if duplicate."""
+async def claim_keitaro_sale_postback(
+    fingerprint: str,
+    *,
+    click_id: Optional[str] = None,
+) -> bool:
+    """Atomically claim a sale and reject retries of click IDs saved before this key format."""
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
@@ -1017,7 +1021,32 @@ async def claim_keitaro_sale_postback(fingerprint: str) -> bool:
                 "INSERT IGNORE INTO tg_keitaro_sale_dedupe (dedupe_key) VALUES (%s)",
                 (fingerprint,),
             )
-            return int(cur.rowcount or 0) == 1
+            if int(cur.rowcount or 0) != 1:
+                return False
+
+            normalized_click_id = str(click_id or "").strip()
+            if not normalized_click_id:
+                return True
+
+            # The stable click-only key may not exist for events processed by older
+            # releases. Keep the new key, but suppress delivery if that click was
+            # already logged as a sale.
+            sale_like = (
+                "sale", "approved", "approve", "confirmed", "confirm",
+                "purchase", "purchased", "paid", "success",
+            )
+            placeholders = ",".join(["%s"] * len(sale_like))
+            await cur.execute(
+                f"""
+                SELECT 1
+                FROM tg_events
+                WHERE clickid = %s
+                  AND LOWER(TRIM(COALESCE(status, ''))) IN ({placeholders})
+                LIMIT 1
+                """,
+                (normalized_click_id, *sale_like),
+            )
+            return (await cur.fetchone()) is None
 
 
 async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
