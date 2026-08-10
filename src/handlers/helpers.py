@@ -7,6 +7,8 @@ from ..dispatcher import ADMIN_IDS, bot, dp
 from .. import db
 from loguru import logger
 
+_BUYERS_PER_PAGE = 30
+
 
 def _helper_row_controls(helper_id: int) -> InlineKeyboardMarkup:
     """Кнопка «Назначить байера» рядом с помощником."""
@@ -20,6 +22,48 @@ def _helper_add_button() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Добавить помощника", callback_data="helper:add")]
     ])
+
+
+def _buyer_picker(
+    buyers: list[dict], helper_id: int, page: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build one page of buyer choices for a helper assignment."""
+    page_count = max(1, (len(buyers) + _BUYERS_PER_PAGE - 1) // _BUYERS_PER_PAGE)
+    page = max(0, min(page, page_count - 1))
+    start = page * _BUYERS_PER_PAGE
+    buttons = []
+    for buyer in buyers[start:start + _BUYERS_PER_PAGE]:
+        buyer_id = int(buyer["telegram_id"])
+        label = f"@{buyer.get('username') or buyer_id}"
+        if buyer.get("full_name"):
+            label += f" ({buyer['full_name']})"
+        if len(label) > 35:
+            label = label[:32] + "..."
+        buttons.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"helper:assign:{helper_id}:{buyer_id}",
+            )
+        ])
+    navigation = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="← Назад", callback_data=f"helper:setbuyer:{helper_id}:{page - 1}"
+            )
+        )
+    if page < page_count - 1:
+        navigation.append(
+            InlineKeyboardButton(
+                text="Вперёд →", callback_data=f"helper:setbuyer:{helper_id}:{page + 1}"
+            )
+        )
+    if navigation:
+        buttons.append(navigation)
+    return (
+        f"Выберите байера для помощника (страница {page + 1}/{page_count}):",
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
 
 
 async def _send_helpers_list(chat_id: int, actor_id: int):
@@ -64,21 +108,17 @@ async def cb_helper_add(call: CallbackQuery):
 async def cb_helper_set_buyer(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
         return await call.answer("Нет прав", show_alert=True)
-    _, __, helper_id_s = call.data.split(":", 2)
-    helper_id = int(helper_id_s)
+    parts = call.data.split(":")
+    helper_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 0
     buyers = await db.list_users_as_buyer_candidates()
     if not buyers:
         return await call.answer("Нет ни одного байера/лида/ментора в системе", show_alert=True)
-    # Inline-кнопки: выбор байера (до 40–50 из-за лимита Telegram)
-    buttons = []
-    for b in buyers[:40]:
-        uid = int(b["telegram_id"])
-        label = f"@{b.get('username') or uid}" + (f" ({b.get('full_name') or ''})" if b.get("full_name") else "")
-        if len(label) > 35:
-            label = label[:32] + "..."
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"helper:assign:{helper_id}:{uid}")])
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await call.message.answer("Выберите байера для помощника:", reply_markup=kb)
+    text, keyboard = _buyer_picker(buyers, helper_id, page)
+    if len(parts) > 3:
+        await call.message.edit_text(text, reply_markup=keyboard)
+    else:
+        await call.message.answer(text, reply_markup=keyboard)
     await call.answer()
 
 
