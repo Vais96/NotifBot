@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from ..dispatcher import ADMIN_IDS, bot, dp
 from .. import db
 from loguru import logger
+from ..handlers.domains import notify_helper_domain_access
 
 
 def _chunk_text_lines(lines: list[str], *, max_chars: int = 3500) -> list[str]:
@@ -293,6 +294,8 @@ async def cb_set_role(call: CallbackQuery):
             await db.set_team_lead_override(team_id, int(uid))
         elif role != "lead":
             await db.clear_team_lead_override(team_id)
+    if role == "helper":
+        await notify_helper_domain_access(int(uid))
     if u:
         await call.message.edit_reply_markup(reply_markup=_user_row_controls(u))
         await call.answer("Роль обновлена")

@@ -1616,55 +1616,90 @@ async def fetch_alias_map(aliases: Iterable[str]) -> Dict[str, Dict[str, Any]]:
         result[alias] = row
     return result
 
-async def replace_keitaro_campaigns(rows: List[Dict[str, Any]]) -> None:
-    """Replace cached Keitaro campaigns with the provided collection."""
+async def upsert_keitaro_campaigns(rows: List[Dict[str, Any]]) -> int:
+    """Insert new Keitaro campaigns and update existing ones without wiping old rows."""
+    if not rows:
+        return 0
+    payload = []
+    for row in rows:
+        cid = int(row.get("id"))
+        name = str(row.get("name") or "")
+        prefix = row.get("prefix")
+        alias_raw = row.get("alias_key")
+        alias_key = alias_raw.lower() if isinstance(alias_raw, str) and alias_raw else None
+        source_domain = (row.get("source_domain") or None)
+        target_domain = (row.get("target_domain") or None)
+        payload.append((cid, name, prefix, alias_key, source_domain, target_domain))
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await conn.begin()
             try:
-                await cur.execute("DELETE FROM keitaro_campaigns")
-                if rows:
-                    payload = []
-                    for row in rows:
-                        cid = int(row.get("id"))
-                        name = str(row.get("name") or "")
-                        prefix = row.get("prefix")
-                        alias_raw = row.get("alias_key")
-                        alias_key = alias_raw.lower() if isinstance(alias_raw, str) and alias_raw else None
-                        source_domain = (row.get("source_domain") or None)
-                        target_domain = (row.get("target_domain") or None)
-                        payload.append((cid, name, prefix, alias_key, source_domain, target_domain))
-                    await cur.executemany(
-                        """
-                        INSERT INTO keitaro_campaigns(id, name, prefix, alias_key, source_domain, target_domain, updated_at)
-                        VALUES(%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                        """,
-                        payload
-                    )
+                await cur.executemany(
+                    """
+                    INSERT INTO keitaro_campaigns(id, name, prefix, alias_key, source_domain, target_domain, updated_at)
+                    VALUES(%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    ON DUPLICATE KEY UPDATE
+                        name=VALUES(name),
+                        prefix=VALUES(prefix),
+                        alias_key=VALUES(alias_key),
+                        source_domain=VALUES(source_domain),
+                        target_domain=VALUES(target_domain),
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    payload,
+                )
                 await conn.commit()
             except Exception:
                 await conn.rollback()
                 raise
+    return len(payload)
+
+
+async def replace_keitaro_campaigns(rows: List[Dict[str, Any]]) -> None:
+    """Compatibility wrapper: add/update campaigns, keep previously cached domains."""
+    await upsert_keitaro_campaigns(rows)
 
 async def find_campaigns_by_domain(domain: str) -> List[Dict[str, Any]]:
     if not domain:
         return []
+    from .keitaro import campaign_row_matches_domain, normalize_domain
+
+    value = normalize_domain(domain) or domain.strip().lower()
+    if not value:
+        return []
+    like_host = f"%.{value}"
+    like_name = f"%{value}%"
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            value = domain.lower()
             await cur.execute(
                 """
                 SELECT id, name, prefix, alias_key, source_domain, target_domain, updated_at
                 FROM keitaro_campaigns
                 WHERE source_domain=%s OR target_domain=%s
+                   OR source_domain LIKE %s OR target_domain LIKE %s
+                   OR name LIKE %s
                 ORDER BY prefix IS NULL, prefix ASC, name ASC
                 """,
-                (value, value)
+                (value, value, like_host, like_host, like_name),
             )
             rows = await cur.fetchall()
-            return rows or []
+    matched: List[Dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for row in rows or []:
+        if not campaign_row_matches_domain(row, value):
+            continue
+        try:
+            cid = int(row.get("id"))
+        except Exception:
+            cid = None
+        if cid is not None:
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+        matched.append(row)
+    return matched
 
 async def list_offers_for_users(user_ids: List[int]) -> List[str]:
     if not user_ids:

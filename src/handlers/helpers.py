@@ -157,4 +157,3 @@ async def cb_helper_delete(call: CallbackQuery):
         return await call.answer("Ошибка удаления помощника", show_alert=True)
     await call.answer("Помощник удален", show_alert=True)
 
-

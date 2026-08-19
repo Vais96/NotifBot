@@ -8,6 +8,7 @@ from .. import db
 from ..utils.domain import lookup_domains_text
 from ..handlers.youtube import handle_youtube_download
 from ..handlers.users import _resolve_user_id
+from ..handlers.domains import notify_helper_domain_access
 
 
 @dp.message()
@@ -105,9 +106,11 @@ async def on_text_fallback(message: Message):
             await db.set_user_role(uid, "helper")
             await db.clear_pending_action(message.from_user.id)
             name = user.get("full_name") or user.get("username") or uid
+            await notify_helper_domain_access(uid)
             return await message.answer(
                 f"Пользователь {name} (@{user.get('username') or uid}) назначен помощником.\n"
-                "Откройте «Помощники» в меню и нажмите «Назначить байера» рядом с ним."
+                "Откройте «Помощники» в меню и нажмите «Назначить байера» рядом с ним.\n"
+                "Помощнику уже доступны /checkdomain и кнопка «Проверить домен»."
             )
         if action == "team:new":
             name = message.text.strip()

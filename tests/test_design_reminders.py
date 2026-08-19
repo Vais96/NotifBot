@@ -34,6 +34,7 @@ class DesignReminderTests(unittest.IsolatedAsyncioTestCase):
             passed_text="2 дн. 1 ч.",
             reminder_hours=48,
         )
+
         self.assertTrue(text.startswith("⚠️ ОБНОВИТЕ СТАТУС ЗАДАЧИ #34912"))
         self.assertIn("Прошло 48 часов", text)
 
@@ -41,6 +42,7 @@ class DesignReminderTests(unittest.IsolatedAsyncioTestCase):
         assigned_at = datetime.now(timezone.utc) - timedelta(hours=49)
         send_message = AsyncMock()
         mark_sent = AsyncMock()
+
         with (
             patch(
                 "src.underdog.db.list_design_assignments_pending_take_in_progress_reminder",
@@ -66,6 +68,7 @@ class DesignReminderTests(unittest.IsolatedAsyncioTestCase):
                 bot=object(),
                 reminder_hours=48,
             ).notify_design_not_in_progress_48h(dry_run=False)
+
         send_message.assert_awaited_once()
         self.assertEqual(send_message.await_args.args[1], 123456)
         self.assertIn("ОБНОВИТЕ СТАТУС ЗАДАЧИ #34912", send_message.await_args.kwargs["text"])

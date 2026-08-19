@@ -1,19 +1,24 @@
 import asyncio
-import hashlib
+import hmac
 from contextlib import suppress
 from datetime import datetime, timezone, date
-from typing import Dict, Tuple, Optional
+from typing import Any, Dict, Mapping, Tuple, Optional
 
 from fastapi import FastAPI, Request, HTTPException, Header, BackgroundTasks
 from fastapi.responses import JSONResponse
 from loguru import logger
-import json
 from .config import settings
 from .dispatcher import dp, bot, notify_buyer
 from .orders_bot import orders_dp, orders_bot
 from .design_bot import design_dp, design_bot
 from . import handlers  # noqa: F401 ensure handlers are registered
-from . import db, underdog
+from . import db, underdog, keitaro_sync
+from .services.keitaro_postbacks import (
+    build_notification_text,
+    has_meaningful_fields,
+    is_sale as is_keitaro_sale,
+    sale_postback_fingerprint,
+)
 from aiogram.types import Update, BotCommand
 from pydantic import BaseModel, Field
 
@@ -32,6 +37,7 @@ if not DESIGN_WEBHOOK_PATH.startswith("/"):
 
 app = FastAPI(title="Keitaro Telegram Notifier")
 _design_notify_task: asyncio.Task | None = None
+_keitaro_sync_task: asyncio.Task | None = None
 
 
 async def _run_design_notifications() -> None:
@@ -72,24 +78,23 @@ async def _design_notification_loop(interval_seconds: int) -> None:
             logger.exception("Scheduled DesignBot notification check failed", error=str(exc))
         await asyncio.sleep(interval_seconds)
 
-# Helpers to detect unexpanded placeholders and empty postbacks
-def _is_unexpanded_placeholder(v: str) -> bool:
-    try:
-        s = v.strip()
-        return s.startswith("{") and s.endswith("}")
-    except Exception:
-        return False
 
-MEANINGFUL_KEYS = (
-    "profit", "payout", "revenue", "conversion_revenue",
-    "currency", "revenue_currency", "payout_currency",
-    "offer_id", "offer.id", "offer_name", "offer.name", "offer",
-    "subid", "sub_id", "clickid", "click_id", "sub_id_3", "subid3",
-    "conversion_sale_time", "conversion.sale_time", "conversion_time",
-    "campaign_name", "campaign.name", "campaign",
-    "status", "conversion_status", "conversion.status", "status_name", "state", "action",
-    "country", "geo", "source", "traffic_source_name", "traffic_source", "affiliate",
-)
+async def _run_keitaro_domain_sync() -> None:
+    """Pull new Keitaro campaigns/domains into the local lookup cache."""
+    count = await keitaro_sync.sync_campaigns()
+    logger.info("Scheduled Keitaro domain sync completed", count=count)
+
+
+async def _keitaro_domain_sync_loop(interval_seconds: int) -> None:
+    """Refresh the domain cache daily (or at the configured interval)."""
+    while True:
+        try:
+            await _run_keitaro_domain_sync()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Scheduled Keitaro domain sync failed", error=str(exc))
+        await asyncio.sleep(interval_seconds)
 
 _DEPOSIT_FOOTERS_BY_USERNAME: dict[str, str] = {
     "egorkunderdog": (
@@ -144,18 +149,49 @@ class IPNotifyRequest(BaseModel):
     token: Optional[str] = None
 
 
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    """Return a normalized Bearer token, accepting the auth scheme case-insensitively."""
+    if not authorization:
+        return None
+    scheme, separator, credentials = authorization.strip().partition(" ")
+    if not separator or scheme.lower() != "bearer":
+        return None
+    return credentials.strip() or None
+
+
+def _token_matches(supplied: Any) -> bool:
+    if supplied is None:
+        return False
+    return hmac.compare_digest(str(supplied).strip(), settings.postback_token)
+
+
 def _require_internal_token(authorization: str | None, inline_token: Optional[str] = None) -> None:
     if not settings.postback_token:
         return
-    supplied = None
-    if authorization and authorization.startswith("Bearer "):
-        supplied = authorization.split(" ", 1)[1].strip()
+    supplied = _extract_bearer_token(authorization)
     if not supplied:
         supplied = inline_token.strip() if inline_token else None
     if not supplied:
         raise HTTPException(401, "Unauthorized")
-    if supplied != settings.postback_token:
+    if not _token_matches(supplied):
         raise HTTPException(403, "Forbidden")
+
+
+def _authorize_postback(authorization: str | None, data: Mapping[str, Any]) -> None:
+    """Authorize a tracker callback using a header or its token/auth field."""
+    if not settings.postback_token:
+        return
+    supplied = _extract_bearer_token(authorization) or data.get("token") or data.get("auth")
+    if not supplied:
+        raise HTTPException(401, "Unauthorized")
+    if not _token_matches(supplied):
+        raise HTTPException(403, "Forbidden")
+
+
+def _remove_postback_credentials(data: dict[str, Any]) -> None:
+    """Do not persist tracker credentials in tg_events.raw or background-task logs."""
+    data.pop("token", None)
+    data.pop("auth", None)
 
 _daily_counter_lock = asyncio.Lock()
 _daily_counter_cache: Dict[int, Tuple[date, int]] = {}
@@ -199,181 +235,6 @@ async def _resolve_daily_counter(user_id: int, db_value: int | None) -> int:
         )
     return display
 
-_SALE_LIKE_STATUSES = frozenset(
-    {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
-)
-
-
-def _keitaro_raw_status(data: dict) -> str:
-    raw_status_value = (
-        data.get("status")
-        or data.get("conversion_status")
-        or data.get("conversion.status")
-        or data.get("status_name")
-        or data.get("state")
-        or data.get("action")
-        or ""
-    )
-    return str(raw_status_value).lower()
-
-
-def _keitaro_is_sale(data: dict) -> bool:
-    return _keitaro_raw_status(data) in _SALE_LIKE_STATUSES
-
-
-def _keitaro_sale_postback_fingerprint(data: dict) -> str | None:
-    """Stable idempotency key for sale postbacks (SHA-256 hex). None if click/sub id missing."""
-    conv_id = (
-        data.get("conversion_id")
-        or data.get("conversion.id")
-        or data.get("external_id")
-        or data.get("external_conversion_id")
-    )
-    if conv_id is not None:
-        s = str(conv_id).strip()
-        if s and not _is_unexpanded_placeholder(s):
-            basis = f"conv:{s}"
-            return hashlib.sha256(basis.encode("utf-8")).hexdigest()
-
-    clickid = (
-        data.get("subid")
-        or data.get("sub_id")
-        or data.get("clickid")
-        or data.get("click_id")
-        or data.get("tid")
-    )
-    if clickid is None or not str(clickid).strip():
-        return None
-    # Trackers may correct payout or conversion time when retrying the same sale.
-    # Without a stable conversion_id, SubID/click ID is the only reliable identity.
-    basis = f"click:{str(clickid).strip()}"
-    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
-
-
-def _has_meaningful_postback_fields(data: dict) -> bool:
-    if not data:
-        return False
-    for k in MEANINGFUL_KEYS:
-        if k in data:
-            v = data.get(k)
-            if v is None:
-                continue
-            s = str(v).strip()
-            if not s:
-                continue
-            if _is_unexpanded_placeholder(s):
-                continue
-            return True
-    return False
-
-# Unified message formatter used by both POST and GET handlers
-def _build_notification_text(data: dict, daily_count: int | None = None, kpi_daily_goal: int | None = None) -> str:
-    # Extract fields
-    payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
-    currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
-    offer_id = data.get("offer_id") or data.get("offer.id")
-    offer_name = data.get("offer_name") or data.get("offer.name") or data.get("offer")
-    subid = data.get("subid") or data.get("sub_id") or data.get("clickid") or data.get("click_id")
-    sub_id_2 = data.get("sub_id_2") or data.get("subid2")
-    sub_id_3 = data.get("sub_id_3") or data.get("subid3")
-    sale_time = data.get("conversion_sale_time") or data.get("conversion.sale_time") or data.get("conversion_time")
-    campaign_name = data.get("campaign_name") or data.get("campaign.name") or data.get("campaign")
-
-    # Clean unexpanded placeholders like "{conversion.sale_time}"
-    def _clean(v):
-        if isinstance(v, str):
-            s = v.strip()
-            if s.startswith("{") and s.endswith("}"):
-                return None
-        return v
-
-    payout = _clean(payout)
-    currency = _clean(currency)
-    offer_id = _clean(offer_id)
-    offer_name = _clean(offer_name)
-    subid = _clean(subid)
-    sub_id_2 = _clean(sub_id_2)
-    sub_id_3 = _clean(sub_id_3)
-    sale_time = _clean(sale_time)
-    campaign_name = _clean(campaign_name)
-
-    # Helpers: round profit to integer and format conversion time as yyyy-mm-dd / HH:MM in UTC
-    def _format_payout(p):
-        if p is None:
-            return None
-        try:
-            s = str(p).replace(",", ".").strip()
-            value = float(s)
-            return str(int(round(value)))
-        except Exception:
-            return str(p)
-
-    def _format_sale_time(v):
-        from datetime import datetime, timezone
-        if v is None:
-            return None
-        try:
-            if isinstance(v, (int, float)):
-                ts = float(v)
-                if ts > 1e12:
-                    ts = ts / 1000.0
-                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                return dt.strftime("%Y-%m-%d / %H:%M")
-            s = str(v).strip()
-            if s.isdigit():
-                ts = float(s)
-                if ts > 1e12:
-                    ts = ts / 1000.0
-                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                return dt.strftime("%Y-%m-%d / %H:%M")
-            s_norm = s.replace("Z", "+00:00")
-            try:
-                dt = datetime.fromisoformat(s_norm)
-                if dt.tzinfo:
-                    dt = dt.astimezone(timezone.utc)
-                return dt.strftime("%Y-%m-%d / %H:%M")
-            except Exception:
-                pass
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
-                try:
-                    dt = datetime.strptime(s, fmt)
-                    return dt.strftime("%Y-%m-%d / %H:%M")
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return str(v)
-
-    payout_fmt = _format_payout(payout)
-    sale_time_fmt = _format_sale_time(sale_time)
-
-    alias_name = None
-    if campaign_name:
-        alias_name = (str(campaign_name).split("_", 1)[0] or "").strip() or None
-
-    # Pretty emoji-rich layout
-    lines: list[str] = []
-    lines.append(f"👤 <b>БАЙЕР:</b> <code>{alias_name or '-'}</code>")
-    lines.append(f"🎯 <b>ОФФЕР:</b> <code>{offer_id or '-'} | {offer_name or '-'}</code>")
-    if payout_fmt:
-        lines.append(f"💰 <b>ПРОФИТ:</b> <code>{payout_fmt} {currency or ''}</code>")
-    lines.append(f"🧩 <b>SubID:</b> <code>{subid or '-'}</code>")
-    if campaign_name:
-        lines.append(f"📣 <b>КАМПАНИЯ:</b> <code>{campaign_name}</code>")
-    lines.append(f"🔢 <b>SubID3:</b> <code>{sub_id_3 or '-'}</code>")
-    if sub_id_2:
-        lines.append(f"📌 <b>SubID2:</b> <code>{sub_id_2}</code>")
-    if daily_count is not None:
-        lines.append(f"📈 <b>ДЕПОЗИТОВ ЗА ДЕНЬ:</b> <code>{daily_count}</code>")
-    # KPI progress if available
-    if (daily_count is not None) and (kpi_daily_goal is not None):
-        lines.append(f"🎯 <b>Сегодня:</b> <code>{daily_count}/{kpi_daily_goal}</code> депозитов к цели")
-    if sale_time_fmt:
-        lines.append(f"🕒 <b>КОНВЕРСИЯ:</b> <code>{sale_time_fmt}</code> (UTC +0)")
-
-    return "\n".join(lines)
-
-
 async def _run_keitaro_postback_job(data: dict) -> None:
     """Фоновая обработка: Keitaro ждёт ответ ~5 с, иначе cURL 28 — отдаём 200 раньше."""
     try:
@@ -390,8 +251,8 @@ async def _run_keitaro_postback_job(data: dict) -> None:
 
 
 async def _process_keitaro_postback(data: dict) -> dict:
-    if _keitaro_is_sale(data):
-        fp = _keitaro_sale_postback_fingerprint(data)
+    if is_keitaro_sale(data):
+        fp = sale_postback_fingerprint(data)
         if fp:
             click_id = (
                 data.get("subid")
@@ -485,7 +346,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
     # do not return early: admins should still receive notifications even if not routed
 
     # Map status and accept only sale-like statuses
-    is_sale = _keitaro_is_sale(data)
+    is_sale = is_keitaro_sale(data)
     payout = data.get("profit") or data.get("payout") or data.get("revenue") or data.get("conversion_revenue")
     currency = data.get("currency") or data.get("revenue_currency") or data.get("payout_currency")
     offer_id = data.get("offer_id") or data.get("offer.id")
@@ -533,7 +394,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
             kpi_daily_goal = kpi.get("daily_goal")
         except Exception as e:
             logger.warning(f"Failed to get KPI: {e}")
-    text = _build_notification_text(data, daily_count=daily_count, kpi_daily_goal=kpi_daily_goal)
+    text = build_notification_text(data, daily_count=daily_count, kpi_daily_goal=kpi_daily_goal)
 
     # Determine recipients
     recipient_ids: set[int] = set()
@@ -609,7 +470,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
 
 @app.on_event("startup")
 async def on_startup():
-    global _design_notify_task
+    global _design_notify_task, _keitaro_sync_task
     try:
         await db.init_pool()
     except Exception as e:
@@ -623,7 +484,7 @@ async def on_startup():
     url = settings.base_url.rstrip("/") + secret_path
     try:
         await bot.set_webhook(url)
-        logger.info(f"Webhook set to {url}")
+        logger.info("Main Telegram webhook configured")
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
 
@@ -632,13 +493,14 @@ async def on_startup():
         orders_url = settings.base_url.rstrip("/") + ORDERS_WEBHOOK_PATH
         try:
             await orders_bot.set_webhook(orders_url)
-            logger.info(f"Orders webhook set to {orders_url}")
+            logger.info("Orders Telegram webhook configured")
         except Exception as e:
             logger.error(f"Failed to set orders webhook: {e}")
     # Set command menu for the bot (helps users discover commands)
     try:
         await bot.set_my_commands([
             BotCommand(command="menu", description="Открыть меню"),
+            BotCommand(command="checkdomain", description="Проверить домен"),
             BotCommand(command="help", description="Помощь"),
             BotCommand(command="ping", description="Проверка связи"),
             BotCommand(command="whoami", description="Ваш Telegram ID"),
@@ -669,7 +531,7 @@ async def on_startup():
         design_url = settings.base_url.rstrip("/") + DESIGN_WEBHOOK_PATH
         try:
             await design_bot.set_webhook(design_url)
-            logger.info(f"Design webhook set to {design_url}")
+            logger.info("Design Telegram webhook configured")
         except Exception as e:
             logger.error(f"Failed to set design webhook: {e}")
         try:
@@ -688,14 +550,24 @@ async def on_startup():
         )
         logger.info("DesignBot scheduled checks enabled", interval_seconds=max(60, interval))
 
+    keitaro_interval = max(0, int(settings.keitaro_sync_interval_seconds))
+    if settings.keitaro_api_key and settings.keitaro_base_url and keitaro_interval > 0:
+        _keitaro_sync_task = asyncio.create_task(
+            _keitaro_domain_sync_loop(max(60, keitaro_interval)),
+            name="keitaro-domain-sync-loop",
+        )
+        logger.info("Keitaro domain sync enabled", interval_seconds=max(60, keitaro_interval))
+
 @app.on_event("shutdown")
 async def on_shutdown():
-    global _design_notify_task
-    if _design_notify_task is not None:
-        _design_notify_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await _design_notify_task
-        _design_notify_task = None
+    global _design_notify_task, _keitaro_sync_task
+    for task in (_design_notify_task, _keitaro_sync_task):
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+    _design_notify_task = None
+    _keitaro_sync_task = None
     await db.close_pool()
     # Close aiogram bot aiohttp sessions to avoid "Unclosed client session" warnings
     for bot_instance in (bot, orders_bot, design_bot):
@@ -734,7 +606,8 @@ async def keitaro_postback(
     data = {}
     if "application/json" in content_type:
         try:
-            data = await request.json()
+            parsed = await request.json()
+            data = dict(parsed) if isinstance(parsed, Mapping) else {}
         except Exception:
             data = {}
     elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
@@ -748,21 +621,12 @@ async def keitaro_postback(
         for k, v in request.query_params.items():
             data.setdefault(k, v)
 
-    # Optional token verification: set POSTBACK_TOKEN env and configure Keitaro header Authorization: Bearer <token>
-    if settings.postback_token:
-        supplied_token = None
-        # Prefer header, but accept token/auth from params/body for trackers without header config
-        if authorization and authorization.startswith("Bearer "):
-            supplied_token = authorization.split(" ", 1)[1]
-        if not supplied_token:
-            supplied_token = data.get("token") or data.get("auth")
-        if not supplied_token:
-            raise HTTPException(401, "Unauthorized")
-        if supplied_token != settings.postback_token:
-            raise HTTPException(403, "Forbidden")
+    # Prefer the header, but accept token/auth fields for trackers without header configuration.
+    _authorize_postback(authorization, data)
+    _remove_postback_credentials(data)
 
     # If no meaningful fields are present, return 200 with a simple ACK body
-    if not _has_meaningful_postback_fields(data):
+    if not has_meaningful_fields(data):
         return JSONResponse({"success": 200})
 
     # Keitaro S2S often uses ~5s HTTP timeout — отвечаем сразу, обработку делаем в фоне
@@ -780,20 +644,11 @@ async def keitaro_postback_get(
         # Parse query parameters as a dict
         data = dict(request.query_params)
 
-        # Optional token verification identical to POST
-        if settings.postback_token:
-            supplied_token = None
-            if authorization and authorization.startswith("Bearer "):
-                supplied_token = authorization.split(" ", 1)[1]
-            if not supplied_token:
-                supplied_token = data.get("token") or data.get("auth")
-            if not supplied_token:
-                raise HTTPException(401, "Unauthorized")
-            if supplied_token != settings.postback_token:
-                raise HTTPException(403, "Forbidden")
+        _authorize_postback(authorization, data)
+        _remove_postback_credentials(data)
 
         # If no meaningful fields are present, return 200 with a simple ACK body
-        if not _has_meaningful_postback_fields(data):
+        if not has_meaningful_fields(data):
             return JSONResponse({"success": 200})
 
         background_tasks.add_task(_run_keitaro_postback_job, dict(data))
@@ -840,12 +695,7 @@ async def design_subscribers(
     authorization: str | None = Header(default=None),
 ):
     """Кто в рассылке DesignBot: список chat_id из tg_design_bot_chats (кто нажал /start в DesignBot)."""
-    if settings.postback_token:
-        supplied = (authorization or "").strip()
-        if supplied.startswith("Bearer "):
-            supplied = supplied[7:].strip()
-        if supplied != settings.postback_token:
-            raise HTTPException(403, "Forbidden")
+    _require_internal_token(authorization)
     try:
         chat_ids = await db.list_design_bot_subscribers()
         return {"subscribers_count": len(chat_ids), "subscriber_chat_ids": chat_ids}

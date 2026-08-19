@@ -52,6 +52,11 @@ class Settings(BaseModel):
         default=3600,
         validation_alias="DESIGN_NOTIFY_INTERVAL_SECONDS",
     )
+    # Как часто подтягивать кампании/домены из Keitaro. 0 отключает встроенный цикл.
+    keitaro_sync_interval_seconds: int = Field(
+        default=86400,
+        validation_alias="KEITARO_SYNC_INTERVAL_SECONDS",
+    )
 
     @classmethod
     def load(cls) -> "Settings":
@@ -131,6 +136,9 @@ class Settings(BaseModel):
             ),
             "DESIGN_NOTIFY_INTERVAL_SECONDS": int(
                 os.getenv("DESIGN_NOTIFY_INTERVAL_SECONDS", "3600")
+            ),
+            "KEITARO_SYNC_INTERVAL_SECONDS": int(
+                os.getenv("KEITARO_SYNC_INTERVAL_SECONDS", "86400")
             ),
         }
         return cls.model_validate(raw)

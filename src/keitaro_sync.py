@@ -8,8 +8,11 @@ from .config import settings
 from . import db
 from .keitaro import parse_campaign_name
 
-PAGE_LIMIT = 200
+PAGE_LIMIT = 100
 REQUEST_PAUSE = 0.2
+MAX_CAMPAIGNS = 100_000
+
+_sync_lock = asyncio.Lock()
 
 
 def _build_headers() -> Dict[str, str]:
@@ -24,26 +27,53 @@ def _build_base_url() -> str:
     return f"{base}/campaigns"
 
 
+def extract_campaign_list(payload: Any) -> List[Dict[str, Any]]:
+    """Accept both a bare list and wrapped Keitaro admin responses."""
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("items", "campaigns", "rows", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+    raise ValueError("Unexpected response from Keitaro: expected list")
+
+
 async def _fetch_all_campaigns() -> List[Dict[str, Any]]:
     url = _build_base_url()
     headers = _build_headers()
     offset = 0
     collected: List[Dict[str, Any]] = []
+    seen_ids: set[int] = set()
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=30.0)) as client:
         while True:
             params = {"limit": PAGE_LIMIT, "offset": offset}
             resp = await client.get(url, params=params, headers=headers)
             resp.raise_for_status()
-            payload = resp.json()
-            if not isinstance(payload, list):
-                raise ValueError("Unexpected response from Keitaro: expected list")
-            if not payload:
+            batch = extract_campaign_list(resp.json())
+            if not batch:
                 break
-            collected.extend(payload)
-            logger.debug("Keitaro page fetched", offset=offset, count=len(payload))
-            if len(payload) < PAGE_LIMIT:
+            new_rows: List[Dict[str, Any]] = []
+            for row in batch:
+                try:
+                    cid = int(row.get("id"))
+                except Exception:
+                    new_rows.append(row)
+                    continue
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                new_rows.append(row)
+            if not new_rows:
                 break
-            offset += PAGE_LIMIT
+            collected.extend(new_rows)
+            logger.debug("Keitaro page fetched", offset=offset, count=len(batch), unique=len(new_rows))
+            offset += len(batch)
+            if len(collected) >= MAX_CAMPAIGNS:
+                logger.warning("Keitaro campaign fetch hit safety cap", count=len(collected))
+                break
+            if len(batch) < PAGE_LIMIT:
+                break
             await asyncio.sleep(REQUEST_PAUSE)
     return collected
 
@@ -77,12 +107,13 @@ def _prepare_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 async def sync_campaigns() -> int:
     if not settings.keitaro_api_key or not settings.keitaro_base_url:
         raise RuntimeError("Keitaro credentials are not configured")
-    logger.info("Fetching campaigns from Keitaro")
-    raw = await _fetch_all_campaigns()
-    prepared = _prepare_rows(raw)
-    logger.info("Fetched %s campaigns, %s with domains", len(raw), len(prepared))
-    await db.replace_keitaro_campaigns(prepared)
-    return len(prepared)
+    async with _sync_lock:
+        logger.info("Fetching campaigns from Keitaro")
+        raw = await _fetch_all_campaigns()
+        prepared = _prepare_rows(raw)
+        logger.info("Fetched %s campaigns, %s with domains", len(raw), len(prepared))
+        await db.upsert_keitaro_campaigns(prepared)
+        return len(prepared)
 
 
 async def amain() -> None:

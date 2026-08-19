@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 _BRACKET_RE = re.compile(r"\[([^\]]+)\]")
@@ -58,3 +58,26 @@ def parse_campaign_name(name: str) -> Dict[str, Optional[str]]:
         "target_domain": target_domain,
     }
     return result
+
+
+def hosts_match(stored: Optional[str], query: str) -> bool:
+    """True if campaign host equals the lookup host or one is a subdomain of the other."""
+    left = normalize_domain(stored or "")
+    right = normalize_domain(query or "")
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return left.endswith("." + right) or right.endswith("." + left)
+
+
+def campaign_row_matches_domain(row: Dict[str, Any], query: str) -> bool:
+    """Match a cached campaign against a user-supplied domain."""
+    domain = normalize_domain(query or "")
+    if not domain:
+        return False
+    for value in (row.get("source_domain"), row.get("target_domain")):
+        if hosts_match(value if isinstance(value, str) else None, domain):
+            return True
+    meta = parse_campaign_name(str(row.get("name") or ""))
+    return hosts_match(meta.get("source_domain"), domain) or hosts_match(meta.get("target_domain"), domain)

@@ -5,6 +5,7 @@ from aiogram.types import Message
 
 from ..dispatcher import ADMIN_IDS, dp
 from .. import db
+from ..handlers.menu import send_user_menu
 
 
 @dp.message(CommandStart())
@@ -17,7 +18,19 @@ async def on_start(message: Message):
             await db.set_user_role(message.from_user.id, "admin")
         except Exception:
             pass
-    await message.answer("Привет! Ты зарегистрирован. Роль по умолчанию: buyer (если не админ). Админ может изменить роль и добавить правила.")
+    me = await db.get_user(message.from_user.id)
+    role = (me or {}).get("role")
+    if role == "helper":
+        await message.answer(
+            "Привет! Вы помощник.\n"
+            "Проверять домены: /checkdomain или кнопка «Проверить домен» в меню."
+        )
+    else:
+        await message.answer(
+            "Привет! Ты зарегистрирован. Роль по умолчанию: buyer (если не админ). "
+            "Админ может изменить роль и добавить правила."
+        )
+    await send_user_menu(message.chat.id, message.from_user.id)
 
 
 @dp.message(Command("help"))
@@ -26,6 +39,8 @@ async def on_help(message: Message):
     await message.answer(
         "Доступные команды:\n"
         "/start — регистрация\n"
+        "/menu — открыть меню\n"
+        "/checkdomain — проверить домен (кто ведёт кампанию)\n"
         "/help — помощь\n"
         "/ping — проверка связи (pong)\n"
         "/whoami — показать свой Telegram ID\n"

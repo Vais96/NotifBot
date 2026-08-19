@@ -18,6 +18,8 @@ A FastAPI + aiogram bot that receives Keitaro S2S postbacks and notifies the app
 - ADMINS: Comma-separated Telegram user IDs with admin rights
 - PORT: Port to listen on (Railway provides)
 - POSTBACK_TOKEN: Optional token to validate Keitaro postbacks via Authorization header
+- KEITARO_API_KEY / KEITARO_BASE_URL: Admin API for campaign/domain lookup (`/checkdomain`)
+- KEITARO_SYNC_INTERVAL_SECONDS: How often to pull new Keitaro domains (default `86400` = daily; `0` disables)
 - YTDLP_COOKIES_PATH: Optional path to cookies.txt in Netscape format for YouTube downloads (если отсутствует — бот работает без авторизации)
 - YTDLP_COOKIES: Альтернатива YTDLP_COOKIES_PATH — содержимое файла cookies.txt (многострочная строка)
 - YTDLP_COOKIES_B64: То же, что YTDLP_COOKIES, но в base64 (удобно хранить в переменной окружения)
@@ -152,6 +154,8 @@ Note: The `tickets` process in Procfile is for a persistent worker, not for sche
 
 Веб-процесс автоматически проверяет design-уведомления раз в час. Интервал задаётся через `DESIGN_NOTIFY_INTERVAL_SECONDS=3600`; значение `0` отключает встроенную проверку.
 
+Каждый день бот сам подтягивает кампании из Keitaro и **дописывает новые домены** в локальный кэш, чтобы `/checkdomain` находил свежие лендинги. Интервал: `KEITARO_SYNC_INTERVAL_SECONDS=86400` (0 — выключить). Админ может обновить вручную кнопкой «Обновить домены». Помощники проверяют домены командой `/checkdomain` или кнопкой в `/menu`.
+
 **Альтернативно — одна команда для внешнего крона:**
 ```bash
 python -m src.underdog --notify-design --apply
@@ -183,6 +187,8 @@ Send fields like: status, offer/offer_name, country/geo, source/traffic_source, 
 On startup the app sets webhook to: `${BASE_URL}${WEBHOOK_SECRET_PATH}`. Locally you usually skip webhook; on Railway it's automatically set if BASE_URL is correct.
 
 ## Commands (role-aware)
+- /menu — main menu (helpers see «Проверить домен» first)
+- /checkdomain — look up who runs a domain (all roles, including helpers)
 - /listusers — users with roles and teams (admin/head see all, lead sees own team, buyer sees self)
 - /listroutes — list routing rules (MVP: visible to all)
 - /addrule <user_id> offer=OFF|* country=RU|* source=FB|* priority=0 — add a rule (admin/head)

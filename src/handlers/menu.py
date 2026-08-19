@@ -17,11 +17,21 @@ from loguru import logger
 
 def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = False) -> InlineKeyboardMarkup:
     """Build main menu keyboard."""
+    checkdomain_btn = [InlineKeyboardButton(text="Проверить домен", callback_data="menu:checkdomain")]
+    if role == "helper" and not is_admin:
+        buttons = [
+            checkdomain_btn,
+            [InlineKeyboardButton(text="Отчеты", callback_data="menu:reports"), InlineKeyboardButton(text="KPI", callback_data="menu:kpi")],
+            [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
+            [InlineKeyboardButton(text="Загрузить CSV", callback_data="menu:uploadcsv")],
+            [InlineKeyboardButton(text="Скачать видео", callback_data="menu:yt_download")],
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
     buttons = [
         [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
         [InlineKeyboardButton(text="Отчеты", callback_data="menu:reports"), InlineKeyboardButton(text="KPI", callback_data="menu:kpi")],
     ]
-    buttons.append([InlineKeyboardButton(text="Проверить домен", callback_data="menu:checkdomain")])
+    buttons.append(checkdomain_btn)
     buttons.append([InlineKeyboardButton(text="Загрузить CSV", callback_data="menu:uploadcsv")])
     buttons.append([InlineKeyboardButton(text="Скачать видео", callback_data="menu:yt_download")])
     if is_admin:
@@ -39,21 +49,29 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-@dp.message(Command("menu"))
-async def on_menu(message: Message):
-    """Handle /menu command."""
-    is_admin = message.from_user.id in ADMIN_IDS
-    # get role to expose lead/head specific menu
-    users_list = await db.list_users()
-    me = next((u for u in users_list if u["telegram_id"] == message.from_user.id), None)
+async def user_menu_flags(user_id: int) -> tuple[bool, str | None, bool]:
+    """Return (is_admin, role, has_lead_access) for building the main menu."""
+    is_admin = user_id in ADMIN_IDS
+    me = await db.get_user(user_id)
     role = (me or {}).get("role")
     if is_admin:
         role = "admin"
     has_lead_access = is_admin
     if not has_lead_access:
-        lead_team_ids = await db.list_user_lead_teams(message.from_user.id)
+        lead_team_ids = await db.list_user_lead_teams(user_id)
         has_lead_access = bool(lead_team_ids) or (role in ("lead", "head"))
-    await message.answer("Меню:", reply_markup=main_menu(is_admin, role, has_lead_access=has_lead_access))
+    return is_admin, role, has_lead_access
+
+
+async def send_user_menu(chat_id: int, user_id: int, *, intro: str = "Меню:") -> None:
+    is_admin, role, has_lead_access = await user_menu_flags(user_id)
+    await bot.send_message(chat_id, intro, reply_markup=main_menu(is_admin, role, has_lead_access=has_lead_access))
+
+
+@dp.message(Command("menu"))
+async def on_menu(message: Message):
+    """Handle /menu command."""
+    await send_user_menu(message.chat.id, message.from_user.id)
 
 
 @dp.callback_query(F.data.startswith("menu:"))
@@ -96,7 +114,7 @@ async def on_menu_click(call: CallbackQuery):
             logger.exception("Failed to refresh Keitaro domains", error=exc)
             await status_msg.edit_text("Не удалось обновить домены. Проверь логи и настройки Keitaro API.")
         else:
-            await status_msg.edit_text(f"Готово. Обновлено {count} записей.")
+            await status_msg.edit_text(f"Готово. Добавлено/обновлено {count} кампаний с доменами.")
         return
     if key == "resetfbdata":
         if call.from_user.id not in ADMIN_IDS:
