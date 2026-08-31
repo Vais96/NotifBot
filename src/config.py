@@ -40,6 +40,18 @@ class Settings(BaseModel):
     underdog_email: str = Field(default="", validation_alias="UNDERDOG_EMAIL")
     underdog_password: str = Field(default="", validation_alias="UNDERDOG_PASSWORD")
     underdog_token_ttl: int = Field(default=3600, validation_alias="UNDERDOG_TOKEN_TTL")
+    # Отдельный Admin API — источник правды по сотрудникам, командам и помощникам.
+    new_admin_api_url: str = Field(default="", validation_alias="NEW_ADMIN_API_URL")
+    # Kept for the Admin API configuration; employee sync itself uses the machine key.
+    new_admin_email: str = Field(default="", validation_alias="NEW_ADMIN_EMAIL")
+    new_admin_password: str = Field(default="", validation_alias="NEW_ADMIN_PASSWORD")
+    new_admin_api_key: str = Field(default="", validation_alias="NEW_ADMIN_API_KEY")
+    new_admin_token_ttl: int = Field(default=3600, validation_alias="NEW_ADMIN_TOKEN_TTL")
+    # 43200 = два запуска в сутки. 0 выключает синхронизацию.
+    new_admin_sync_interval_seconds: int = Field(
+        default=43200,
+        validation_alias="NEW_ADMIN_SYNC_INTERVAL_SECONDS",
+    )
     # Чат(ы) для рассылки design-уведомлений (группа/канал). Все участники видят сообщение. Через запятую: -100123, -100456
     design_broadcast_chat_ids: List[int] = Field(default_factory=list, validation_alias="DESIGN_BROADCAST_CHAT_IDS")
     # Через сколько часов после назначения напомнить взять таск в работу (по умолчанию 48 = 2 дня)
@@ -130,6 +142,14 @@ class Settings(BaseModel):
             "UNDERDOG_EMAIL": os.getenv("UNDERDOG_EMAIL", ""),
             "UNDERDOG_PASSWORD": os.getenv("UNDERDOG_PASSWORD", ""),
             "UNDERDOG_TOKEN_TTL": int(os.getenv("UNDERDOG_TOKEN_TTL", "3600")),
+            "NEW_ADMIN_API_URL": os.getenv("NEW_ADMIN_API_URL", ""),
+            "NEW_ADMIN_EMAIL": os.getenv("NEW_ADMIN_EMAIL", ""),
+            "NEW_ADMIN_PASSWORD": os.getenv("NEW_ADMIN_PASSWORD", ""),
+            "NEW_ADMIN_API_KEY": os.getenv("NEW_ADMIN_API_KEY", ""),
+            "NEW_ADMIN_TOKEN_TTL": int(os.getenv("NEW_ADMIN_TOKEN_TTL", "3600")),
+            "NEW_ADMIN_SYNC_INTERVAL_SECONDS": int(
+                os.getenv("NEW_ADMIN_SYNC_INTERVAL_SECONDS", "43200")
+            ),
             "DESIGN_BROADCAST_CHAT_IDS": design_broadcast,
             "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": int(
                 os.getenv("DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS", "48")

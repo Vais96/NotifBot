@@ -865,6 +865,95 @@ async def list_teams() -> List[Dict[str, Any]]:
             await cur.execute("SELECT id, name, created_at FROM tg_teams ORDER BY id DESC")
             return await cur.fetchall()
 
+async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
+    """Persist one trusted employee-directory snapshot atomically.
+
+    A record without a Telegram ID is matched only to an existing local username;
+    this prevents creating unusable bot users from an ambiguous directory entry.
+    """
+    pool = await init_pool()
+    stats = {"received": len(employees), "matched": 0, "skipped": 0, "users_updated": 0,
+             "teams_created": 0, "helper_links_updated": 0}
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await conn.begin()
+            try:
+                await cur.execute("SELECT telegram_id, username FROM tg_users")
+                rows = await cur.fetchall() or []
+                username_to_id = {
+                    str(row["username"]).strip().lstrip("@").lower(): int(row["telegram_id"])
+                    for row in rows if row.get("username")
+                }
+                known_ids = {int(row["telegram_id"]) for row in rows}
+                await cur.execute("SELECT id, name FROM tg_teams")
+                team_rows = await cur.fetchall() or []
+                teams = {str(row["name"]).strip().lower(): int(row["id"]) for row in team_rows}
+
+                def resolve(person: Any) -> Optional[int]:
+                    uid = getattr(person, "telegram_id", None)
+                    if uid:
+                        return int(uid)
+                    username = getattr(person, "username", None)
+                    return username_to_id.get(str(username).lower()) if username else None
+
+                resolved: List[Tuple[Any, int]] = []
+                for person in employees:
+                    uid = resolve(person)
+                    if uid is None:
+                        stats["skipped"] += 1
+                        continue
+                    stats["matched"] += 1
+                    if uid not in known_ids:
+                        await cur.execute(
+                            "INSERT INTO tg_users(telegram_id, username, full_name) VALUES(%s, %s, %s)",
+                            (uid, getattr(person, "username", None), getattr(person, "full_name", None)),
+                        )
+                        known_ids.add(uid)
+                        username = getattr(person, "username", None)
+                        if username:
+                            username_to_id[str(username).lower()] = uid
+                    resolved.append((person, uid))
+
+                for person, uid in resolved:
+                    team_id = None
+                    team_name = getattr(person, "team_name", None)
+                    if team_name:
+                        key = str(team_name).strip().lower()
+                        team_id = teams.get(key)
+                        if team_id is None:
+                            await cur.execute("INSERT INTO tg_teams(name) VALUES(%s)", (team_name,))
+                            team_id = int(cur.lastrowid)
+                            teams[key] = team_id
+                            stats["teams_created"] += 1
+                    await cur.execute(
+                        "UPDATE tg_users SET username=COALESCE(NULLIF(%s, ''), username), "
+                        "full_name=COALESCE(NULLIF(%s, ''), full_name), "
+                        "role=COALESCE(%s, role), team_id=%s WHERE telegram_id=%s",
+                        (getattr(person, "username", None), getattr(person, "full_name", None),
+                         getattr(person, "role", None), team_id, uid),
+                    )
+                    stats["users_updated"] += 1
+
+                for person, helper_id in resolved:
+                    if getattr(person, "role", None) != "helper":
+                        continue
+                    buyer_id = getattr(person, "helper_for_telegram_id", None)
+                    if buyer_id is None:
+                        username = getattr(person, "helper_for_username", None)
+                        buyer_id = username_to_id.get(str(username).lower()) if username else None
+                    if buyer_id and int(buyer_id) in known_ids:
+                        await cur.execute(
+                            "INSERT INTO tg_helper_buyer(helper_id, buyer_id) VALUES(%s, %s) "
+                            "ON DUPLICATE KEY UPDATE buyer_id=VALUES(buyer_id)",
+                            (helper_id, int(buyer_id)),
+                        )
+                        stats["helper_links_updated"] += 1
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+    return stats
+
 async def set_team_lead_override(team_id: int, user_id: int) -> None:
     """Assign user as lead for team without changing primary role (mentor lead scenario)."""
     pool = await init_pool()

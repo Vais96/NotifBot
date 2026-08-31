@@ -12,7 +12,7 @@ from .dispatcher import dp, bot, notify_buyer
 from .orders_bot import orders_dp, orders_bot
 from .design_bot import design_dp, design_bot
 from . import handlers  # noqa: F401 ensure handlers are registered
-from . import db, underdog, keitaro_sync
+from . import db, underdog, keitaro_sync, new_admin_sync
 from .services.keitaro_postbacks import (
     build_notification_text,
     has_meaningful_fields,
@@ -38,6 +38,7 @@ if not DESIGN_WEBHOOK_PATH.startswith("/"):
 app = FastAPI(title="Keitaro Telegram Notifier")
 _design_notify_task: asyncio.Task | None = None
 _keitaro_sync_task: asyncio.Task | None = None
+_new_admin_sync_task: asyncio.Task | None = None
 
 
 async def _run_design_notifications() -> None:
@@ -94,6 +95,18 @@ async def _keitaro_domain_sync_loop(interval_seconds: int) -> None:
             raise
         except Exception as exc:
             logger.exception("Scheduled Keitaro domain sync failed", error=str(exc))
+        await asyncio.sleep(interval_seconds)
+
+
+async def _new_admin_employee_sync_loop(interval_seconds: int) -> None:
+    """Keep teams, buyers and helper assignments aligned with the Admin directory."""
+    while True:
+        try:
+            await new_admin_sync.run_sync()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Scheduled New Admin employee sync failed", error=str(exc))
         await asyncio.sleep(interval_seconds)
 
 _DEPOSIT_FOOTERS_BY_USERNAME: dict[str, str] = {
@@ -470,7 +483,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
 
 @app.on_event("startup")
 async def on_startup():
-    global _design_notify_task, _keitaro_sync_task
+    global _design_notify_task, _keitaro_sync_task, _new_admin_sync_task
     try:
         await db.init_pool()
     except Exception as e:
@@ -558,16 +571,25 @@ async def on_startup():
         )
         logger.info("Keitaro domain sync enabled", interval_seconds=max(60, keitaro_interval))
 
+    new_admin_interval = max(0, int(settings.new_admin_sync_interval_seconds))
+    if settings.new_admin_api_url and settings.new_admin_api_key and new_admin_interval > 0:
+        _new_admin_sync_task = asyncio.create_task(
+            _new_admin_employee_sync_loop(max(60, new_admin_interval)),
+            name="new-admin-employee-sync-loop",
+        )
+        logger.info("New Admin employee sync enabled", interval_seconds=max(60, new_admin_interval))
+
 @app.on_event("shutdown")
 async def on_shutdown():
-    global _design_notify_task, _keitaro_sync_task
-    for task in (_design_notify_task, _keitaro_sync_task):
+    global _design_notify_task, _keitaro_sync_task, _new_admin_sync_task
+    for task in (_design_notify_task, _keitaro_sync_task, _new_admin_sync_task):
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
     _design_notify_task = None
     _keitaro_sync_task = None
+    _new_admin_sync_task = None
     await db.close_pool()
     # Close aiogram bot aiohttp sessions to avoid "Unclosed client session" warnings
     for bot_instance in (bot, orders_bot, design_bot):
