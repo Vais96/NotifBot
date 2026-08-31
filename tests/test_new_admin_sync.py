@@ -19,6 +19,15 @@ class NewAdminEmployeeNormalizationTests(unittest.TestCase):
         self.assertEqual(employees[1].role, "helper")
         self.assertEqual(employees[1].helper_for_telegram_id, 123)
 
+    def test_manager_is_a_lead_and_disabled_employee_is_inactive(self) -> None:
+        employee = normalize_employees({"data": [{
+            "id": "admin-id", "telegram": "lead", "position": "Buyer",
+            "status": "DISABLED", "team": "Alpha",
+            "teamMemberships": [{"isManager": True}],
+        }]})[0]
+        self.assertEqual(employee.role, "lead")
+        self.assertFalse(employee.is_active)
+
     def test_rejects_unknown_response_shape(self) -> None:
         with self.assertRaises(NewAdminSyncError):
             normalize_employees({"data": {"unexpected": True}})

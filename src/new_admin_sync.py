@@ -68,8 +68,25 @@ def _person_ref(value: Any) -> tuple[int | None, str | None]:
     return _as_int(value), _handle(value) if _as_int(value) is None else None
 
 
+def _role(raw_position: Any, raw_roles: Any, *, is_team_manager: bool) -> str | None:
+    """Map the Admin directory job title to the bot permission role."""
+    position = str(raw_position or "").strip().lower()
+    if "assistant" in position or "помощ" in position:
+        return "helper"
+    if is_team_manager:
+        return "lead"
+    candidates = [position]
+    if isinstance(raw_roles, list):
+        candidates.extend(str(item).strip().lower() for item in raw_roles)
+    for candidate in candidates:
+        if candidate in _ROLE_MAP:
+            return _ROLE_MAP[candidate]
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class DirectoryEmployee:
+    external_id: str | None
     telegram_id: int | None
     username: str | None
     full_name: str | None
@@ -77,6 +94,8 @@ class DirectoryEmployee:
     team_name: str | None
     helper_for_telegram_id: int | None
     helper_for_username: str | None
+    helper_for_external_id: str | None
+    is_active: bool
 
 
 def normalize_employees(payload: Any) -> list[DirectoryEmployee]:
@@ -92,8 +111,14 @@ def normalize_employees(payload: Any) -> list[DirectoryEmployee]:
     for raw in payload:
         if not isinstance(raw, Mapping):
             continue
-        raw_role = _first(raw, "role", "position", "jobTitle", "job_title")
-        role = _ROLE_MAP.get(str(raw_role).strip().lower()) if raw_role is not None else None
+        memberships = raw.get("teamMemberships")
+        is_team_manager = isinstance(memberships, list) and any(
+            isinstance(item, Mapping) and bool(item.get("isManager")) for item in memberships
+        )
+        role = _role(
+            _first(raw, "position", "role", "jobTitle", "job_title"), raw.get("roles"),
+            is_team_manager=is_team_manager,
+        )
         team = _first(raw, "team", "department", "teamName", "team_name")
         if isinstance(team, list):
             team = team[0] if team else None
@@ -102,6 +127,7 @@ def normalize_employees(payload: Any) -> list[DirectoryEmployee]:
         )
         helper_id, helper_username = _person_ref(helper_for)
         employees.append(DirectoryEmployee(
+            external_id=str(raw["id"]).strip() if raw.get("id") else None,
             telegram_id=_as_int(_first(raw, "telegramId", "telegram_id", "telegramID")),
             username=_handle(_first(raw, "username", "telegram", "telegramUsername", "telegram_username")),
             full_name=_name(_first(raw, "fullName", "full_name", "name", "displayName")),
@@ -109,6 +135,8 @@ def normalize_employees(payload: Any) -> list[DirectoryEmployee]:
             team_name=_name(team),
             helper_for_telegram_id=helper_id,
             helper_for_username=helper_username,
+            helper_for_external_id=str(raw["managerId"]).strip() if raw.get("managerId") else None,
+            is_active=str(raw.get("status") or "ACTIVE").upper() == "ACTIVE",
         ))
     return employees
 

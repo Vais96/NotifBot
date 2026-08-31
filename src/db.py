@@ -873,7 +873,7 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
     """
     pool = await init_pool()
     stats = {"received": len(employees), "matched": 0, "skipped": 0, "users_updated": 0,
-             "teams_created": 0, "helper_links_updated": 0}
+             "teams_created": 0, "teams_deleted": 0, "helper_links_updated": 0}
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await conn.begin()
@@ -889,6 +889,31 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                 team_rows = await cur.fetchall() or []
                 teams = {str(row["name"]).strip().lower(): int(row["id"]) for row in team_rows}
 
+                # The directory is authoritative for teams. Disabled employees do not keep a
+                # historic team alive in the bot's active team list.
+                authoritative_team_names = {
+                    str(getattr(person, "team_name", "")).strip().lower()
+                    for person in employees
+                    if getattr(person, "is_active", True) and getattr(person, "team_name", None)
+                    and str(getattr(person, "team_name")).strip() != "-"
+                }
+                stale_team_ids = [
+                    int(row["id"]) for row in team_rows
+                    if str(row["name"]).strip().lower() not in authoritative_team_names
+                ]
+                if stale_team_ids:
+                    placeholders = ",".join(["%s"] * len(stale_team_ids))
+                    await cur.execute(
+                        f"UPDATE tg_users SET team_id=NULL WHERE team_id IN ({placeholders})",
+                        tuple(stale_team_ids),
+                    )
+                    await cur.execute(
+                        f"DELETE FROM tg_teams WHERE id IN ({placeholders})",
+                        tuple(stale_team_ids),
+                    )
+                    stats["teams_deleted"] = len(stale_team_ids)
+                    teams = {key: value for key, value in teams.items() if value not in stale_team_ids}
+
                 def resolve(person: Any) -> Optional[int]:
                     uid = getattr(person, "telegram_id", None)
                     if uid:
@@ -897,6 +922,7 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                     return username_to_id.get(str(username).lower()) if username else None
 
                 resolved: List[Tuple[Any, int]] = []
+                external_id_to_telegram_id: Dict[str, int] = {}
                 for person in employees:
                     uid = resolve(person)
                     if uid is None:
@@ -913,11 +939,14 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                         if username:
                             username_to_id[str(username).lower()] = uid
                     resolved.append((person, uid))
+                    external_id = getattr(person, "external_id", None)
+                    if external_id:
+                        external_id_to_telegram_id[str(external_id)] = uid
 
                 for person, uid in resolved:
                     team_id = None
                     team_name = getattr(person, "team_name", None)
-                    if team_name:
+                    if team_name and getattr(person, "is_active", True) and str(team_name).strip() != "-":
                         key = str(team_name).strip().lower()
                         team_id = teams.get(key)
                         if team_id is None:
@@ -932,12 +961,19 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                         (getattr(person, "username", None), getattr(person, "full_name", None),
                          getattr(person, "role", None), team_id, uid),
                     )
+                    await cur.execute(
+                        "UPDATE tg_users SET is_active=%s WHERE telegram_id=%s",
+                        (1 if getattr(person, "is_active", True) else 0, uid),
+                    )
                     stats["users_updated"] += 1
 
                 for person, helper_id in resolved:
                     if getattr(person, "role", None) != "helper":
                         continue
                     buyer_id = getattr(person, "helper_for_telegram_id", None)
+                    if buyer_id is None:
+                        external_id = getattr(person, "helper_for_external_id", None)
+                        buyer_id = external_id_to_telegram_id.get(str(external_id)) if external_id else None
                     if buyer_id is None:
                         username = getattr(person, "helper_for_username", None)
                         buyer_id = username_to_id.get(str(username).lower()) if username else None
