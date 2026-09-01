@@ -47,9 +47,9 @@ class Settings(BaseModel):
     new_admin_password: str = Field(default="", validation_alias="NEW_ADMIN_PASSWORD")
     new_admin_api_key: str = Field(default="", validation_alias="NEW_ADMIN_API_KEY")
     new_admin_token_ttl: int = Field(default=3600, validation_alias="NEW_ADMIN_TOKEN_TTL")
-    # 43200 = два запуска в сутки. 0 выключает синхронизацию.
+    # 3600 = раз в час. 0 выключает синхронизацию.
     new_admin_sync_interval_seconds: int = Field(
-        default=43200,
+        default=3600,
         validation_alias="NEW_ADMIN_SYNC_INTERVAL_SECONDS",
     )
     # Чат(ы) для рассылки design-уведомлений (группа/канал). Все участники видят сообщение. Через запятую: -100123, -100456
@@ -148,7 +148,7 @@ class Settings(BaseModel):
             "NEW_ADMIN_API_KEY": os.getenv("NEW_ADMIN_API_KEY", ""),
             "NEW_ADMIN_TOKEN_TTL": int(os.getenv("NEW_ADMIN_TOKEN_TTL", "3600")),
             "NEW_ADMIN_SYNC_INTERVAL_SECONDS": int(
-                os.getenv("NEW_ADMIN_SYNC_INTERVAL_SECONDS", "43200")
+                os.getenv("NEW_ADMIN_SYNC_INTERVAL_SECONDS", "3600")
             ),
             "DESIGN_BROADCAST_CHAT_IDS": design_broadcast,
             "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": int(
