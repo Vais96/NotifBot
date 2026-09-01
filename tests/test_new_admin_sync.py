@@ -28,6 +28,26 @@ class NewAdminEmployeeNormalizationTests(unittest.TestCase):
         self.assertEqual(employee.role, "lead")
         self.assertFalse(employee.is_active)
 
+    def test_observer_memberships_are_collected_separately_from_primary_team(self) -> None:
+        employee = normalize_employees({"data": [{
+            "telegram": "vladyslav_underdog",
+            "fullName": "Владислав Сергиенко",
+            "position": "Buyer",
+            "status": "ACTIVE",
+            "team": "Команда Владислава Сергиенко",
+            "teamMemberships": [
+                {"teamName": "Команда Владислава Сергиенко", "isManager": True, "isObserver": False},
+                {"teamName": "Команда Олега Синявина", "isManager": False, "isObserver": True},
+                {"teamName": "Команда Дмитрия Шишманов", "isManager": False, "isObserver": True},
+            ],
+        }]})[0]
+        self.assertEqual(employee.role, "lead")
+        self.assertEqual(employee.team_name, "Команда Владислава Сергиенко")
+        self.assertEqual(
+            employee.observer_team_names,
+            ("Команда Олега Синявина", "Команда Дмитрия Шишманов"),
+        )
+
     def test_rejects_unknown_response_shape(self) -> None:
         with self.assertRaises(NewAdminSyncError):
             normalize_employees({"data": {"unexpected": True}})

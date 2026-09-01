@@ -873,7 +873,8 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
     """
     pool = await init_pool()
     stats = {"received": len(employees), "matched": 0, "skipped": 0, "users_updated": 0,
-             "teams_created": 0, "teams_deleted": 0, "helper_links_updated": 0}
+             "teams_created": 0, "teams_deleted": 0, "helper_links_updated": 0,
+             "observer_links_updated": 0}
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await conn.begin()
@@ -891,12 +892,16 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
 
                 # The directory is authoritative for teams. Disabled employees do not keep a
                 # historic team alive in the bot's active team list.
-                authoritative_team_names = {
-                    str(getattr(person, "team_name", "")).strip().lower()
-                    for person in employees
-                    if getattr(person, "is_active", True) and getattr(person, "team_name", None)
-                    and str(getattr(person, "team_name")).strip() != "-"
-                }
+                authoritative_team_names: set[str] = set()
+                for person in employees:
+                    if not getattr(person, "is_active", True):
+                        continue
+                    for raw_name in (getattr(person, "team_name", None), *tuple(
+                        getattr(person, "observer_team_names", ()) or ()
+                    )):
+                        if not raw_name or str(raw_name).strip() == "-":
+                            continue
+                        authoritative_team_names.add(str(raw_name).strip().lower())
                 stale_team_ids = [
                     int(row["id"]) for row in team_rows
                     if str(row["name"]).strip().lower() not in authoritative_team_names
@@ -984,6 +989,61 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                             (helper_id, int(buyer_id)),
                         )
                         stats["helper_links_updated"] += 1
+
+                # Admin isObserver memberships become extra leads so those users
+                # receive team deposits and see those teams in reports.
+                observer_user_ids: set[int] = set()
+                desired_extra: dict[int, int] = {}
+                for person, uid in resolved:
+                    if not getattr(person, "is_active", True):
+                        continue
+                    for team_name in getattr(person, "observer_team_names", ()) or ():
+                        key = str(team_name).strip().lower()
+                        if not key or key == "-":
+                            continue
+                        team_id = teams.get(key)
+                        if team_id is None:
+                            await cur.execute("INSERT INTO tg_teams(name) VALUES(%s)", (team_name,))
+                            team_id = int(cur.lastrowid)
+                            teams[key] = team_id
+                            stats["teams_created"] += 1
+                        existing = desired_extra.get(team_id)
+                        if existing is not None and existing != uid:
+                            logger.warning(
+                                "Multiple observers for team; keeping first extra lead",
+                                team_id=team_id,
+                                kept_user_id=existing,
+                                skipped_user_id=uid,
+                            )
+                            continue
+                        desired_extra[team_id] = uid
+                        observer_user_ids.add(uid)
+
+                if observer_user_ids:
+                    placeholders = ",".join(["%s"] * len(observer_user_ids))
+                    await cur.execute(
+                        f"SELECT team_id, user_id FROM tg_team_leads_extra WHERE user_id IN ({placeholders})",
+                        tuple(observer_user_ids),
+                    )
+                    for row in await cur.fetchall() or []:
+                        team_id = int(row["team_id"])
+                        user_id = int(row["user_id"])
+                        if desired_extra.get(team_id) != user_id:
+                            await cur.execute(
+                                "DELETE FROM tg_team_leads_extra WHERE team_id=%s AND user_id=%s",
+                                (team_id, user_id),
+                            )
+
+                for team_id, user_id in desired_extra.items():
+                    await cur.execute(
+                        """
+                        INSERT INTO tg_team_leads_extra(team_id, user_id)
+                        VALUES(%s, %s)
+                        ON DUPLICATE KEY UPDATE user_id=VALUES(user_id), created_at=CURRENT_TIMESTAMP
+                        """,
+                        (team_id, user_id),
+                    )
+                    stats["observer_links_updated"] += 1
                 await conn.commit()
             except Exception:
                 await conn.rollback()

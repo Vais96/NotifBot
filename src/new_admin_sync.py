@@ -84,6 +84,26 @@ def _role(raw_position: Any, raw_roles: Any, *, is_team_manager: bool) -> str | 
     return None
 
 
+def _observer_team_names(memberships: Any) -> tuple[str, ...]:
+    """Team names the employee should see as an Admin-directory observer."""
+    if not isinstance(memberships, list):
+        return ()
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in memberships:
+        if not isinstance(item, Mapping) or not item.get("isObserver"):
+            continue
+        name = _name(_first(item, "teamName", "team_name", "name", "team"))
+        if not name or name == "-":
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    return tuple(names)
+
+
 @dataclass(frozen=True, slots=True)
 class DirectoryEmployee:
     external_id: str | None
@@ -96,6 +116,7 @@ class DirectoryEmployee:
     helper_for_username: str | None
     helper_for_external_id: str | None
     is_active: bool
+    observer_team_names: tuple[str, ...] = ()
 
 
 def normalize_employees(payload: Any) -> list[DirectoryEmployee]:
@@ -137,6 +158,7 @@ def normalize_employees(payload: Any) -> list[DirectoryEmployee]:
             helper_for_username=helper_username,
             helper_for_external_id=str(raw["managerId"]).strip() if raw.get("managerId") else None,
             is_active=str(raw.get("status") or "ACTIVE").upper() == "ACTIVE",
+            observer_team_names=_observer_team_names(memberships),
         ))
     return employees
 
