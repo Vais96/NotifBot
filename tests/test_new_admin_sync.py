@@ -48,6 +48,14 @@ class NewAdminEmployeeNormalizationTests(unittest.TestCase):
             ("Команда Олега Синявина", "Команда Дмитрия Шишманов"),
         )
 
+    def test_bizdev_position_maps_to_head(self) -> None:
+        employee = normalize_employees({"data": [{
+            "telegram": "maria_underdog",
+            "position": "Bizdev",
+            "status": "ACTIVE",
+        }]})[0]
+        self.assertEqual(employee.role, "head")
+
     def test_rejects_unknown_response_shape(self) -> None:
         with self.assertRaises(NewAdminSyncError):
             normalize_employees({"data": {"unexpected": True}})

@@ -17,6 +17,8 @@ _ROLE_MAP = {
     "buyer": "buyer", "баер": "buyer", "байер": "buyer",
     "lead": "lead", "team lead": "lead", "тимлид": "lead", "лид": "lead",
     "head": "head", "руководитель": "head",
+    "bizdev": "head", "biz dev": "head", "business development": "head",
+    "биздевом": "head", "биздева": "head", "биздэв": "head", "бизнес дев": "head",
     "admin": "admin", "administrator": "admin",
     "mentor": "mentor", "ментор": "mentor",
     "helper": "helper", "assistant": "helper", "помощник": "helper",
