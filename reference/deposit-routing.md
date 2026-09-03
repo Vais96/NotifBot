@@ -112,6 +112,12 @@ Detection script: `scratchpad/eponym.py` pattern — for each ACTIVE user, compa
 stems against every `teamMemberships[].teamName` and flag matches with `isManager: false`.
 
 Other hazards:
+- **New buyer without a `tg_aliases` row.** The Admin sync creates the `tg_users` row, role and
+  team, but never an alias — so a fresh buyer's `Name_...` campaigns fall through Step 1, hit no
+  `tg_routes`, and land on the admin fallback unrouted (`routed_user_id IS NULL`). Symptom: buyer
+  says "пуши не приходят" while `tg_events` shows their campaign prefix with `routed_user_id=NULL`.
+  Fix: `db.set_alias("<campaignprefix lowercased>", buyer_id=<tg_id>)`. Seen 2026-09-03 with
+  Марк Захаржевский `@marko_underdog` (alias `markozakharzhevskiy`, 2 deposits lost).
 - `tg_users.username='maria_underdog'` exists on two rows (8468335562 Maryia Charniauskaya,
   8688104187 Мария Чернявская). Username→telegram_id matching in the sync is ambiguous here.
 - Of the 89 ACTIVE directory records, 45 never resolve to a Telegram ID (no `telegramId`,
