@@ -69,6 +69,16 @@ class Settings(BaseModel):
         default=86400,
         validation_alias="KEITARO_SYNC_INTERVAL_SECONDS",
     )
+    # Ежедневная сводка дохода по командам для лидов/менторов/хэдов: время «ЧЧ:ММ» и таймзона.
+    # Пустое время отключает рассылку. День считается по границам этой таймзоны.
+    daily_revenue_report_time: str = Field(
+        default="23:55",
+        validation_alias="DAILY_REVENUE_REPORT_TIME",
+    )
+    daily_revenue_report_tz: str = Field(
+        default="UTC",
+        validation_alias="DAILY_REVENUE_REPORT_TZ",
+    )
 
     @classmethod
     def load(cls) -> "Settings":
@@ -160,6 +170,8 @@ class Settings(BaseModel):
             "KEITARO_SYNC_INTERVAL_SECONDS": int(
                 os.getenv("KEITARO_SYNC_INTERVAL_SECONDS", "86400")
             ),
+            "DAILY_REVENUE_REPORT_TIME": os.getenv("DAILY_REVENUE_REPORT_TIME", "23:55").strip(),
+            "DAILY_REVENUE_REPORT_TZ": os.getenv("DAILY_REVENUE_REPORT_TZ", "UTC").strip() or "UTC",
         }
         return cls.model_validate(raw)
 

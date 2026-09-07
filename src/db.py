@@ -1264,20 +1264,20 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
                 )
             )
 
-async def count_today_user_sales(user_id: int) -> int:
-    """Return today's sales routed to the user or assigned to one of their aliases."""
-    from datetime import datetime, timezone, timedelta
-    pool = await init_pool()
+SALE_LIKE_STATUSES: Tuple[str, ...] = (
+    "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
+)
+
+
+def _today_utc_window() -> Tuple[datetime, datetime]:
     now_utc = datetime.now(timezone.utc)
     start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
-    sale_like = (
-        "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
-    )
-    placeholders = ",".join(["%s"] * len(sale_like))
-    query = f"""
-        SELECT COUNT(*)
-        FROM tg_events
+    return start, start + timedelta(days=1)
+
+
+# Sale-like events that belong to a user: routed to them directly, or sent under one of
+# their aliases (covers rows logged before alias routing became authoritative).
+_USER_SALES_TODAY_WHERE = """
         WHERE (
                 routed_user_id=%s
                 OR EXISTS (
@@ -1294,198 +1294,83 @@ async def count_today_user_sales(user_id: int) -> int:
               )
           AND created_at >= %s AND created_at < %s
           AND LOWER(TRIM(COALESCE(status, ''))) IN ({placeholders})
-    """
+"""
+
+
+async def _user_sales_today_scalar(select_expr: str, user_id: int) -> Any:
+    pool = await init_pool()
+    start, end = _today_utc_window()
+    placeholders = ",".join(["%s"] * len(SALE_LIKE_STATUSES))
+    query = f"SELECT {select_expr} FROM tg_events" + _USER_SALES_TODAY_WHERE.format(placeholders=placeholders)
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-    # cached Keitaro campaigns for domain lookups
-            await cur.execute(query, (user_id, user_id, start, end, *sale_like))
+            await cur.execute(query, (user_id, user_id, start, end, *SALE_LIKE_STATUSES))
             row = await cur.fetchone()
-            return int(row[0]) if row else 0
+            return row[0] if row else None
+
+
+async def count_today_user_sales(user_id: int) -> int:
+    """Return today's sales routed to the user or assigned to one of their aliases."""
+    value = await _user_sales_today_scalar("COUNT(*)", user_id)
+    return int(value or 0)
+
 
 async def sum_today_user_profit(user_id: int) -> float:
-    """Sum payout for sale-like events for the user since UTC midnight (inclusive)."""
-    from datetime import datetime, timezone, timedelta
+    """Sum payout of today's sales (UTC day) routed to the user or sent under their aliases."""
+    value = await _user_sales_today_scalar("COALESCE(SUM(payout), 0)", user_id)
+    return float(value or 0)
+
+
+async def sales_by_user_between(start: datetime, end: datetime) -> List[Dict[str, Any]]:
+    """Per-buyer deposit count and payout sum for sale-like events in [start, end) (UTC).
+
+    Unrouted events (routed_user_id IS NULL) are returned under user_id=None so callers
+    can decide whether to show them.
+    """
     pool = await init_pool()
-    now_utc = datetime.now(timezone.utc)
-    start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
-    sale_like = (
-        "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
-    )
-    # Facebook CSV uploads metadata
-    """
-    CREATE TABLE IF NOT EXISTS fb_csv_uploads (
-        id BIGINT PRIMARY KEY AUTO_INCREMENT,
-        uploaded_by BIGINT NOT NULL,
-        buyer_id BIGINT NULL,
-        original_filename VARCHAR(255) NOT NULL,
-        period_start DATE NULL,
-        period_end DATE NULL,
-        row_count INT NOT NULL DEFAULT 0,
-        has_totals TINYINT(1) NOT NULL DEFAULT 0,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT fk_fb_csv_upload_user FOREIGN KEY (uploaded_by) REFERENCES tg_users (telegram_id) ON DELETE SET NULL,
-        CONSTRAINT fk_fb_csv_upload_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """,
-    # Raw rows from CSV uploads
-    """
-    CREATE TABLE IF NOT EXISTS fb_csv_rows (
-        id BIGINT PRIMARY KEY AUTO_INCREMENT,
-        upload_id BIGINT NOT NULL,
-        account_name VARCHAR(255) NOT NULL,
-        campaign_name VARCHAR(255) NOT NULL,
-        adset_name VARCHAR(255) NULL,
-        ad_name VARCHAR(255) NULL,
-        day_date DATE NULL,
-        currency VARCHAR(16) NULL,
-        spend DECIMAL(18,6) NULL,
-        impressions BIGINT NULL,
-        clicks BIGINT NULL,
-        leads INT NULL,
-        registrations INT NULL,
-        cpc DECIMAL(18,6) NULL,
-        ctr DECIMAL(18,6) NULL,
-        is_total TINYINT(1) NOT NULL DEFAULT 0,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_fb_rows_upload (upload_id),
-        INDEX idx_fb_rows_campaign_day (campaign_name, day_date),
-        INDEX idx_fb_rows_account_day (account_name, day_date),
-        CONSTRAINT fk_fb_rows_upload FOREIGN KEY (upload_id) REFERENCES fb_csv_uploads (id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """,
-    # Aggregated daily metrics per campaign (after enrichment)
-    """
-    CREATE TABLE IF NOT EXISTS fb_campaign_daily (
-        campaign_name VARCHAR(255) NOT NULL,
-        day_date DATE NOT NULL,
-        account_name VARCHAR(255) NULL,
-        buyer_id BIGINT NULL,
-        geo VARCHAR(16) NULL,
-        spend DECIMAL(18,6) NULL,
-        impressions BIGINT NULL,
-        clicks BIGINT NULL,
-        registrations INT NULL,
-        leads INT NULL,
-        ftd INT NULL,
-        revenue DECIMAL(18,6) NULL,
-        ctr DECIMAL(18,6) NULL,
-        cpc DECIMAL(18,6) NULL,
-        roi DECIMAL(18,6) NULL,
-        ftd_rate DECIMAL(18,6) NULL,
-        status_id BIGINT NULL,
-        flag_id BIGINT NULL,
-        upload_id BIGINT NULL,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (campaign_name, day_date),
-        INDEX idx_fb_daily_buyer_day (buyer_id, day_date),
-        INDEX idx_fb_daily_account_day (account_name, day_date),
-        CONSTRAINT fk_fb_daily_upload FOREIGN KEY (upload_id) REFERENCES fb_csv_uploads (id) ON DELETE SET NULL,
-        CONSTRAINT fk_fb_daily_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """,
-    # Totals per campaign/account for quick lookups
-    """
-    CREATE TABLE IF NOT EXISTS fb_campaign_totals (
-        campaign_name VARCHAR(255) PRIMARY KEY,
-        account_name VARCHAR(255) NULL,
-        buyer_id BIGINT NULL,
-        geo VARCHAR(16) NULL,
-        spend DECIMAL(18,6) NULL,
-        impressions BIGINT NULL,
-        clicks BIGINT NULL,
-        registrations INT NULL,
-        leads INT NULL,
-        ftd INT NULL,
-        revenue DECIMAL(18,6) NULL,
-        ctr DECIMAL(18,6) NULL,
-        cpc DECIMAL(18,6) NULL,
-        roi DECIMAL(18,6) NULL,
-        ftd_rate DECIMAL(18,6) NULL,
-        status_id BIGINT NULL,
-        flag_id BIGINT NULL,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        CONSTRAINT fk_fb_totals_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """,
-    # Accounts ownership history
-    """
-    CREATE TABLE IF NOT EXISTS fb_accounts (
-        account_name VARCHAR(255) PRIMARY KEY,
-        buyer_id BIGINT NULL,
-        owner_since DATE NULL,
-        owner_until DATE NULL,
-        is_active TINYINT(1) NOT NULL DEFAULT 1,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        CONSTRAINT fk_fb_accounts_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """,
-    # Status dictionary
-    """
-    CREATE TABLE IF NOT EXISTS fb_statuses (
-        id BIGINT PRIMARY KEY AUTO_INCREMENT,
-        code VARCHAR(32) NOT NULL UNIQUE,
-        title VARCHAR(128) NOT NULL,
-        description TEXT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """,
-    # Flags dictionary
-    """
-    CREATE TABLE IF NOT EXISTS fb_flags (
-        id BIGINT PRIMARY KEY AUTO_INCREMENT,
-        code VARCHAR(32) NOT NULL UNIQUE,
-        title VARCHAR(128) NOT NULL,
-        severity INT NOT NULL DEFAULT 0,
-        description TEXT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """,
-    # Current state per campaign (status, comments)
-    """
-    CREATE TABLE IF NOT EXISTS fb_campaign_state (
-        campaign_name VARCHAR(255) PRIMARY KEY,
-        status_id BIGINT NULL,
-        flag_id BIGINT NULL,
-        buyer_comment TEXT NULL,
-        lead_comment TEXT NULL,
-        updated_by BIGINT NULL,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        CONSTRAINT fk_fb_state_status FOREIGN KEY (status_id) REFERENCES fb_statuses (id) ON DELETE SET NULL,
-        CONSTRAINT fk_fb_state_flag FOREIGN KEY (flag_id) REFERENCES fb_flags (id) ON DELETE SET NULL,
-        CONSTRAINT fk_fb_state_user FOREIGN KEY (updated_by) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """,
-    # History of changes for audit/notifications
-    """
-    CREATE TABLE IF NOT EXISTS fb_campaign_history (
-        id BIGINT PRIMARY KEY AUTO_INCREMENT,
-        campaign_name VARCHAR(255) NOT NULL,
-        changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        changed_by BIGINT NULL,
-        old_status_id BIGINT NULL,
-        new_status_id BIGINT NULL,
-        old_flag_id BIGINT NULL,
-        new_flag_id BIGINT NULL,
-        note TEXT NULL,
-        CONSTRAINT fk_fb_hist_status_old FOREIGN KEY (old_status_id) REFERENCES fb_statuses (id) ON DELETE SET NULL,
-        CONSTRAINT fk_fb_hist_status_new FOREIGN KEY (new_status_id) REFERENCES fb_statuses (id) ON DELETE SET NULL,
-        CONSTRAINT fk_fb_hist_flag_old FOREIGN KEY (old_flag_id) REFERENCES fb_flags (id) ON DELETE SET NULL,
-        CONSTRAINT fk_fb_hist_flag_new FOREIGN KEY (new_flag_id) REFERENCES fb_flags (id) ON DELETE SET NULL,
-        CONSTRAINT fk_fb_hist_user FOREIGN KEY (changed_by) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """,
-    placeholders = ",".join(["%s"] * len(sale_like))
+    placeholders = ",".join(["%s"] * len(SALE_LIKE_STATUSES))
     query = f"""
-        SELECT COALESCE(SUM(payout), 0)
+        SELECT routed_user_id, COUNT(*), COALESCE(SUM(payout), 0)
         FROM tg_events
-        WHERE routed_user_id=%s
-          AND created_at >= %s AND created_at < %s
+        WHERE created_at >= %s AND created_at < %s
           AND LOWER(TRIM(COALESCE(status, ''))) IN ({placeholders})
+        GROUP BY routed_user_id
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(query, (user_id, start, end, *sale_like))
-            row = await cur.fetchone()
-            return float(row[0] or 0)
+            await cur.execute(query, (start, end, *SALE_LIKE_STATUSES))
+            rows = await cur.fetchall()
+    return [
+        {
+            "user_id": int(r[0]) if r[0] is not None else None,
+            "count": int(r[1] or 0),
+            "revenue": float(r[2] or 0),
+        }
+        for r in rows
+    ]
+
+
+async def list_extra_lead_teams(user_id: int) -> List[int]:
+    """Teams the user receives deposits for via tg_team_leads_extra (Admin observers)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT team_id FROM tg_team_leads_extra WHERE user_id=%s", (user_id,))
+            rows = await cur.fetchall()
+            return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+async def list_alias_lead_buyers(lead_id: int) -> List[int]:
+    """Buyers whose alias names this user as lead (tg_aliases.lead_id)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT DISTINCT buyer_id FROM tg_aliases WHERE lead_id=%s AND buyer_id IS NOT NULL",
+                (lead_id,),
+            )
+            rows = await cur.fetchall()
+            return [int(r[0]) for r in rows if r and r[0] is not None]
 
 async def get_kpi(user_id: int) -> Dict[str, Any]:
     pool = await init_pool()

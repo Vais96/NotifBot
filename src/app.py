@@ -12,7 +12,7 @@ from .dispatcher import dp, bot, notify_buyer
 from .orders_bot import orders_dp, orders_bot
 from .design_bot import design_dp, design_bot
 from . import handlers  # noqa: F401 ensure handlers are registered
-from . import db, underdog, keitaro_sync, new_admin_sync
+from . import db, underdog, keitaro_sync, new_admin_sync, daily_revenue_report
 from .services.keitaro_postbacks import (
     build_notification_text,
     has_meaningful_fields,
@@ -39,6 +39,7 @@ app = FastAPI(title="Keitaro Telegram Notifier")
 _design_notify_task: asyncio.Task | None = None
 _keitaro_sync_task: asyncio.Task | None = None
 _new_admin_sync_task: asyncio.Task | None = None
+_daily_revenue_report_task: asyncio.Task | None = None
 
 
 async def _run_design_notifications() -> None:
@@ -156,6 +157,11 @@ class DomainNotifyRequest(BaseModel):
     token: Optional[str] = None
 
 
+class DailyRevenueReportRequest(BaseModel):
+    dry_run: bool = Field(default=True, description="True = только превью текста без отправки")
+    token: Optional[str] = None
+
+
 class IPNotifyRequest(BaseModel):
     days: int = Field(default=7, ge=0, le=365)
     dry_run: bool = Field(default=False, description="True = только проверка без отправки; по умолчанию отправляем")
@@ -208,6 +214,7 @@ def _remove_postback_credentials(data: dict[str, Any]) -> None:
 
 _daily_counter_lock = asyncio.Lock()
 _daily_counter_cache: Dict[int, Tuple[date, int]] = {}
+_daily_revenue_cache: Dict[int, Tuple[date, float]] = {}
 
 # Per-user locks so concurrent postbacks for the same buyer get correct sequential daily counts
 _user_locks: Dict[int, asyncio.Lock] = {}
@@ -247,6 +254,30 @@ async def _resolve_daily_counter(user_id: int, db_value: int | None) -> int:
             display_value=display,
         )
     return display
+
+def _parse_amount(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(str(value).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+async def _resolve_daily_revenue(user_id: int, db_value: float | None, current_payout: float | None) -> float:
+    """Stabilize the daily revenue total the same way as the deposit counter (never goes backwards)."""
+    today = datetime.now(timezone.utc).date()
+    base_value = float(db_value or 0)
+    async with _daily_counter_lock:
+        cached = _daily_revenue_cache.get(user_id)
+        if not cached or cached[0] != today:
+            display = base_value if base_value > 0 else float(current_payout or 0)
+        else:
+            _, last_value = cached
+            display = base_value if base_value > last_value else last_value
+        _daily_revenue_cache[user_id] = (today, display)
+    return display
+
 
 async def _run_keitaro_postback_job(data: dict) -> None:
     """Фоновая обработка: Keitaro ждёт ответ ~5 с, иначе cURL 28 — отдаём 200 раньше."""
@@ -387,9 +418,11 @@ async def _process_keitaro_postback(data: dict) -> dict:
     # Build text via unified formatter (with optional daily deposits count)
     # Serialize by user_id so concurrent postbacks for the same buyer get correct sequential daily counts
     daily_count: int | None = None
+    daily_revenue: float | None = None
     kpi_daily_goal: int | None = None
     if is_sale and stats_user_id is not None:
         db_daily_count: int | None = None
+        db_daily_revenue: float | None = None
         async with _user_locks_guard:
             user_lock = _lock_for_user(stats_user_id)
         async with user_lock:
@@ -402,12 +435,29 @@ async def _process_keitaro_postback(data: dict) -> dict:
             except Exception as e:
                 logger.warning(f"Failed to adjust daily counter: {e}")
                 daily_count = db_daily_count
+            # ДОХОД ЗА ДЕНЬ: total of every deposit so far today (ПРОФИТ shows only this one)
+            try:
+                db_daily_revenue = await db.sum_today_user_profit(stats_user_id)
+            except Exception as e:
+                logger.warning(f"Failed to get daily revenue: {e}")
+            try:
+                daily_revenue = await _resolve_daily_revenue(
+                    stats_user_id, db_daily_revenue, _parse_amount(payout)
+                )
+            except Exception as e:
+                logger.warning(f"Failed to adjust daily revenue: {e}")
+                daily_revenue = db_daily_revenue
         try:
             kpi = await db.get_kpi(stats_user_id)
             kpi_daily_goal = kpi.get("daily_goal")
         except Exception as e:
             logger.warning(f"Failed to get KPI: {e}")
-    text = build_notification_text(data, daily_count=daily_count, kpi_daily_goal=kpi_daily_goal)
+    text = build_notification_text(
+        data,
+        daily_count=daily_count,
+        kpi_daily_goal=kpi_daily_goal,
+        daily_revenue=daily_revenue,
+    )
 
     # Determine recipients
     recipient_ids: set[int] = set()
@@ -483,7 +533,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
 
 @app.on_event("startup")
 async def on_startup():
-    global _design_notify_task, _keitaro_sync_task, _new_admin_sync_task
+    global _design_notify_task, _keitaro_sync_task, _new_admin_sync_task, _daily_revenue_report_task
     try:
         await db.init_pool()
     except Exception as e:
@@ -579,10 +629,23 @@ async def on_startup():
         )
         logger.info("New Admin employee sync enabled", interval_seconds=max(60, new_admin_interval))
 
+    report_time = daily_revenue_report.parse_report_time(settings.daily_revenue_report_time)
+    if report_time is not None:
+        report_tz = daily_revenue_report.report_timezone()
+        _daily_revenue_report_task = asyncio.create_task(
+            daily_revenue_report.daily_revenue_report_loop(report_time, report_tz),
+            name="daily-revenue-report-loop",
+        )
+        logger.info(
+            "Daily revenue report enabled",
+            at=report_time.strftime("%H:%M"),
+            tz=str(report_tz),
+        )
+
 @app.on_event("shutdown")
 async def on_shutdown():
-    global _design_notify_task, _keitaro_sync_task, _new_admin_sync_task
-    for task in (_design_notify_task, _keitaro_sync_task, _new_admin_sync_task):
+    global _design_notify_task, _keitaro_sync_task, _new_admin_sync_task, _daily_revenue_report_task
+    for task in (_design_notify_task, _keitaro_sync_task, _new_admin_sync_task, _daily_revenue_report_task):
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -590,6 +653,7 @@ async def on_shutdown():
     _design_notify_task = None
     _keitaro_sync_task = None
     _new_admin_sync_task = None
+    _daily_revenue_report_task = None
     await db.close_pool()
     # Close aiogram bot aiohttp sessions to avoid "Unclosed client session" warnings
     for bot_instance in (bot, orders_bot, design_bot):
@@ -765,6 +829,17 @@ async def notify_design_endpoint(
             "not_in_progress_48h": not_in_progress_48h_stats,
         },
     }
+
+
+@app.post("/reports/daily-revenue")
+async def daily_revenue_report_endpoint(
+    payload: DailyRevenueReportRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Сводка дохода за день по командам для лидов/менторов/хэдов (ручной запуск или проверка)."""
+    _require_internal_token(authorization, payload.token)
+    stats = await daily_revenue_report.send_daily_revenue_report(dry_run=payload.dry_run)
+    return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
 
 
 @app.post(WEBHOOK_PATH)

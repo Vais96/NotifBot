@@ -91,6 +91,7 @@ def build_notification_text(
     data: Mapping[str, Any],
     daily_count: int | None = None,
     kpi_daily_goal: int | None = None,
+    daily_revenue: float | None = None,
 ) -> str:
     payout = _clean(
         data.get("profit")
@@ -137,6 +138,10 @@ def build_notification_text(
     lines.append(f"🔢 <b>SubID3:</b> <code>{_html(sub_id_3)}</code>")
     if sub_id_2:
         lines.append(f"📌 <b>SubID2:</b> <code>{_html(sub_id_2)}</code>")
+    if daily_revenue is not None:
+        lines.append(
+            f"💵 <b>ДОХОД ЗА ДЕНЬ:</b> <code>{_html(_format_payout(daily_revenue), '0')} {_html(currency, '')}</code>"
+        )
     if daily_count is not None:
         lines.append(f"📈 <b>ДЕПОЗИТОВ ЗА ДЕНЬ:</b> <code>{daily_count}</code>")
     if daily_count is not None and kpi_daily_goal is not None:

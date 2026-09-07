@@ -32,6 +32,7 @@ class AliasDailyCounterTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("src.app.db.log_event", log_event),
             patch("src.app.db.count_today_user_sales", count_sales),
+            patch("src.app.db.sum_today_user_profit", AsyncMock(return_value=612.4)),
             patch("src.app.db.get_kpi", AsyncMock(return_value={})),
             patch(
                 "src.app.db.list_users",
@@ -58,6 +59,10 @@ class AliasDailyCounterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("ДЕПОЗИТОВ ЗА ДЕНЬ" in call.args[1] for call in notify.await_args_list)
         )
+        sent = notify.await_args_list[0].args[1]
+        self.assertIn("ДОХОД ЗА ДЕНЬ:</b> <code>612", sent)
+        # ДОХОД sits directly above the daily deposit counter
+        self.assertLess(sent.index("ДОХОД ЗА ДЕНЬ"), sent.index("ДЕПОЗИТОВ ЗА ДЕНЬ"))
 
 
 if __name__ == "__main__":
