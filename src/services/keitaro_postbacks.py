@@ -92,6 +92,7 @@ def build_notification_text(
     daily_count: int | None = None,
     kpi_daily_goal: int | None = None,
     daily_revenue: float | None = None,
+    buyer_label: str | None = None,
 ) -> str:
     payout = _clean(
         data.get("profit")
@@ -139,8 +140,12 @@ def build_notification_text(
     if sub_id_2:
         lines.append(f"📌 <b>SubID2:</b> <code>{_html(sub_id_2)}</code>")
     if daily_revenue is not None:
+        # Leads and heads read many buyers' deposits in one feed — name whose day this is.
+        title = "ДОХОД ЗА ДЕНЬ"
+        if buyer_label:
+            title = f"{title} · {html.escape(str(buyer_label), quote=False)}"
         lines.append(
-            f"💵 <b>ДОХОД ЗА ДЕНЬ:</b> <code>{_html(_format_payout(daily_revenue), '0')} {_html(currency, '')}</code>"
+            f"💵 <b>{title}:</b> <code>{_html(_format_payout(daily_revenue), '0')} {_html(currency, '')}</code>"
         )
     if daily_count is not None:
         lines.append(f"📈 <b>ДЕПОЗИТОВ ЗА ДЕНЬ:</b> <code>{daily_count}</code>")

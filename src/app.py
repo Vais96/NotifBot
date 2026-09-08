@@ -136,6 +136,24 @@ def _buyer_username(user: dict | None) -> str | None:
     return username or None
 
 
+async def _buyer_label(user_id: int | None, alias_prefix: str | None) -> str | None:
+    """Name the buyer whose day the ДОХОД line sums, for recipients watching several buyers."""
+    if user_id is not None:
+        try:
+            user = await db.get_user(user_id)
+        except Exception as e:
+            logger.warning(f"Failed to load buyer {user_id} for the daily revenue label: {e}")
+            user = None
+        if user:
+            full_name = (user.get("full_name") or "").strip()
+            if full_name:
+                return full_name
+            username = (user.get("username") or "").strip().lstrip("@")
+            if username:
+                return f"@{username}"
+    return alias_prefix
+
+
 def _deposit_message_for_recipient(
     base_text: str,
     *,
@@ -213,22 +231,24 @@ def _remove_postback_credentials(data: dict[str, Any]) -> None:
     data.pop("auth", None)
 
 _daily_counter_lock = asyncio.Lock()
-_daily_counter_cache: Dict[int, Tuple[date, int]] = {}
-_daily_revenue_cache: Dict[int, Tuple[date, float]] = {}
+# Keyed by Telegram id, or by "alias:<campaign prefix>" when the deposit never routed to a user
+_StatsKey = int | str
+_daily_counter_cache: Dict[_StatsKey, Tuple[date, int]] = {}
+_daily_revenue_cache: Dict[_StatsKey, Tuple[date, float]] = {}
 
 # Per-user locks so concurrent postbacks for the same buyer get correct sequential daily counts
-_user_locks: Dict[int, asyncio.Lock] = {}
+_user_locks: Dict[_StatsKey, asyncio.Lock] = {}
 _user_locks_guard = asyncio.Lock()
 
 
-def _lock_for_user(user_id: int) -> asyncio.Lock:
+def _lock_for_user(user_id: _StatsKey) -> asyncio.Lock:
     """Return a lock for the given user (creates on first use). Caller must hold _user_locks_guard when mutating."""
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
     return _user_locks[user_id]
 
 
-async def _resolve_daily_counter(user_id: int, db_value: int | None) -> int:
+async def _resolve_daily_counter(user_id: _StatsKey, db_value: int | None) -> int:
     """Stabilize daily deposit counter so it never goes backwards even if DB lagged."""
     today = datetime.now(timezone.utc).date()
     base_value = db_value or 0
@@ -264,7 +284,7 @@ def _parse_amount(value: Any) -> float | None:
         return None
 
 
-async def _resolve_daily_revenue(user_id: int, db_value: float | None, current_payout: float | None) -> float:
+async def _resolve_daily_revenue(user_id: _StatsKey, db_value: float | None, current_payout: float | None) -> float:
     """Stabilize the daily revenue total the same way as the deposit counter (never goes backwards)."""
     today = datetime.now(timezone.utc).date()
     base_value = float(db_value or 0)
@@ -420,43 +440,59 @@ async def _process_keitaro_postback(data: dict) -> dict:
     daily_count: int | None = None
     daily_revenue: float | None = None
     kpi_daily_goal: int | None = None
-    if is_sale and stats_user_id is not None:
+    buyer_label: str | None = None
+    alias_prefix = (alias_key or "").strip().lower() or None
+    # Unrouted deposits (buyer without a tg_aliases row) still carry the campaign prefix,
+    # so fall back to it — the daily lines must reach every recipient, not just routed ones.
+    stats_key: _StatsKey | None = stats_user_id if stats_user_id is not None else (
+        f"alias:{alias_prefix}" if alias_prefix else None
+    )
+    if is_sale and stats_key is not None:
         db_daily_count: int | None = None
         db_daily_revenue: float | None = None
         async with _user_locks_guard:
-            user_lock = _lock_for_user(stats_user_id)
+            user_lock = _lock_for_user(stats_key)
         async with user_lock:
+            if stats_user_id is not None:
+                try:
+                    db_daily_count = await db.count_today_user_sales(stats_user_id)
+                except Exception as e:
+                    logger.warning(f"Failed to get daily count: {e}")
+                # ДОХОД ЗА ДЕНЬ: total of every deposit so far today (ПРОФИТ shows only this one)
+                try:
+                    db_daily_revenue = await db.sum_today_user_profit(stats_user_id)
+                except Exception as e:
+                    logger.warning(f"Failed to get daily revenue: {e}")
+            else:
+                try:
+                    db_daily_count, db_daily_revenue = await db.today_alias_sales(alias_prefix)
+                except Exception as e:
+                    logger.warning(f"Failed to get daily stats for alias {alias_prefix}: {e}")
             try:
-                db_daily_count = await db.count_today_user_sales(stats_user_id)
-            except Exception as e:
-                logger.warning(f"Failed to get daily count: {e}")
-            try:
-                daily_count = await _resolve_daily_counter(stats_user_id, db_daily_count)
+                daily_count = await _resolve_daily_counter(stats_key, db_daily_count)
             except Exception as e:
                 logger.warning(f"Failed to adjust daily counter: {e}")
                 daily_count = db_daily_count
-            # ДОХОД ЗА ДЕНЬ: total of every deposit so far today (ПРОФИТ shows only this one)
-            try:
-                db_daily_revenue = await db.sum_today_user_profit(stats_user_id)
-            except Exception as e:
-                logger.warning(f"Failed to get daily revenue: {e}")
             try:
                 daily_revenue = await _resolve_daily_revenue(
-                    stats_user_id, db_daily_revenue, _parse_amount(payout)
+                    stats_key, db_daily_revenue, _parse_amount(payout)
                 )
             except Exception as e:
                 logger.warning(f"Failed to adjust daily revenue: {e}")
                 daily_revenue = db_daily_revenue
-        try:
-            kpi = await db.get_kpi(stats_user_id)
-            kpi_daily_goal = kpi.get("daily_goal")
-        except Exception as e:
-            logger.warning(f"Failed to get KPI: {e}")
+        buyer_label = await _buyer_label(stats_user_id, alias_prefix)
+        if stats_user_id is not None:
+            try:
+                kpi = await db.get_kpi(stats_user_id)
+                kpi_daily_goal = kpi.get("daily_goal")
+            except Exception as e:
+                logger.warning(f"Failed to get KPI: {e}")
     text = build_notification_text(
         data,
         daily_count=daily_count,
         kpi_daily_goal=kpi_daily_goal,
         daily_revenue=daily_revenue,
+        buyer_label=buyer_label,
     )
 
     # Determine recipients

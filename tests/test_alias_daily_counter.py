@@ -35,6 +35,10 @@ class AliasDailyCounterTests(unittest.IsolatedAsyncioTestCase):
             patch("src.app.db.sum_today_user_profit", AsyncMock(return_value=612.4)),
             patch("src.app.db.get_kpi", AsyncMock(return_value={})),
             patch(
+                "src.app.db.get_user",
+                AsyncMock(return_value={"telegram_id": user_id, "username": "arseniy", "full_name": "Арсений Симич"}),
+            ),
+            patch(
                 "src.app.db.list_users",
                 AsyncMock(
                     return_value=[
@@ -60,7 +64,8 @@ class AliasDailyCounterTests(unittest.IsolatedAsyncioTestCase):
             any("ДЕПОЗИТОВ ЗА ДЕНЬ" in call.args[1] for call in notify.await_args_list)
         )
         sent = notify.await_args_list[0].args[1]
-        self.assertIn("ДОХОД ЗА ДЕНЬ:</b> <code>612", sent)
+        # the line names the buyer whose day it sums — leads watch several buyers at once
+        self.assertIn("ДОХОД ЗА ДЕНЬ · Арсений Симич:</b> <code>612", sent)
         # ДОХОД sits directly above the daily deposit counter
         self.assertLess(sent.index("ДОХОД ЗА ДЕНЬ"), sent.index("ДЕПОЗИТОВ ЗА ДЕНЬ"))
 

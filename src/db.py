@@ -1275,25 +1275,29 @@ def _today_utc_window() -> Tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
+# Campaign prefix stored in tg_events.raw — the buyer alias, and the only buyer identity
+# left on a deposit that never routed to a Telegram user.
+_EVENT_ALIAS_EXPR = """LOWER(TRIM(SUBSTRING_INDEX(COALESCE(
+                          JSON_UNQUOTE(JSON_EXTRACT(tg_events.raw, '$.campaign_name')),
+                          JSON_UNQUOTE(JSON_EXTRACT(tg_events.raw, '$."campaign.name"')),
+                          JSON_UNQUOTE(JSON_EXTRACT(tg_events.raw, '$.campaign')),
+                          ''
+                      ), '_', 1)))"""
+
 # Sale-like events that belong to a user: routed to them directly, or sent under one of
 # their aliases (covers rows logged before alias routing became authoritative).
-_USER_SALES_TODAY_WHERE = """
+_USER_SALES_TODAY_WHERE = f"""
         WHERE (
                 routed_user_id=%s
                 OR EXISTS (
                     SELECT 1
                     FROM tg_aliases a
                     WHERE a.buyer_id=%s
-                      AND a.alias = LOWER(TRIM(SUBSTRING_INDEX(COALESCE(
-                          JSON_UNQUOTE(JSON_EXTRACT(tg_events.raw, '$.campaign_name')),
-                          JSON_UNQUOTE(JSON_EXTRACT(tg_events.raw, '$."campaign.name"')),
-                          JSON_UNQUOTE(JSON_EXTRACT(tg_events.raw, '$.campaign')),
-                          ''
-                      ), '_', 1)))
+                      AND a.alias = {_EVENT_ALIAS_EXPR}
                 )
               )
           AND created_at >= %s AND created_at < %s
-          AND LOWER(TRIM(COALESCE(status, ''))) IN ({placeholders})
+          AND LOWER(TRIM(COALESCE(status, ''))) IN ({{placeholders}})
 """
 
 
@@ -1319,6 +1323,35 @@ async def sum_today_user_profit(user_id: int) -> float:
     """Sum payout of today's sales (UTC day) routed to the user or sent under their aliases."""
     value = await _user_sales_today_scalar("COALESCE(SUM(payout), 0)", user_id)
     return float(value or 0)
+
+
+async def today_alias_sales(alias: str) -> Tuple[int, float]:
+    """Today's deposit count and payout sum for a campaign prefix, routed or not.
+
+    A buyer without a ``tg_aliases`` row never gets a ``routed_user_id``, so the per-buyer
+    daily lines would go missing exactly where they matter. The campaign prefix still
+    identifies them, so count by it when routing produced no user.
+    """
+    normalized = (alias or "").strip().lower()
+    if not normalized:
+        return 0, 0.0
+    pool = await init_pool()
+    start, end = _today_utc_window()
+    placeholders = ",".join(["%s"] * len(SALE_LIKE_STATUSES))
+    query = f"""
+        SELECT COUNT(*), COALESCE(SUM(payout), 0)
+        FROM tg_events
+        WHERE {_EVENT_ALIAS_EXPR} = %s
+          AND created_at >= %s AND created_at < %s
+          AND LOWER(TRIM(COALESCE(status, ''))) IN ({placeholders})
+    """
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, (normalized, start, end, *SALE_LIKE_STATUSES))
+            row = await cur.fetchone()
+    if not row:
+        return 0, 0.0
+    return int(row[0] or 0), float(row[1] or 0)
 
 
 async def sales_by_user_between(start: datetime, end: datetime) -> List[Dict[str, Any]]:

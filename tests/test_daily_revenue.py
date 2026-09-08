@@ -61,6 +61,48 @@ class NotificationRevenueLineTests(unittest.TestCase):
         text = build_notification_text({"campaign_name": "Nikita_PWA", "profit": "269"}, daily_count=2)
         self.assertNotIn("ДОХОД", text)
 
+    def test_revenue_line_names_the_buyer(self) -> None:
+        text = build_notification_text(
+            {"campaign_name": "Nikita_PWA", "profit": "269", "currency": "USD"},
+            daily_count=2,
+            daily_revenue=538.4,
+            buyer_label="Никита Трунов",
+        )
+        self.assertIn("💵 <b>ДОХОД ЗА ДЕНЬ · Никита Трунов:</b> <code>538 USD</code>", text)
+
+
+class UnroutedDepositRevenueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_daily_lines_fall_back_to_the_campaign_alias(self) -> None:
+        """A buyer with no tg_aliases row lands on the admin fallback — the lines must still show."""
+        app_module._daily_counter_cache.clear()
+        app_module._daily_revenue_cache.clear()
+        data = {
+            "status": "sale",
+            "conversion_id": "unrouted-sale-1",
+            "campaign_name": "NewBuyer_PWAPartners",
+            "profit": "150",
+        }
+        notify = AsyncMock()
+        alias_stats = AsyncMock(return_value=(4, 612.0))
+
+        with (
+            patch("src.app.db.claim_keitaro_sale_postback", AsyncMock(return_value=True)),
+            patch("src.app.db.find_alias", AsyncMock(return_value=None)),
+            patch("src.app.db.find_user_for_postback", AsyncMock(return_value=None)),
+            patch("src.app.db.log_event", AsyncMock()),
+            patch("src.app.db.today_alias_sales", alias_stats),
+            patch("src.app.db.list_users", AsyncMock(return_value=[])),
+            patch("src.app.db.list_helpers_by_buyer", AsyncMock(return_value=[])),
+            patch("src.app.notify_buyer", notify),
+        ):
+            result = await app_module._process_keitaro_postback(data)
+
+        self.assertTrue(result["fallback"])
+        alias_stats.assert_awaited_once_with("newbuyer")
+        sent = notify.await_args_list[0].args[1]
+        self.assertIn("💵 <b>ДОХОД ЗА ДЕНЬ · newbuyer:</b> <code>612 </code>", sent)
+        self.assertIn("📈 <b>ДЕПОЗИТОВ ЗА ДЕНЬ:</b> <code>4</code>", sent)
+
 
 class ResolveDailyRevenueTests(unittest.IsolatedAsyncioTestCase):
     async def test_never_goes_backwards_and_seeds_from_current_payout(self) -> None:
