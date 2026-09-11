@@ -874,7 +874,7 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
     pool = await init_pool()
     stats = {"received": len(employees), "matched": 0, "skipped": 0, "users_updated": 0,
              "teams_created": 0, "teams_deleted": 0, "helper_links_updated": 0,
-             "observer_links_updated": 0}
+             "observer_links_updated": 0, "aliases_upserted": 0}
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await conn.begin()
@@ -1044,6 +1044,44 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                         (team_id, user_id),
                     )
                     stats["observer_links_updated"] += 1
+
+                # Admin «Имя в Keitaro» is the campaign prefix used for deposit routing.
+                seen_aliases: Dict[str, int] = {}
+                for person, uid in resolved:
+                    if not getattr(person, "is_active", True):
+                        continue
+                    alias = str(getattr(person, "keitaro_name", None) or "").strip().lower()
+                    if not alias:
+                        continue
+                    existing_owner = seen_aliases.get(alias)
+                    if existing_owner is not None and existing_owner != uid:
+                        logger.warning(
+                            "Duplicate Admin keitaroName; keeping first alias owner",
+                            alias=alias,
+                            kept_user_id=existing_owner,
+                            skipped_user_id=uid,
+                        )
+                        continue
+                    seen_aliases[alias] = uid
+                    await cur.execute("SELECT buyer_id FROM tg_aliases WHERE alias=%s", (alias,))
+                    previous = await cur.fetchone()
+                    previous_buyer = previous.get("buyer_id") if previous else None
+                    if previous_buyer is not None and int(previous_buyer) != uid:
+                        logger.warning(
+                            "Admin keitaroName reassigns existing alias",
+                            alias=alias,
+                            previous_buyer_id=int(previous_buyer),
+                            new_buyer_id=uid,
+                        )
+                    await cur.execute(
+                        """
+                        INSERT INTO tg_aliases(alias, buyer_id, lead_id)
+                        VALUES(%s, %s, NULL)
+                        ON DUPLICATE KEY UPDATE buyer_id=VALUES(buyer_id)
+                        """,
+                        (alias, uid),
+                    )
+                    stats["aliases_upserted"] += 1
                 await conn.commit()
             except Exception:
                 await conn.rollback()

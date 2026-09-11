@@ -1,6 +1,30 @@
 import unittest
 
-from src.new_admin_sync import NewAdminSyncError, normalize_employees
+from src.new_admin_sync import (
+    DirectoryEmployee,
+    NewAdminSyncError,
+    apply_directory_detail,
+    enrich_keitaro_names,
+    keitaro_alias_key,
+    normalize_employees,
+)
+
+
+def _employee(**overrides: object) -> DirectoryEmployee:
+    defaults: dict[str, object] = {
+        "external_id": "cms-id",
+        "telegram_id": 8948797431,
+        "username": "nikolai_underdog",
+        "full_name": "Николай Петрученко",
+        "role": "buyer",
+        "team_name": "Команда Дмитрия Шишманов",
+        "helper_for_telegram_id": None,
+        "helper_for_username": None,
+        "helper_for_external_id": None,
+        "is_active": True,
+    }
+    defaults.update(overrides)
+    return DirectoryEmployee(**defaults)  # type: ignore[arg-type]
 
 
 class NewAdminEmployeeNormalizationTests(unittest.TestCase):
@@ -16,6 +40,7 @@ class NewAdminEmployeeNormalizationTests(unittest.TestCase):
         self.assertEqual(employees[0].telegram_id, 123)
         self.assertEqual(employees[0].username, "buyer")
         self.assertEqual(employees[0].team_name, "Alpha")
+        self.assertIsNone(employees[0].keitaro_name)
         self.assertEqual(employees[1].role, "helper")
         self.assertEqual(employees[1].helper_for_telegram_id, 123)
 
@@ -59,6 +84,69 @@ class NewAdminEmployeeNormalizationTests(unittest.TestCase):
     def test_rejects_unknown_response_shape(self) -> None:
         with self.assertRaises(NewAdminSyncError):
             normalize_employees({"data": {"unexpected": True}})
+
+    def test_keitaro_name_from_list_payload_becomes_alias_key(self) -> None:
+        employee = normalize_employees({"data": [{
+            "id": "cmsbsogbs08ign0l3hamr2gef",
+            "telegram": "@Nikolai_underdog",
+            "fullName": "Николай Петрученко",
+            "position": "Buyer",
+            "keitaroName": "NikolaiPetrychenko",
+        }]})[0]
+        self.assertEqual(employee.keitaro_name, "NikolaiPetrychenko")
+        self.assertEqual(keitaro_alias_key(employee.keitaro_name), "nikolaipetrychenko")
+
+    def test_user_card_fills_keitaro_name_omitted_from_the_list(self) -> None:
+        employee = apply_directory_detail(_employee(keitaro_name=None), {
+            "id": "cms-id",
+            "keitaroName": "NikolaiPetrychenko",
+            "telegramId": 8948797431,
+        })
+        self.assertEqual(employee.keitaro_name, "NikolaiPetrychenko")
+
+
+class NewAdminKeitaroNameEnrichmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fetches_user_cards_when_list_omits_keitaro_name(self) -> None:
+        class _Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {"data": {"keitaroName": "NikolaiPetrychenko"}}
+
+        class _Client:
+            def __init__(self) -> None:
+                self.urls: list[str] = []
+
+            async def get(self, url: str, headers: dict | None = None) -> _Response:
+                self.urls.append(url)
+                return _Response()
+
+        client = _Client()
+        employees = await enrich_keitaro_names(
+            [_employee(keitaro_name=None)],
+            client=client,  # type: ignore[arg-type]
+            headers={"X-API-Key": "k"},
+            base_url="https://testdashboard.underdog.click/api",
+        )
+        self.assertEqual(employees[0].keitaro_name, "NikolaiPetrychenko")
+        self.assertEqual(
+            client.urls,
+            ["https://testdashboard.underdog.click/api/users/cms-id"],
+        )
+
+    async def test_skips_detail_fetch_when_list_already_has_keitaro_name(self) -> None:
+        class _Client:
+            async def get(self, url: str, headers: dict | None = None) -> None:
+                raise AssertionError(f"unexpected fetch {url}")
+
+        employees = await enrich_keitaro_names(
+            [_employee(keitaro_name="NikolaiPetrychenko")],
+            client=_Client(),  # type: ignore[arg-type]
+            headers={},
+            base_url="https://example.test/api",
+        )
+        self.assertEqual(employees[0].keitaro_name, "NikolaiPetrychenko")
 
 
 if __name__ == "__main__":

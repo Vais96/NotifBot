@@ -100,7 +100,7 @@ async def _keitaro_domain_sync_loop(interval_seconds: int) -> None:
 
 
 async def _new_admin_employee_sync_loop(interval_seconds: int) -> None:
-    """Keep teams, buyers and helper assignments aligned with the Admin directory."""
+    """Keep teams, buyers, helper assignments and Keitaro aliases aligned with the Admin directory."""
     while True:
         try:
             await new_admin_sync.run_sync()
