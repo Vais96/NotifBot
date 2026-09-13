@@ -12,7 +12,12 @@ from ..handlers.teams import _send_teams, _send_myteam
 from ..handlers.mentors import _send_mentors
 from ..handlers.helpers import _send_helpers_list
 from ..handlers.reports import _send_reports_menu, _send_kpi_menu
+from ..handlers.ads_key import send_ads_key
+from ..services.ads_workspace import can_use_ads_key
 from loguru import logger
+
+
+ADS_KEY_BUTTON = [InlineKeyboardButton(text="Мой ключ для АДС", callback_data="menu:adskey")]
 
 
 def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = False) -> InlineKeyboardMarkup:
@@ -31,6 +36,8 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
         [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
         [InlineKeyboardButton(text="Отчеты", callback_data="menu:reports"), InlineKeyboardButton(text="KPI", callback_data="menu:kpi")],
     ]
+    if can_use_ads_key(is_admin, role):
+        buttons.insert(0, ADS_KEY_BUTTON)
     buttons.append(checkdomain_btn)
     buttons.append([InlineKeyboardButton(text="Загрузить CSV", callback_data="menu:uploadcsv")])
     buttons.append([InlineKeyboardButton(text="Скачать видео", callback_data="menu:yt_download")])
@@ -80,6 +87,9 @@ async def on_menu_click(call: CallbackQuery):
     key = call.data.split(":", 1)[1]
     if key == "whoami":
         await _send_whoami(call.message.chat.id, call.from_user.id, call.from_user.username)
+        return await call.answer()
+    if key == "adskey":
+        await send_ads_key(call.message.chat.id, call.from_user.id, call.from_user.username)
         return await call.answer()
     if key == "listroutes":
         await _send_list_routes(call.message.chat.id, call.from_user.id)

@@ -21,6 +21,7 @@ A FastAPI + aiogram bot that receives Keitaro S2S postbacks and notifies the app
 - KEITARO_API_KEY / KEITARO_BASE_URL: Admin API for campaign/domain lookup (`/checkdomain`)
 - KEITARO_SYNC_INTERVAL_SECONDS: How often to pull new Keitaro domains (default `86400` = daily; `0` disables)
 - NEW_ADMIN_API_URL / NEW_ADMIN_API_KEY: new Admin API and its machine key. The bot reads `GET /users` and synchronizes matched Telegram users, their roles, teams and helper-to-buyer links.
+- ADS_WORKSPACE_API_URL / ADS_WORKSPACE_TOKEN: Ads Workspace API. Buyers, leads, mentors and heads get a personal activation code from the «Мой ключ для АДС» menu. The token must match `INTERNAL_TOKEN` on ads-workspace-api.
 - NEW_ADMIN_SYNC_INTERVAL_SECONDS: Directory refresh interval (default `3600` = hourly; `0` disables). The first refresh runs immediately after startup.
 - YTDLP_COOKIES_PATH: Optional path to cookies.txt in Netscape format for YouTube downloads (если отсутствует — бот работает без авторизации)
 - YTDLP_COOKIES: Альтернатива YTDLP_COOKIES_PATH — содержимое файла cookies.txt (многострочная строка)

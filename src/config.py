@@ -52,6 +52,8 @@ class Settings(BaseModel):
         default=3600,
         validation_alias="NEW_ADMIN_SYNC_INTERVAL_SECONDS",
     )
+    ads_workspace_api_url: str = Field(default="", validation_alias="ADS_WORKSPACE_API_URL")
+    ads_workspace_token: str = Field(default="", validation_alias="ADS_WORKSPACE_TOKEN")
     # Чат(ы) для рассылки design-уведомлений (группа/канал). Все участники видят сообщение. Через запятую: -100123, -100456
     design_broadcast_chat_ids: List[int] = Field(default_factory=list, validation_alias="DESIGN_BROADCAST_CHAT_IDS")
     # Через сколько часов после назначения напомнить взять таск в работу (по умолчанию 48 = 2 дня)
@@ -160,6 +162,8 @@ class Settings(BaseModel):
             "NEW_ADMIN_SYNC_INTERVAL_SECONDS": int(
                 os.getenv("NEW_ADMIN_SYNC_INTERVAL_SECONDS", "3600")
             ),
+            "ADS_WORKSPACE_API_URL": os.getenv("ADS_WORKSPACE_API_URL", ""),
+            "ADS_WORKSPACE_TOKEN": os.getenv("ADS_WORKSPACE_TOKEN", ""),
             "DESIGN_BROADCAST_CHAT_IDS": design_broadcast,
             "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": int(
                 os.getenv("DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS", "48")

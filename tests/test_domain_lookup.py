@@ -80,6 +80,7 @@ class HelperMenuTests(unittest.TestCase):
         callbacks = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
         self.assertNotIn("menu:refreshdomains", callbacks)
         self.assertNotIn("menu:helpers", callbacks)
+        self.assertNotIn("menu:adskey", callbacks)
 
 
 if __name__ == "__main__":

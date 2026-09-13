@@ -40,6 +40,7 @@ async def on_help(message: Message):
         "Доступные команды:\n"
         "/start — регистрация\n"
         "/menu — открыть меню\n"
+        "/adskey — мой ключ Ads Workspace (байер/лид/ментор/хэд)\n"
         "/checkdomain — проверить домен (кто ведёт кампанию)\n"
         "/help — помощь\n"
         "/ping — проверка связи (pong)\n"
