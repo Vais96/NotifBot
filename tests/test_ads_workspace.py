@@ -42,12 +42,22 @@ class AdsKeyAccessTests(unittest.TestCase):
     def test_invite_message_includes_copyable_code(self) -> None:
         text = format_ads_key_message({"status": "invite", "code": "K7QP4M2T", "hours": 720})
         self.assertIn("<code>K7QP4M2T</code>", text)
-        self.assertIn("720 ч", text)
+        self.assertIn("тот же код", text)
+        self.assertIn("Второй код не нужен", text)
+        self.assertNotIn("одноразовый", text.lower())
+        self.assertNotIn("🔑", text)
+
+    def test_active_message_shows_same_code_when_reusable(self) -> None:
+        text = format_ads_key_message({"status": "active", "last4": "ab&c", "code": "K7QP4M2T"})
+        self.assertIn("<code>K7QP4M2T</code>", text)
+        self.assertIn("тот же код", text)
+        self.assertNotIn("Выдать новый код", text)
 
     def test_active_message_shows_last4(self) -> None:
         text = format_ads_key_message({"status": "active", "last4": "ab&c"})
-        self.assertIn("<code>····ab&amp;c</code>", text)
-        self.assertIn("выдай новый код", text.lower())
+        self.assertIn("····ab&amp;c", text)
+        self.assertIn("снова нажми", text.lower())
+        self.assertNotIn("🔑", text)
 
 
 if __name__ == "__main__":

@@ -41,27 +41,31 @@ def ads_key_label(user: dict | None, username: str | None) -> str:
 
 def format_ads_key_message(payload: dict) -> str:
     status = payload.get("status")
-    if status == "invite":
-        code = str(payload.get("code") or "")
-        hours = payload.get("hours") or 720
+    code = str(payload.get("code") or "")
+    how = (
+        "Как связать профили:\n"
+        "1. Открой профиль в AdsPower\n"
+        "2. Открой Ads Workspace\n"
+        "3. Вставь этот код\n"
+        "4. В следующем профиле вставь <b>тот же код</b>\n\n"
+        "Один код — на все свои профили. Второй код не нужен."
+    )
+    if status == "invite" or (status == "active" and code):
         return (
-            "<b>Мой ключ для Ads Workspace</b>\n\n"
-            f"Код активации: <code>{html.escape(code)}</code>\n\n"
-            "Открой расширение Ads Workspace и вставь этот код на экране активации. "
-            "Код одноразовый, после этого в каждом своём профиле AdsPower вставляй уже сам ключ "
-            "(клик по ключу в шапке копирует его).\n\n"
-            f"Код живёт {hours} ч. Не кидай его в общий чат."
+            "<b>Код для Ads Workspace</b>\n\n"
+            f"Код: <code>{html.escape(code)}</code>\n\n"
+            f"{how}"
         )
     if status == "active":
         last4 = str(payload.get("last4") or "????")
         return (
-            "<b>Мой ключ для Ads Workspace</b>\n\n"
-            f"Ключ уже активирован: <code>····{html.escape(last4)}</code>\n\n"
-            "В новом профиле скопируй ключ из шапки расширения в другом своём профиле.\n"
-            "Если потерял все профили — выдай новый код. Старый ключ перестанет работать, "
-            "парк кабинетов останется."
+            "<b>Код для Ads Workspace</b>\n\n"
+            f"Код уже активирован в одном профиле (····{html.escape(last4)}).\n\n"
+            "Открой этот профиль на минуту, потом снова нажми «Мой ключ для АДС» — "
+            "придёт тот же код для остальных профилей.\n\n"
+            "«Выдать новый код» нужно только если потерял все профили."
         )
-    return "Не удалось получить ключ. Напиши администратору."
+    return "Не удалось получить код. Напиши администратору."
 
 
 async def request_ads_key(telegram_id: int, label: str, *, rotate: bool = False) -> dict:

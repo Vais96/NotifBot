@@ -54,7 +54,7 @@ async def send_ads_key(chat_id: int, user_id: int, username: str | None, *, rota
             return
         await bot.send_message(chat_id, "Не удалось получить ключ. Попробуй позже или напиши администратору.")
         return
-    markup = _rotate_keyboard() if payload.get("status") == "active" else None
+    markup = _rotate_keyboard() if payload.get("status") == "active" and not payload.get("code") else None
     await bot.send_message(chat_id, format_ads_key_message(payload), reply_markup=markup)
 
 
@@ -69,7 +69,8 @@ async def cb_adskey_rotate(call: CallbackQuery):
     if not allowed:
         return await call.answer("Нет доступа", show_alert=True)
     await call.message.answer(
-        "Старый ключ перестанет работать во всех профилях. Парк кабинетов сохранится. Продолжить?",
+        "Новый код нужен только если потерял все профили. Чтобы добавить профиль — вставь тот же код, не новый.\n\n"
+        "Старый код перестанет работать во всех профилях. Продолжить?",
         reply_markup=_confirm_rotate_keyboard(),
     )
     return await call.answer()
