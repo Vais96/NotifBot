@@ -217,6 +217,24 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
         logger.info(f"Time range: {start} to {end}")
         filt = await db.get_report_filter(actor_id)
         logger.info(f"Filters: {filt}")
+        # Фильтр по байеру хранит Telegram ID. Если там чужой id (CRM/админка) или
+        # байер вне доступа — раньше отчёт молча выдавал нули. Снимаем и сообщаем.
+        if filt.get('buyer_id'):
+            bid = int(filt['buyer_id'])
+            known_ids = {int(u['telegram_id']) for u in users if u.get('telegram_id') is not None}
+            if bid not in known_ids or bid not in set(user_ids):
+                reason = "такого пользователя нет в боте" if bid not in known_ids else "нет доступа к этому байеру"
+                logger.warning(f"Dropping unusable buyer filter {bid} for actor {actor_id}: {reason}")
+                await db.set_report_filter(
+                    actor_id, filt.get('offer'), filt.get('creative'),
+                    buyer_id=None, team_id=filt.get('team_id'),
+                )
+                filt = dict(filt, buyer_id=None)
+                await bot.send_message(
+                    chat_id,
+                    f"⚠️ Фильтр по байеру <code>{bid}</code> снят: {reason}. Отчёт построен без него.",
+                    parse_mode=ParseMode.HTML,
+                )
         filter_user_ids: list[int] | None = None
         if filt.get('buyer_id') or filt.get('team_id'):
             me = next((u for u in users if u["telegram_id"] == actor_id), None)

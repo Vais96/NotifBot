@@ -40,19 +40,40 @@ def _first(value: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
+# Настоящие Telegram ID — минимум шестизначные. Меньшее значение в telegramId
+# означает, что в карточке админки лежит внутренний id, а не Telegram ID:
+# такой «призрак» попадает в tg_users и ломает фильтры отчётов.
+_MIN_PLAUSIBLE_TELEGRAM_ID = 100_000
+
+
 def _as_int(value: Any) -> int | None:
     try:
         result = int(value)
     except (TypeError, ValueError):
         return None
-    return result if result > 0 else None
+    if result <= 0:
+        return None
+    if result < _MIN_PLAUSIBLE_TELEGRAM_ID:
+        logger.warning("Implausible telegramId in Admin directory; dropping", value=result)
+        return None
+    return result
+
+
+_ADMIN_HANDLE_ALIASES: dict[str, str] = {
+    "mr_kharkovskiy": "valter_underdog",
+    "vladimirs_underdog": "vs_underdog",
+    "trucovali": "nikolai_underdog",
+    "illia_k_underdog": "illia_klemparskyi_underdog",
+}
 
 
 def _handle(value: Any) -> str | None:
     if value is None:
         return None
     result = str(value).strip().lstrip("@").lower()
-    return result or None
+    if not result:
+        return None
+    return _ADMIN_HANDLE_ALIASES.get(result, result)
 
 
 def _name(value: Any) -> str | None:
