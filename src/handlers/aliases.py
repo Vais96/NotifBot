@@ -61,8 +61,8 @@ async def on_setalias(message: Message):
     if len(parts) < 2:
         return await message.answer("Использование: /setalias <alias> buyer=<id|-> lead=<id|->")
     alias = parts[1]
-    buyer_id = None
-    lead_id = None
+    buyer_id = db._UNSET
+    lead_id = db._UNSET
     for p in parts[2:]:
         if p.startswith("buyer="):
             v = p.split("=", 1)[1]

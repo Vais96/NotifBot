@@ -599,17 +599,13 @@ async def on_startup():
     try:
         await bot.set_my_commands([
             BotCommand(command="menu", description="Открыть меню"),
-            BotCommand(command="checkdomain", description="Проверить домен"),
-            BotCommand(command="help", description="Помощь"),
-            BotCommand(command="ping", description="Проверка связи"),
-            BotCommand(command="whoami", description="Ваш Telegram ID"),
-            BotCommand(command="listroutes", description="Список правил"),
-            BotCommand(command="listusers", description="Список пользователей"),
-            BotCommand(command="manage", description="Управление (admin)"),
-            BotCommand(command="aliases", description="Алиасы (admin)"),
             BotCommand(command="today", description="Отчет за сегодня"),
             BotCommand(command="yesterday", description="Отчет за вчера"),
             BotCommand(command="week", description="Отчет за 7 дней"),
+            BotCommand(command="checkdomain", description="Проверить домен"),
+            BotCommand(command="whoami", description="Ваш Telegram ID"),
+            BotCommand(command="ping", description="Проверка связи"),
+            BotCommand(command="help", description="Помощь"),
         ])
     except Exception as e:
         logger.warning(f"Failed to set bot commands: {e}")

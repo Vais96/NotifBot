@@ -125,5 +125,6 @@ Other hazards:
   21 of those hold a buying role (buyer/lead/helper/head) — see the HR list. (An earlier
   count of ~101 included FIRED records and overstated this.)
 - Orphans exist on the other side too: `tg_users` rows no directory record resolves to,
-  e.g. `Vladimir Samarin @vs_underdog` (146 dep/30d) whose Admin handle reads
-  `@vladimirs_underdog`. Their directory role and team therefore never apply.
+  e.g. `Vladimir Samarin @vs_underdog` whose Admin handle reads `@vladimirs_underdog`, or
+  `Oleg Zozulyak @oleg1617_underdog` whose Admin handle reads `@o_z0002`. Handled via
+  `_ADMIN_HANDLE_ALIASES` in `new_admin_sync.py`.

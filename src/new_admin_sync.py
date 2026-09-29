@@ -64,6 +64,7 @@ _ADMIN_HANDLE_ALIASES: dict[str, str] = {
     "vladimirs_underdog": "vs_underdog",
     "trucovali": "nikolai_underdog",
     "illia_k_underdog": "illia_klemparskyi_underdog",
+    "o_z0002": "oleg1617_underdog",
 }
 
 

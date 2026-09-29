@@ -69,6 +69,69 @@ class AliasDailyCounterTests(unittest.IsolatedAsyncioTestCase):
         # ДОХОД sits directly above the daily deposit counter
         self.assertLess(sent.index("ДОХОД ЗА ДЕНЬ"), sent.index("ДЕПОЗИТОВ ЗА ДЕНЬ"))
 
+    async def test_alias_without_lead_does_not_notify_unrelated_buyer(self) -> None:
+        egor_id = 8431378988
+        tatiana_id = 8425735633
+        app_module._daily_counter_cache.clear()
+        data = {
+            "status": "sale",
+            "conversion_id": "egor-sale-1",
+            "campaign_name": "EgorKumzin_PWAPartners",
+            "profit": "100",
+        }
+        notify = AsyncMock()
+
+        with (
+            patch("src.app.db.claim_keitaro_sale_postback", AsyncMock(return_value=True)),
+            patch(
+                "src.app.db.find_alias",
+                AsyncMock(return_value={"alias": "egorkumzin", "buyer_id": egor_id, "lead_id": None}),
+            ),
+            patch("src.app.db.log_event", AsyncMock()),
+            patch("src.app.db.count_today_user_sales", AsyncMock(return_value=1)),
+            patch("src.app.db.sum_today_user_profit", AsyncMock(return_value=100.0)),
+            patch("src.app.db.get_kpi", AsyncMock(return_value={})),
+            patch(
+                "src.app.db.get_user",
+                AsyncMock(return_value={"telegram_id": egor_id, "username": "egorkunderdog", "full_name": "Егор Кумзин"}),
+            ),
+            patch(
+                "src.app.db.list_users",
+                AsyncMock(
+                    return_value=[
+                        {
+                            "telegram_id": egor_id,
+                            "username": "egorkunderdog",
+                            "full_name": "Егор Кумзин",
+                            "role": "buyer",
+                            "is_active": 1,
+                            "team_id": 23,
+                        },
+                        {
+                            "telegram_id": tatiana_id,
+                            "username": "tatianaunderdog",
+                            "full_name": "Татьяна Русанова",
+                            "role": "buyer",
+                            "is_active": 1,
+                            "team_id": 23,
+                        },
+                    ]
+                ),
+            ),
+            patch("src.app.db.list_team_leads", AsyncMock(return_value=[8625203308])),
+            patch("src.app.db.list_team_mentors", AsyncMock(return_value=[])),
+            patch("src.app.db.list_helpers_by_buyer", AsyncMock(return_value=[])),
+            patch("src.app.notify_buyer", notify),
+            patch.object(app_module.settings, "admins", []),
+        ):
+            result = await app_module._process_keitaro_postback(data)
+
+        self.assertTrue(result["ok"])
+        recipient_ids = [call.args[0] for call in notify.await_args_list]
+        self.assertIn(egor_id, recipient_ids)
+        self.assertIn(8625203308, recipient_ids)
+        self.assertNotIn(tatiana_id, recipient_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

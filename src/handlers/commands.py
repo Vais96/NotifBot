@@ -27,8 +27,7 @@ async def on_start(message: Message):
         )
     else:
         await message.answer(
-            "Привет! Ты зарегистрирован. Роль по умолчанию: buyer (если не админ). "
-            "Админ может изменить роль и добавить правила."
+            "Привет! Ты зарегистрирован. Роли, команды и привязки синхронизируются из Admin API."
         )
     await send_user_menu(message.chat.id, message.from_user.id)
 
@@ -40,22 +39,14 @@ async def on_help(message: Message):
         "Доступные команды:\n"
         "/start — регистрация\n"
         "/menu — открыть меню\n"
+        "/today — отчёт за сегодня\n"
+        "/yesterday — отчёт за вчера\n"
+        "/week — отчёт за 7 дней\n"
         "/adskey — мой ключ Ads Workspace (байер/лид/ментор/хэд)\n"
         "/checkdomain — проверить домен (кто ведёт кампанию)\n"
-        "/help — помощь\n"
-        "/ping — проверка связи (pong)\n"
         "/whoami — показать свой Telegram ID\n"
-        "/addrule — добавить правило (админ/хэд)\n"
-        "/listusers — список пользователей (зависит от роли)\n"
-        "/listroutes — список правил (видимость по роли)\n"
-        "/setrole — назначить роль (admin)\n"
-        "/createteam — создать команду (admin)\n"
-        "/setteam — назначить пользователя в команду (admin/head)\n"
-        "/listteams — список команд\n"
-        "/aliases — алиасы (admin): связать campaign_name с buyer/lead\n"
-        "/addmentor — назначить роль mentor (admin)\n"
-        "/mentor_follow — подписать ментора на команду (admin)\n"
-        "/mentor_unfollow — отписать ментора от команды (admin)"
+        "/ping — проверка связи (pong)\n"
+        "/help — помощь"
     )
 
 

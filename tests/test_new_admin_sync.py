@@ -30,19 +30,27 @@ def _employee(**overrides: object) -> DirectoryEmployee:
 class NewAdminEmployeeNormalizationTests(unittest.TestCase):
     def test_normalizes_nested_response_and_helper_assignment(self) -> None:
         employees = normalize_employees({"data": {"users": [{
-            "telegramId": "123", "telegram": "@Buyer", "fullName": "Buyer Name",
+            "telegramId": "123456", "telegram": "@Buyer", "fullName": "Buyer Name",
             "role": "buyer", "team": {"name": "Alpha"},
         }, {
-            "telegram_id": 456, "username": "helper", "position": "assistant",
-            "department": "Alpha", "buyer": {"telegramId": 123, "username": "Buyer"},
+            "telegram_id": 456789, "username": "helper", "position": "assistant",
+            "department": "Alpha", "buyer": {"telegramId": 123456, "username": "Buyer"},
         }]}})
         self.assertEqual(len(employees), 2)
-        self.assertEqual(employees[0].telegram_id, 123)
+        self.assertEqual(employees[0].telegram_id, 123456)
         self.assertEqual(employees[0].username, "buyer")
         self.assertEqual(employees[0].team_name, "Alpha")
         self.assertIsNone(employees[0].keitaro_name)
         self.assertEqual(employees[1].role, "helper")
-        self.assertEqual(employees[1].helper_for_telegram_id, 123)
+        self.assertEqual(employees[1].helper_for_telegram_id, 123456)
+
+    def test_admin_handle_aliases_maps_mismatched_handles(self) -> None:
+        employee = normalize_employees({"data": [{
+            "telegram": "@o_z0002",
+            "fullName": "Олег Зозуляк",
+            "position": "Buyer",
+        }]})[0]
+        self.assertEqual(employee.username, "oleg1617_underdog")
 
     def test_manager_is_a_lead_and_disabled_employee_is_inactive(self) -> None:
         employee = normalize_employees({"data": [{
