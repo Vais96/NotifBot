@@ -54,7 +54,7 @@ class _Pool:
 class KeitaroDedupeTests(unittest.IsolatedAsyncioTestCase):
     async def test_old_event_with_same_click_id_is_rejected(self) -> None:
         cursor = _Cursor(existing_event=(1,))
-        with patch("src.db.init_pool", AsyncMock(return_value=_Pool(cursor))):
+        with patch("src.db.pool.init_pool", AsyncMock(return_value=_Pool(cursor))):
             claimed = await db.claim_keitaro_sale_postback(
                 "new-click-only-key",
                 click_id="3avl6p17igil",
@@ -66,7 +66,7 @@ class KeitaroDedupeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_click_id_is_claimed(self) -> None:
         cursor = _Cursor(existing_event=None)
-        with patch("src.db.init_pool", AsyncMock(return_value=_Pool(cursor))):
+        with patch("src.db.pool.init_pool", AsyncMock(return_value=_Pool(cursor))):
             claimed = await db.claim_keitaro_sale_postback(
                 "new-click-only-key",
                 click_id="new-click",

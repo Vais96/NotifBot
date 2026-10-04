@@ -821,11 +821,7 @@ async def health():
 @app.get("/db/ping")
 async def db_ping():
     try:
-        pool = await db.init_pool()
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SELECT 1")
-                row = await cur.fetchone()
+        row = await db.fetch_one("SELECT 1")
         return {"ok": True, "result": row and int(row[0])}
     except Exception as e:
         logger.exception(e)
