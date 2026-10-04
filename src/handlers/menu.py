@@ -5,6 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import ADMIN_IDS, bot, dp
+from .common import is_admin
 from .. import db, keitaro_sync
 from ..handlers.users import _send_whoami, _send_list_users, _send_list_routes, _send_manage
 from ..handlers.aliases import _send_aliases
@@ -58,21 +59,21 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
 
 async def user_menu_flags(user_id: int) -> tuple[bool, str | None, bool]:
     """Return (is_admin, role, has_lead_access) for building the main menu."""
-    is_admin = user_id in ADMIN_IDS
     me = await db.get_user(user_id)
+    admin = await is_admin(user_id, me)
     role = (me or {}).get("role")
-    if is_admin:
+    if admin:
         role = "admin"
-    has_lead_access = is_admin
+    has_lead_access = admin
     if not has_lead_access:
         lead_team_ids = await db.list_user_lead_teams(user_id)
         has_lead_access = bool(lead_team_ids) or (role in ("lead", "head"))
-    return is_admin, role, has_lead_access
+    return admin, role, has_lead_access
 
 
 async def send_user_menu(chat_id: int, user_id: int, *, intro: str = "Меню:") -> None:
-    is_admin, role, has_lead_access = await user_menu_flags(user_id)
-    await bot.send_message(chat_id, intro, reply_markup=main_menu(is_admin, role, has_lead_access=has_lead_access))
+    admin, role, has_lead_access = await user_menu_flags(user_id)
+    await bot.send_message(chat_id, intro, reply_markup=main_menu(admin, role, has_lead_access=has_lead_access))
 
 
 @dp.message(Command("menu"))
@@ -114,7 +115,7 @@ async def on_menu_click(call: CallbackQuery):
         )
         return await call.answer()
     if key == "refreshdomains":
-        if call.from_user.id not in ADMIN_IDS:
+        if not await is_admin(call.from_user.id):
             return await call.answer("Нет прав", show_alert=True)
         await call.answer("Начинаю обновление")
         status_msg = await call.message.answer("Запускаю обновление доменов из Keitaro…")
@@ -127,7 +128,7 @@ async def on_menu_click(call: CallbackQuery):
             await status_msg.edit_text(f"Готово. Добавлено/обновлено {count} кампаний с доменами.")
         return
     if key == "resetfbdata":
-        if call.from_user.id not in ADMIN_IDS:
+        if not await is_admin(call.from_user.id):
             return await call.answer("Нет прав", show_alert=True)
         warning_text = (
             "⚠️ <b>Внимание</b>\n"
@@ -178,7 +179,7 @@ async def on_menu_click(call: CallbackQuery):
 @dp.callback_query(F.data == "resetfbdata:confirm")
 async def cb_resetfbdata_confirm(call: CallbackQuery):
     """Handle FB data reset confirmation."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
     await call.answer("Очищаю данные…")
     try:

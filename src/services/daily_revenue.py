@@ -17,6 +17,7 @@ from datetime import date
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..utils.formatting import chunk_lines
+from ..utils.numbers import round_money
 
 REPORT_ROLES = frozenset({"lead", "mentor", "head"})
 NO_TEAM_LABEL = "Без команды"
@@ -80,7 +81,7 @@ def resolve_scope(
 
 
 def _fmt_amount(value: float) -> str:
-    return f"{int(round(value)):,}".replace(",", " ")
+    return f"{round_money(value):,}".replace(",", " ")
 
 
 def _display_name(user: Mapping[str, Any] | None, user_id: int) -> str:

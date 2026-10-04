@@ -70,6 +70,7 @@ class FbAccountReportTests(unittest.IsolatedAsyncioTestCase):
         cache = AsyncMock()
         with (
             patch("src.handlers.reports.db.fetch_fb_campaign_month_report", AsyncMock(return_value=rows)),
+            patch("src.handlers.reports.is_admin", AsyncMock(return_value=True)),
             patch("src.handlers.reports.db.list_fb_flags", AsyncMock(return_value=[{"id": 1, "code": "GREEN", "severity": 0}])),
             patch("src.handlers.reports.db.list_users", AsyncMock(return_value=[])),
             patch("src.handlers.reports.db.set_ui_cache_list", cache),

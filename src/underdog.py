@@ -16,8 +16,9 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from loguru import logger
 
 from . import db
-from .config import settings
+from .config import secret, settings
 from .telegram_rate_limit import limited_send_message, make_bot
+from .utils.html import safe
 
 LOGIN_PATH = "/api/login"
 ORDERS_PATH = "/api/v2/orders"
@@ -218,7 +219,7 @@ def _resolve_corporate_owner_fields(record: Dict[str, Any]) -> tuple[Optional[st
 
 def _corp_handle_admin_line(handle: Optional[str]) -> str:
     if handle:
-        return f"Корп. Telegram: @{handle}"
+        return f"Корп. Telegram: @{safe(handle)}"
     return "Корп. Telegram: (не указан)"
 
 
@@ -288,9 +289,9 @@ def _build_order_message(order: Dict[str, Any]) -> str:
     lines = [
         f"✅ Ваш заказ ID {order_id} выполнен",
         "",
-        f"Название: {name}",
+        f"Название: {safe(name)}",
         f"Количество: {count}",
-        f"Сумма: {total}",
+        f"Сумма: {safe(total)}",
     ]
     return "\n".join(str(line) for line in lines)
 
@@ -306,9 +307,9 @@ def _build_design_order_message(order: Dict[str, Any]) -> str:
     lines = [
         f"📐 Заказ (дизайн) ID {order_id}",
         "",
-        f"Название: {name}",
+        f"Название: {safe(name)}",
         f"Количество: {count}",
-        f"Сумма: {total}",
+        f"Сумма: {safe(total)}",
         f"Статус: {status_text}",
     ]
     return "\n".join(str(line) for line in lines)
@@ -328,16 +329,16 @@ def _build_design_assignment_message(
     if assigned_to_mention_html is not None:
         assign_line = f"Таск назначен на: {assigned_to_mention_html}"
     elif assigned_to_display is not None:
-        assign_line = f"Таск назначен на: {assigned_to_display}"
+        assign_line = f"Таск назначен на: {safe(assigned_to_display)}"
     else:
-        assign_line = f"Таск назначен на: вас" + (f" ({designer_name})" if designer_name else "")
+        assign_line = "Таск назначен на: вас" + (f" ({safe(designer_name)})" if designer_name else "")
     lines = [
         "📐 Вам поставлен таск (дизайн/креатив)",
         "",
         assign_line,
-        f"Заказчик: {owner_name}",
+        f"Заказчик: {safe(owner_name)}",
         "",
-        f"Название: {name}",
+        f"Название: {safe(name)}",
         f"ID заказа: {order_id}",
         "Статус: обработка",
     ]
@@ -375,9 +376,9 @@ def _build_design_completion_message(
         "✅ Заказ дизайна выполнен",
         "",
         f"ID заказа: {order_id}",
-        f"Название: {name}",
+        f"Название: {safe(name)}",
         f"Количество: {count}",
-        f"Сумма: {total}",
+        f"Сумма: {safe(total)}",
         f"Статус: {status_text}",
     ]
     if duration_text:
@@ -398,7 +399,7 @@ def _build_design_sla_warning_message(
             "⏳ Срок выполнения: почти 24 часа уже прошло, а статус не стал “выполнен”.",
             "",
             f"ID заказа: {order_id}",
-            f"Название: {name}",
+            f"Название: {safe(name)}",
             f"Статус: {status_text}",
             f"Прошло с назначения: {passed_text}",
         ]
@@ -419,7 +420,7 @@ def _build_design_not_in_progress_48h_message(
             f"⚠️ ОБНОВИТЕ СТАТУС ЗАДАЧИ #{order_id}",
             "",
             f"Прошло {reminder_hours} часов после назначения, а задача ещё не взята в работу.",
-            f"Название: {name}",
+            f"Название: {safe(name)}",
             f"Текущий статус: {status_text}",
             f"Прошло с назначения: {passed_text}",
             "",
@@ -908,7 +909,7 @@ class UnderdogClient:
         return cls(
             base_url=settings.underdog_base_url,
             email=settings.underdog_email,
-            password=settings.underdog_password,
+            password=secret(settings.underdog_password),
             token_ttl=settings.underdog_token_ttl,
         )
 
@@ -1279,7 +1280,7 @@ class OrderNotifier:
         ]
         for item in orders[:20]:
             lines.append(
-                f"ID {item.get('order_id')}: @{item.get('handle')} ({item.get('owner')}) — {item.get('name')} на {item.get('total')}"
+                f"ID {safe(item.get('order_id'))}: @{safe(item.get('handle'))} ({safe(item.get('owner'))}) — {safe(item.get('name'))} на {safe(item.get('total'))}"
             )
         if len(orders) > 20:
             lines.append(f"… и ещё {len(orders) - 20} заказов")
@@ -1311,10 +1312,10 @@ class OrderNotifier:
         lines = [
             "⚠️ Ошибка отправки уведомления о заказе",
             f"ID: {order.get('id')}",
-            f"Покупатель: {owner.get('name') or '—'}",
-            f"Корп. Telegram @: @{corp_handle}" if corp_handle else "Корп. Telegram: (не указан)",
-            f"Сумма: {order.get('total') or order.get('price') or '0'}",
-            f"Ошибка: {error_text}",
+            f"Покупатель: {safe(owner.get('name') or '—')}",
+            f"Корп. Telegram @: @{safe(corp_handle)}" if corp_handle else "Корп. Telegram: (не указан)",
+            f"Сумма: {safe(order.get('total') or order.get('price') or '0')}",
+            f"Ошибка: {safe(error_text)}",
         ]
         text = "\n".join(lines)
         for admin_id in self.admin_ids:
@@ -1394,7 +1395,7 @@ class DesignAssignmentNotifier:
 
             if designer_telegram_id is not None:
                 label = f"@{telegram_from_order}" if telegram_from_order else (designer_name or f"id{designer_telegram_id}")
-                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{label}</a>'
+                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{safe(label)}</a>'
                 assigned_to_display = None
             else:
                 assigned_to_mention_html = None
@@ -1548,7 +1549,7 @@ class DesignCompletionNotifier:
                     if telegram_from_order
                     else (designer_name or f"id{designer_telegram_id}")
                 )
-                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{label}</a>'
+                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{safe(label)}</a>'
 
             message_for_broadcast = message_personal
             if assigned_to_mention_html is not None:
@@ -1690,7 +1691,7 @@ class DesignSLA24hNotifier:
                     if telegram_from_order
                     else (designer_name or f"id{designer_telegram_id}")
                 )
-                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{label}</a>'
+                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{safe(label)}</a>'
 
             message_for_broadcast = message_personal
             if assigned_to_mention_html is not None:
@@ -1840,7 +1841,7 @@ class DesignNotInProgress48hNotifier:
                     if telegram_from_order
                     else (designer_name or f"id{designer_telegram_id}")
                 )
-                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{label}</a>'
+                assigned_to_mention_html = f'<a href="tg://user?id={designer_telegram_id}">{safe(label)}</a>'
 
             message_for_broadcast = message_personal
             if assigned_to_mention_html is not None:
@@ -2116,7 +2117,7 @@ class DomainNotifier:
         ]
         for item in unknown_items[:20]:
             lines.append(
-                f"{item.get('domain') or '—'} (до {item.get('expires_at') or '—'}) — @{item.get('handle') or '—'}"
+                f"{safe(item.get('domain') or '—')} (до {safe(item.get('expires_at') or '—')}) — @{safe(item.get('handle') or '—')}"
             )
         if len(unknown_items) > 20:
             lines.append(f"… и ещё {len(unknown_items) - 20} доменов")
@@ -2145,7 +2146,7 @@ class DomainNotifier:
             "⚠️ Не удалось доставить уведомление о доменах покупателю.",
         ]
         if owner_name:
-            header_lines.append(f"Владелец: {owner_name}")
+            header_lines.append(f"Владелец: {safe(owner_name)}")
         header_lines.append(_corp_handle_admin_line(handle))
         header_lines.append("")
         header_lines.append(_build_domain_notification(entries))
@@ -2184,7 +2185,7 @@ class DomainNotifier:
         lines = [
             "⚠️ Ошибка отправки уведомления о доменах",
             _corp_handle_admin_line(handle),
-            f"Ошибка: {error_text}",
+            f"Ошибка: {safe(error_text)}",
             "",
             _build_domain_notification(entries),
         ]
@@ -2614,7 +2615,7 @@ class IPNotifier:
         ]
         owner_name = entries[0].get("owner_name")
         if owner_name:
-            header_lines.append(f"Владелец: {owner_name}")
+            header_lines.append(f"Владелец: {safe(owner_name)}")
         header_lines.append(_corp_handle_admin_line(handle))
         header_lines.append("")
         header_lines.append(_build_ip_notification(entries))
@@ -2654,7 +2655,7 @@ class IPNotifier:
         lines = [
             "⚠️ Ошибка отправки уведомления об IP",
             _corp_handle_admin_line(handle),
-            f"Ошибка: {error_text}",
+            f"Ошибка: {safe(error_text)}",
             "",
             _build_ip_notification(entries),
         ]
@@ -2690,7 +2691,7 @@ class IPNotifier:
         ]
         for item in unknown_items[:20]:
             lines.append(
-                f"{item.get('ip') or '—'} (до {item.get('expires_at') or '—'}) — @{item.get('handle') or '—'}"
+                f"{safe(item.get('ip') or '—')} (до {safe(item.get('expires_at') or '—')}) — @{safe(item.get('handle') or '—')}"
             )
         if len(unknown_items) > 20:
             lines.append(f"… и ещё {len(unknown_items) - 20} IP")
@@ -2955,7 +2956,7 @@ class TicketNotifier:
             "⚠️ Не удалось доставить уведомление о тикете покупателю.",
         ]
         if owner_name:
-            header_lines.append(f"Владелец: {owner_name}")
+            header_lines.append(f"Владелец: {safe(owner_name)}")
         header_lines.append(_corp_handle_admin_line(handle))
         header_lines.append("")
         header_lines.append(_build_ticket_notification(entries))
@@ -2996,9 +2997,9 @@ class TicketNotifier:
             return
         lines = [
             "⚠️ Ошибка пометки тикета как отправленного",
-            f"Тикет ID: {ticket_id}",
+            f"Тикет ID: {safe(ticket_id)}",
             _corp_handle_admin_line(handle),
-            f"Ошибка: {error_text}",
+            f"Ошибка: {safe(error_text)}",
             "",
             "Тикет был отправлен пользователю, но не был помечен как отправленный в системе.",
         ]
@@ -3037,7 +3038,7 @@ class TicketNotifier:
         lines = [
             "⚠️ Ошибка отправки уведомления о тикете",
             _corp_handle_admin_line(handle),
-            f"Ошибка: {error_text}",
+            f"Ошибка: {safe(error_text)}",
             "",
             _build_ticket_notification(entries),
         ]
@@ -3074,7 +3075,7 @@ class TicketNotifier:
         ]
         for item in unknown_items[:20]:
             lines.append(
-                f"Тикет #{item.get('ticket_id') or '—'} ({item.get('type') or '—'}) — @{item.get('handle') or '—'}"
+                f"Тикет #{safe(item.get('ticket_id') or '—')} ({safe(item.get('type') or '—')}) — @{safe(item.get('handle') or '—')}"
             )
         if len(unknown_items) > 20:
             lines.append(f"… и ещё {len(unknown_items) - 20} тикетов")
@@ -3116,7 +3117,7 @@ def _build_domain_notification(entries: List[Dict[str, Any]]) -> str:
         domain = entry["raw"].get("domain") or entry["raw"].get("name") or "—"
         expires_at = entry.get("expires_at")
         expires_text = expires_at.strftime("%d.%m.%Y") if expires_at else "неизвестно"
-        lines.append(f"- {domain} (истекает {expires_text})")
+        lines.append(f"- {safe(domain)} (истекает {expires_text})")
     lines.extend(
         [
             "",
@@ -3143,9 +3144,9 @@ def _build_ip_notification(entries: List[Dict[str, Any]]) -> str:
     if owner_name or owner_tg:
         lines.append("")
         if owner_name:
-            lines.append(f"👤 Пользователь: {owner_name}")
+            lines.append(f"👤 Пользователь: {safe(owner_name)}")
         if owner_tg:
-            lines.append(f"TG: {owner_tg}")
+            lines.append(f"TG: {safe(owner_tg)}")
     lines.append("")
     for entry in sorted_entries:
         ip_value = entry["raw"].get("ip") or entry["raw"].get("address") or "—"
@@ -3169,11 +3170,11 @@ def _build_ip_notification(entries: List[Dict[str, Any]]) -> str:
                 owner_display = f"@{normalized_owner}"
         lines.extend(
             [
-                f"🖥 IP: {ip_value}",
+                f"🖥 IP: {safe(ip_value)}",
                 "",
                 f"📅 Истекает: {expires_text}{suffix}",
                 "",
-                f"👤 Владелец: {owner_display}",
+                f"👤 Владелец: {safe(owner_display)}",
                 "",
                 "──────────────────",
                 "",
@@ -3343,9 +3344,9 @@ def _build_ticket_notification(entries: List[Dict[str, Any]]) -> str:
         ticket_type = ticket.get("type") or ticket.get("ticket_type")
         type_name = _get_ticket_type_name(ticket_type)
         lines: List[str] = [
-            f"✅ Ваш тикет ({ticket_id}) выполнен:",
+            f"✅ Ваш тикет ({safe(ticket_id)}) выполнен:",
             "",
-            f"📋 Тип: {type_name}",
+            f"📋 Тип: {safe(type_name)}",
         ]
     else:
         lines: List[str] = [f"✅ Выполнено тикетов: {len(entries)}", ""]
@@ -3356,9 +3357,9 @@ def _build_ticket_notification(entries: List[Dict[str, Any]]) -> str:
             type_name = _get_ticket_type_name(ticket_type)
             lines.extend(
                 [
-                    f"✅ Ваш тикет ({ticket_id}) выполнен:",
+                    f"✅ Ваш тикет ({safe(ticket_id)}) выполнен:",
                     "",
-                    f"📋 Тип: {type_name}",
+                    f"📋 Тип: {safe(type_name)}",
                     "",
                     "──────────────────",
                     "",
@@ -3375,14 +3376,14 @@ def _create_bot() -> Bot:
 
 def _orders_and_main_bots_differ() -> bool:
     """True если orders bot и основной бот — разные токены (нужен отдельный admin_bot для алертов админу)."""
-    o = (settings.orders_bot_token or "").strip()
-    m = (settings.telegram_bot_token or "").strip()
+    o = secret(settings.orders_bot_token).strip()
+    m = secret(settings.telegram_bot_token).strip()
     return bool(o and m and o != m)
 
 
 def _create_main_bot() -> Bot:
     """Только TELEGRAM_BOT_TOKEN — для админских DM, когда рассылка идёт через ORDERS_BOT_TOKEN."""
-    token = (settings.telegram_bot_token or "").strip()
+    token = secret(settings.telegram_bot_token).strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required when using a separate main bot for admin alerts")
     return make_bot(token)

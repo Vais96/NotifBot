@@ -15,7 +15,7 @@ from loguru import logger
 from .. import db, fb_csv
 from .campaigns import format_flag_decision, format_flag_label
 from ..utils.domain import resolve_campaign_assignments
-from ..utils.formatting import fmt_money, fmt_percent, month_label_ru
+from ..utils.formatting import chunk_lines, fmt_money, fmt_percent, month_label_ru, send_long
 
 NotifyAdminsFunc = Callable[[str, Exception, Optional[List[str]]], Awaitable[None]]
 
@@ -791,36 +791,12 @@ async def process_fb_csv_upload(
                 "Внимание: нет данных Keitaro для: " + ", ".join(html.escape(c) for c in shown) + suffix
             )
 
-        def build_messages(sections: list[list[str]], max_length: int = 3500) -> list[str]:
-            lines: list[str] = []
-            for section in sections:
-                if not section:
-                    continue
-                if lines:
-                    lines.append("")
-                lines.extend(section)
-            messages: list[str] = []
-            current_lines: list[str] = []
-            current_len = 0
-            for line in lines:
-                appended_len = len(line) + 1
-                if appended_len > max_length:
-                    # hard truncate overly long lines to fit Telegram limit
-                    trimmed = line[: max_length - 4] + " …"
-                    line = trimmed
-                    appended_len = len(line) + 1
-                if current_lines and current_len + appended_len > max_length:
-                    messages.append("\n".join(current_lines))
-                    current_lines = []
-                    current_len = 0
-                current_lines.append(line)
-                current_len += appended_len
-            if current_lines:
-                messages.append("\n".join(current_lines))
-            return messages or [""]
-
         sections = [summary_main, flag_section, month_section, account_section, missing_section]
-        message_chunks = build_messages(sections)
+        all_lines: list[str] = []
+        for section in sections:
+            if section:
+                all_lines.extend(([""] if all_lines else []) + section)
+        message_chunks = chunk_lines(all_lines)
         if account_keyboard_markup:
             await status_msg.edit_text(
                 message_chunks[0],
@@ -1094,8 +1070,10 @@ async def _notify_flag_updates(
         return
     header = f"<b>Обновления флагов</b> из {html.escape(filename)}"
     for rid, lines in recipient_messages.items():
-        message_text = header + "\n\n" + "\n\n".join(lines)
+        message_lines = [header]
+        for line in lines:
+            message_lines += ["", line]
         try:
-            await bot.send_message(rid, message_text, parse_mode=ParseMode.HTML)
+            await send_long(bot, rid, message_lines)
         except Exception as exc:
             logger.warning("Failed to send flag notification", user_id=rid, exc_info=exc)

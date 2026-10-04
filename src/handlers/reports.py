@@ -11,10 +11,13 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from loguru import logger
 
 from ..dispatcher import dp, bot, ADMIN_IDS
+from .common import STALE_BUTTON, callback_parts, is_admin
 from .. import db
+from ..utils.html import safe, user_label
+from ..utils.numbers import round_money
 from ..utils.formatting import (
     as_decimal as _as_decimal,
-    chunk_lines,
+    send_long,
     fmt_money as _fmt_money,
     fmt_percent as _fmt_percent,
     format_buyer_label as _format_buyer_label,
@@ -28,7 +31,7 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     me = next((u for u in users if u["telegram_id"] == actor_id), None)
     my_role = (me or {}).get("role", "buyer")
     # Админ: по env ADMINS или по роли в БД — видит всех пользователей в отчётах
-    if actor_id in ADMIN_IDS or (me and me.get("role") == "admin"):
+    if await is_admin(actor_id, me):
         my_role = "admin"
     # Помощник в отчётах — только как «зритель»:
     # видит депозиты ТОЛЬКО назначенного байера и сам в отчётах не фигурирует.
@@ -73,11 +76,20 @@ async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
     return [actor_id]
 
 
+async def _fb_month_rows_in_scope(month: date, actor_id: int) -> list[dict]:
+    """FB rows of the month visible to the actor: admin — all, others — buyers from _resolve_scope_user_ids."""
+    rows = await db.fetch_fb_campaign_month_report(month)
+    if not rows or await is_admin(actor_id):
+        return rows
+    allowed = set(await _resolve_scope_user_ids(actor_id))
+    return [r for r in rows if r.get("buyer_id") is not None and int(r["buyer_id"]) in allowed]
+
+
 def _report_text(title: str, agg: dict) -> str:
     lines = [f"📊 <b>{title}</b>"]
     lines.append(f"📈 Депозитов: <b>{agg.get('count',0)}</b>")
     profit = agg.get('profit', 0.0)
-    lines.append(f"💰 Профит: <b>{int(round(profit))}</b>")
+    lines.append(f"💰 Профит: <b>{round_money(profit)}</b>")
     total = agg.get('total', 0)
     if total:
         cr = (agg.get('count',0) / total) * 100.0
@@ -99,31 +111,6 @@ def _report_text(title: str, agg: dict) -> str:
             crs = ", ".join(f"{k}:{v}" for k, v in cr_items[:5])
             lines.append(f"🎬 Креативы: {crs}")
     return "\n".join(lines)
-
-
-async def _send_long_html(chat_id: int, text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> None:
-    """Send long HTML text in chunks to avoid Telegram 4096 limit."""
-    max_len = 3800
-    if len(text) <= max_len:
-        await bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-        return
-    parts: list[str] = []
-    buf: list[str] = []
-    cur = 0
-    for line in text.split("\n"):
-        add = len(line) + 1
-        if buf and cur + add > max_len:
-            parts.append("\n".join(buf))
-            buf = [line]
-            cur = add
-        else:
-            buf.append(line)
-            cur += add
-    if buf:
-        parts.append("\n".join(buf))
-    for idx, part in enumerate(parts):
-        kb = reply_markup if idx == len(parts) - 1 else None
-        await bot.send_message(chat_id, part, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
 async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int | None = None, yesterday: bool = False):
@@ -172,7 +159,7 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
         if filt.get('buyer_id') or filt.get('team_id'):
             me = next((u for u in users if u["telegram_id"] == actor_id), None)
             role = (me or {}).get("role", "buyer")
-            if actor_id in ADMIN_IDS:
+            if await is_admin(actor_id):
                 role = "admin"
             allowed_ids = set(user_ids)
             if filt.get('buyer_id'):
@@ -220,7 +207,7 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
                 if not u:
                     label = f"<code>{uid}</code>"
                 else:
-                    label = f"@{u['username']}" if u.get('username') else (u.get('full_name') or f"<code>{uid}</code>")
+                    label = user_label(u, uid)
                 lines.append(f"{label}: <b>{cnt}</b>")
             if lines:
                 text += "\n\n" + "\n".join(lines)
@@ -243,14 +230,14 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
             teams = await db.list_teams()
             fparts: list[str] = []
             if filt.get('offer'):
-                fparts.append(f"offer=<code>{filt['offer']}</code>")
+                fparts.append(f"offer=<code>{safe(filt['offer'])}</code>")
             if filt.get('creative'):
                 fparts.append(f"creative=<code>{filt['creative']}</code>")
             if filt.get('buyer_id'):
                 bid = int(filt['buyer_id'])
                 bu = next((u for u in users if int(u['telegram_id']) == bid), None)
                 if bu and (bu.get('username') or bu.get('full_name')):
-                    cap = f"@{bu['username']}" if bu.get('username') else (bu.get('full_name') or str(bid))
+                    cap = safe(f"@{bu['username']}" if bu.get('username') else (bu.get('full_name') or bid))
                 else:
                     cap = str(bid)
                 fparts.append(f"buyer=<code>{cap}</code>")
@@ -260,7 +247,7 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
                 fparts.append(f"team=<code>{tn}</code>")
             text += "\n🔎 Фильтры: " + ", ".join(fparts)
         logger.info(f"Sending report message (length={len(text)})")
-        await _send_long_html(chat_id, text, reply_markup=_reports_menu(actor_id))
+        await send_long(bot, chat_id, text, reply_markup=_reports_menu(actor_id))
         logger.info("Report sent successfully")
     except Exception as e:
         logger.exception("Error in _send_period_report: {}", e)
@@ -285,14 +272,14 @@ async def _send_reports_menu(chat_id: int, actor_id: int):
         teams = await db.list_teams()
         fparts: list[str] = []
         if filt.get('offer'):
-            fparts.append(f"offer=<code>{filt['offer']}</code>")
+            fparts.append(f"offer=<code>{safe(filt['offer'])}</code>")
         if filt.get('creative'):
             fparts.append(f"creative=<code>{filt['creative']}</code>")
         if filt.get('buyer_id'):
             bid = int(filt['buyer_id'])
             bu = next((u for u in users if int(u['telegram_id']) == bid), None)
             if bu and (bu.get('username') or bu.get('full_name')):
-                cap = f"@{bu['username']}" if bu.get('username') else (bu.get('full_name') or str(bid))
+                cap = safe(f"@{bu['username']}" if bu.get('username') else (bu.get('full_name') or bid))
             else:
                 cap = str(bid)
             fparts.append(f"buyer=<code>{cap}</code>")
@@ -369,9 +356,9 @@ def _build_fb_month_keyboard(kind: str, months: list[date]) -> InlineKeyboardMar
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
+async def _send_fb_campaign_report(chat_id: int, month_start: date, requester_id: int) -> None:
     month = month_start.replace(day=1)
-    rows = await db.fetch_fb_campaign_month_report(month)
+    rows = await _fb_month_rows_in_scope(month, requester_id)
     if not rows:
         await bot.send_message(chat_id, f"Нет данных по FB кампаниям за {html.escape(_month_label_ru(month))}.", parse_mode=ParseMode.HTML)
         return
@@ -444,38 +431,16 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
         header_lines.append(f"CTR: <b>{_fmt_percent(ctr)}</b> ({total_clicks}/{total_impressions})")
     if total_registrations:
         header_lines.append(f"Регистраций: <b>{total_registrations}</b>")
-    def _chunk_lines(all_lines: list[str], max_length: int = 3500) -> list[str]:
-        messages: list[str] = []
-        current: list[str] = []
-        current_len = 0
-        for raw_line in all_lines:
-            line = raw_line.rstrip()
-            additional = len(line) + 1
-            if current and current_len + additional > max_length:
-                messages.append("\n".join(current))
-                current = [line]
-                current_len = len(line) + 1
-            else:
-                current.append(line)
-                current_len += additional
-        if current:
-            messages.append("\n".join(current))
-        return messages or [""]
-
     all_lines: list[str] = header_lines.copy()
     if lines:
         all_lines.append("")
         all_lines.extend(lines)
-    chunks = _chunk_lines(all_lines)
-    first_chunk, *rest_chunks = chunks
-    await bot.send_message(chat_id, first_chunk, parse_mode=ParseMode.HTML)
-    for chunk in rest_chunks:
-        await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
+    await send_long(bot, chat_id, [line.rstrip() for line in all_lines])
 
 
 async def _send_fb_account_report(chat_id: int, month_start: date, requester_id: int) -> None:
     month = month_start.replace(day=1)
-    rows = await db.fetch_fb_campaign_month_report(month)
+    rows = await _fb_month_rows_in_scope(month, requester_id)
     if not rows:
         await bot.send_message(chat_id, f"Нет данных по FB кабинетам за {html.escape(_month_label_ru(month))}.", parse_mode=ParseMode.HTML)
         return
@@ -655,10 +620,7 @@ async def _send_fb_account_report(chat_id: int, month_start: date, requester_id:
     if account_keyboard_rows:
         summary_lines += ["", "Нажми кнопку ниже, чтобы раскрыть кабинет."]
         keyboard_markup = InlineKeyboardMarkup(inline_keyboard=account_keyboard_rows[:12])
-    first_chunk, *rest_chunks = chunk_lines(summary_lines)
-    await bot.send_message(chat_id, first_chunk, parse_mode=ParseMode.HTML, reply_markup=keyboard_markup)
-    for chunk in rest_chunks:
-        await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
+    await send_long(bot, chat_id, summary_lines, reply_markup=keyboard_markup)
     try:
         await db.set_ui_cache_list(requester_id, cache_kind, account_cache_values)
     except Exception as exc:
@@ -722,7 +684,7 @@ async def cb_report_fb_month(call: CallbackQuery):
     status_msg = await call.message.answer("Готовлю отчёт…")
     try:
         if kind == "campaigns":
-            await _send_fb_campaign_report(call.message.chat.id, month)
+            await _send_fb_campaign_report(call.message.chat.id, month, call.from_user.id)
         elif kind == "accounts":
             await _send_fb_account_report(call.message.chat.id, month, call.from_user.id)
         else:
@@ -871,7 +833,7 @@ async def on_today(message: Message):
         await _send_period_report(message.chat.id, message.from_user.id, "Сегодня")
     except Exception as e:
         logger.exception(e)
-        await message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+        await message.answer(f"Не удалось построить отчёт: <code>{safe(f"{type(e).__name__}: {e}")}</code>", parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("yesterday"))
@@ -884,7 +846,7 @@ async def on_yesterday(message: Message):
         await _send_period_report(message.chat.id, message.from_user.id, "Вчера", None, True)
     except Exception as e:
         logger.exception(e)
-        await message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+        await message.answer(f"Не удалось построить отчёт: <code>{safe(f"{type(e).__name__}: {e}")}</code>", parse_mode=ParseMode.HTML)
 
 
 @dp.message(Command("week"))
@@ -897,12 +859,15 @@ async def on_week(message: Message):
         await _send_period_report(message.chat.id, message.from_user.id, "Последние 7 дней", 7)
     except Exception as e:
         logger.exception(e)
-        await message.answer(f"Не удалось построить отчёт: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+        await message.answer(f"Не удалось построить отчёт: <code>{safe(f"{type(e).__name__}: {e}")}</code>", parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(F.data.startswith("report:f:"))
 async def cb_report_filter(call: CallbackQuery):
-    _, _, key = call.data.split(":", 2)
+    parts = callback_parts(call, 3)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, _, key = parts
     if key == "clear":
         await db.clear_report_filter(call.from_user.id)
         await call.message.answer("Фильтры сброшены")
@@ -918,7 +883,10 @@ async def cb_report_filter(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("report:clear:"))
 async def cb_report_clear_chip(call: CallbackQuery):
-    _, _, which = call.data.split(":", 2)
+    parts = callback_parts(call, 3)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, _, which = parts
     cur = await db.get_report_filter(call.from_user.id)
     offer = cur.get('offer')
     creative = cur.get('creative')
@@ -1006,7 +974,7 @@ async def cb_report_pick_team(call: CallbackQuery):
     users = await db.list_users()
     me = next((u for u in users if u["telegram_id"] == call.from_user.id), None)
     role = (me or {}).get("role", "buyer")
-    if call.from_user.id in ADMIN_IDS:
+    if await is_admin(call.from_user.id):
         role = "admin"
     teams = await db.list_teams()
     allowed_team_ids: set[int] = set()
@@ -1092,7 +1060,7 @@ async def cb_report_pick_buyer(call: CallbackQuery):
             await call.message.answer("Выберите байера:", reply_markup=_buyers_picker_kb(buyers, page=0))
     except Exception as e:
         logger.exception(e)
-        await call.message.answer(f"Ошибка списка байеров: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+        await call.message.answer(f"Ошибка списка байеров: <code>{safe(f"{type(e).__name__}: {e}")}</code>", parse_mode=ParseMode.HTML)
     finally:
         try:
             await call.answer()
@@ -1169,7 +1137,7 @@ async def cb_report_pick_offer(call: CallbackQuery):
             await call.message.answer("Выберите оффер:", reply_markup=_offers_picker_kb(offers))
     except Exception as e:
         logger.exception(e)
-        await call.message.answer(f"Ошибка списка офферов: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+        await call.message.answer(f"Ошибка списка офферов: <code>{safe(f"{type(e).__name__}: {e}")}</code>", parse_mode=ParseMode.HTML)
     finally:
         try:
             await call.answer()
@@ -1207,7 +1175,7 @@ async def cb_report_pick_creative(call: CallbackQuery):
             await call.message.answer("Выберите крео:", reply_markup=_creatives_picker_kb(creatives))
     except Exception as e:
         logger.exception(e)
-        await call.message.answer(f"Ошибка списка крео: <code>{type(e).__name__}: {e}</code>", parse_mode=ParseMode.HTML)
+        await call.message.answer(f"Ошибка списка крео: <code>{safe(f"{type(e).__name__}: {e}")}</code>", parse_mode=ParseMode.HTML)
     finally:
         try:
             await call.answer()
@@ -1217,7 +1185,10 @@ async def cb_report_pick_creative(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("report:set:"))
 async def cb_report_set_filter_quick(call: CallbackQuery):
-    _, _, which, value = call.data.split(":", 3)
+    parts = callback_parts(call, 4)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, _, which, value = parts
     # Resolve index-based selections from UI cache
     if which == 'offer_idx':
         try:
@@ -1262,7 +1233,7 @@ async def cb_report_set_filter_quick(call: CallbackQuery):
     if buyer_id:
         bid = int(buyer_id)
         bu = next((u for u in users if int(u['telegram_id']) == bid), None)
-        bcap = f"@{bu['username']}" if bu and bu.get('username') else (bu.get('full_name') if bu and bu.get('full_name') else str(bid))
+        bcap = safe(f"@{bu['username']}" if bu and bu.get('username') else (bu.get('full_name') if bu and bu.get('full_name') else bid))
         parts.append(f"buyer=<code>{bcap}</code>")
     if team_id:
         tid = int(team_id)
@@ -1312,7 +1283,10 @@ async def cb_kpi_mine(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("kpi:set:"))
 async def cb_kpi_set(call: CallbackQuery):
     """Handle KPI set callback."""
-    _, _, which = call.data.split(":", 2)
+    parts = callback_parts(call, 3)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, _, which = parts
     await db.set_pending_action(call.from_user.id, f"kpi:set:{which}", None)
     await call.message.answer("Пришлите целевое число депозитов (целое), либо '-' чтобы очистить")
     await call.answer()

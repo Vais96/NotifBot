@@ -1,34 +1,56 @@
 """Alias management handlers."""
 
+import hashlib
+
 from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import ADMIN_IDS, bot, dp
+from .common import is_admin
 from .. import db
+from ..utils.html import safe
 from ..handlers.users import _resolve_user_id
+
+
+def _alias_token(alias: str) -> str:
+    """Short stable key for callback_data (64-byte limit): the alias itself may be up to 255 chars."""
+    return hashlib.sha1(alias.encode("utf-8")).hexdigest()[:16]
+
+
+async def _alias_from_callback(call: CallbackQuery) -> str | None:
+    """`alias:<op>:<token>` -> alias name; old buttons carried the raw alias, accept that too."""
+    parts = (call.data or "").split(":", 2)
+    if len(parts) != 3 or not parts[2]:
+        return None
+    token = parts[2]
+    for row in await db.list_aliases():
+        if token in (_alias_token(row["alias"]), row["alias"]):
+            return row["alias"]
+    return None
 
 
 def alias_row_controls(alias: str, buyer_id: int | None, lead_id: int | None) -> InlineKeyboardMarkup:
     """Build alias row controls keyboard."""
+    token = _alias_token(alias)
     buttons = [
-        [InlineKeyboardButton(text="Set buyer", callback_data=f"alias:setbuyer:{alias}")],
-        [InlineKeyboardButton(text="Set lead", callback_data=f"alias:setlead:{alias}")],
-        [InlineKeyboardButton(text="Delete", callback_data=f"alias:delete:{alias}")],
+        [InlineKeyboardButton(text="Set buyer", callback_data=f"alias:setbuyer:{token}")],
+        [InlineKeyboardButton(text="Set lead", callback_data=f"alias:setlead:{token}")],
+        [InlineKeyboardButton(text="Delete", callback_data=f"alias:delete:{token}")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 async def _send_aliases(chat_id: int, actor_id: int):
     """Send list of aliases."""
-    if actor_id not in ADMIN_IDS:
+    if not await is_admin(actor_id):
         return await bot.send_message(chat_id, "Только для админов")
     rows = await db.list_aliases()
     if not rows:
         await bot.send_message(chat_id, "Алиасов пока нет.")
     else:
         for r in rows:
-            text = f"<b>{r['alias']}</b> → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}"
+            text = f"<b>{safe(r['alias'])}</b> → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}"
             await bot.send_message(chat_id, text, reply_markup=alias_row_controls(r['alias'], r['buyer_id'], r['lead_id']))
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Добавить алиас", callback_data="alias:new")]])
     await bot.send_message(chat_id, "Управление алиасами:", reply_markup=kb)
@@ -37,14 +59,14 @@ async def _send_aliases(chat_id: int, actor_id: int):
 @dp.message(Command("aliases"))
 async def on_aliases(message: Message):
     """Handle /aliases command."""
-    if message.from_user.id not in ADMIN_IDS:
+    if not await is_admin(message.from_user.id):
         return await message.answer("Только для админов")
     rows = await db.list_aliases()
     if not rows:
         await message.answer("Алиасов пока нет.")
     else:
         for r in rows:
-            text = f"<b>{r['alias']}</b> → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}"
+            text = f"<b>{safe(r['alias'])}</b> → buyer={r['buyer_id'] or '-'} | lead={r['lead_id'] or '-'}"
             await message.answer(text, reply_markup=alias_row_controls(r['alias'], r['buyer_id'], r['lead_id']))
     # кнопка для создания нового алиаса
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Добавить алиас", callback_data="alias:new")]])
@@ -54,7 +76,7 @@ async def on_aliases(message: Message):
 @dp.message(Command("setalias"))
 async def on_setalias(message: Message):
     """Handle /setalias command."""
-    if message.from_user.id not in ADMIN_IDS:
+    if not await is_admin(message.from_user.id):
         return await message.answer("Только для админов")
     # /setalias <alias> buyer=<id|-> lead=<id|->
     parts = message.text.split()
@@ -77,7 +99,7 @@ async def on_setalias(message: Message):
 @dp.message(Command("delalias"))
 async def on_delalias(message: Message):
     """Handle /delalias command."""
-    if message.from_user.id not in ADMIN_IDS:
+    if not await is_admin(message.from_user.id):
         return await message.answer("Только для админов")
     parts = message.text.split()
     if len(parts) != 2:
@@ -89,7 +111,7 @@ async def on_delalias(message: Message):
 @dp.callback_query(F.data == "alias:new")
 async def cb_alias_new(call: CallbackQuery):
     """Handle alias creation callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
     await db.set_pending_action(call.from_user.id, "alias:new", None)
     await call.message.answer("Введите имя алиаса (префикс campaign_name до _):")
@@ -99,31 +121,37 @@ async def cb_alias_new(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("alias:setbuyer:"))
 async def cb_alias_setbuyer(call: CallbackQuery):
     """Handle alias buyer setting callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    alias = call.data.split(":", 2)[2]
+    alias = await _alias_from_callback(call)
+    if alias is None:
+        return await call.answer("Устаревшая кнопка", show_alert=True)
     await db.set_pending_action(call.from_user.id, f"alias:setbuyer:{alias}", None)
-    await call.message.answer(f"Пришлите Telegram ID или @username покупателя для алиаса {alias}, или '-' чтобы убрать")
+    await call.message.answer(f"Пришлите Telegram ID или @username покупателя для алиаса {safe(alias)}, или '-' чтобы убрать")
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("alias:setlead:"))
 async def cb_alias_setlead(call: CallbackQuery):
     """Handle alias lead setting callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    alias = call.data.split(":", 2)[2]
+    alias = await _alias_from_callback(call)
+    if alias is None:
+        return await call.answer("Устаревшая кнопка", show_alert=True)
     await db.set_pending_action(call.from_user.id, f"alias:setlead:{alias}", None)
-    await call.message.answer(f"Пришлите Telegram ID или @username лида для алиаса {alias}, или '-' чтобы убрать")
+    await call.message.answer(f"Пришлите Telegram ID или @username лида для алиаса {safe(alias)}, или '-' чтобы убрать")
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("alias:delete:"))
 async def cb_alias_delete(call: CallbackQuery):
     """Handle alias deletion callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    alias = call.data.split(":", 2)[2]
+    alias = await _alias_from_callback(call)
+    if alias is None:
+        return await call.answer("Устаревшая кнопка", show_alert=True)
     await db.delete_alias(alias)
-    await call.message.edit_text(f"Алиас {alias} удалён")
+    await call.message.edit_text(f"Алиас {safe(alias)} удалён")
     await call.answer()

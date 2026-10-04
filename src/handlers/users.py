@@ -5,31 +5,17 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import ADMIN_IDS, bot, dp
+from .common import STALE_BUTTON, callback_parts, is_admin
+from ..constants import Role
 from .. import db
+from ..utils.html import safe
+from ..utils.formatting import chunk_lines
 from loguru import logger
 from ..handlers.domains import notify_helper_domain_access
 
 
-def _chunk_text_lines(lines: list[str], *, max_chars: int = 3500) -> list[str]:
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
-    for line in lines:
-        line_len = len(line) + 1
-        if current and current_len + line_len > max_chars:
-            chunks.append("\n".join(current))
-            current = [line]
-            current_len = line_len
-            continue
-        current.append(line)
-        current_len += line_len
-    if current:
-        chunks.append("\n".join(current))
-    return chunks
-
-
 async def _send_users_chunked(chat_id: int, lines: list[str]) -> None:
-    chunks = _chunk_text_lines(lines)
+    chunks = chunk_lines(lines) if lines else []
     if not chunks:
         await bot.send_message(chat_id, "Пользователи:\n(пусто)")
         return
@@ -41,7 +27,7 @@ async def _send_users_chunked(chat_id: int, lines: list[str]) -> None:
 
 async def _send_whoami(chat_id: int, user_id: int, username: str | None):
     """Send whoami message."""
-    await bot.send_message(chat_id, f"Ваш Telegram ID: <code>{user_id}</code>\nUsername: @{username or '-'}")
+    await bot.send_message(chat_id, f"Ваш Telegram ID: <code>{user_id}</code>\nUsername: @{safe(username or '-')}")
 
 
 async def _send_list_users(chat_id: int, actor_id: int):
@@ -49,7 +35,7 @@ async def _send_list_users(chat_id: int, actor_id: int):
     users = await db.list_users()
     my = next((u for u in users if u["telegram_id"] == actor_id), None)
     my_role = my["role"] if my else "buyer"
-    if actor_id in ADMIN_IDS:
+    if await is_admin(actor_id):
         my_role = "admin"
     my_team = my.get("team_id") if my else None
     lead_team_ids = await db.list_user_lead_teams(actor_id) if my_role not in ("admin", "head") else []
@@ -69,9 +55,9 @@ async def _send_list_users(chat_id: int, actor_id: int):
     lines = []
     for u in visible:
         display_role = u['role']
-        if u['telegram_id'] == actor_id and actor_id in ADMIN_IDS:
+        if u['telegram_id'] == actor_id and await is_admin(actor_id):
             display_role = 'admin'
-        lines.append(f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} — {u['full_name'] or ''} | role={display_role} | team={u['team_id'] or '-'}")
+        lines.append(f"• <code>{u['telegram_id']}</code> @{safe(u['username'] or '-')} — {safe(u['full_name'] or '')} | role={display_role} | team={u['team_id'] or '-'}")
     await _send_users_chunked(chat_id, lines)
 
 
@@ -80,7 +66,7 @@ async def _send_list_routes(chat_id: int, actor_id: int):
     users = await db.list_users()
     my = next((u for u in users if u["telegram_id"] == actor_id), None)
     my_role = (my or {}).get("role", "buyer")
-    if actor_id in ADMIN_IDS:
+    if await is_admin(actor_id):
         my_role = "admin"
     my_team = (my or {}).get("team_id")
     lead_team_ids = await db.list_user_lead_teams(actor_id) if my_role not in ("admin", "head") else []
@@ -99,7 +85,7 @@ async def _send_list_routes(chat_id: int, actor_id: int):
     if not vis:
         return await bot.send_message(chat_id, "Правил нет или нет доступа")
     def fmt(r):
-        return f"#{r['id']} -> <code>{r['user_id']}</code> (@{r['username'] or '-'}) | offer={r['offer'] or '*'} | geo={r['country'] or '*'} | src={r['source'] or '*'} | prio={r['priority']}"
+        return f"#{r['id']} -> <code>{r['user_id']}</code> (@{safe(r['username'] or '-')}) | offer={safe(r['offer'] or '*')} | geo={safe(r['country'] or '*')} | src={safe(r['source'] or '*')} | prio={r['priority']}"
     await bot.send_message(chat_id, "Правила:\n" + "\n".join(fmt(r) for r in vis))
 
 
@@ -123,13 +109,13 @@ def _user_row_controls(u: dict) -> InlineKeyboardMarkup:
 
 async def _send_manage(chat_id: int, actor_id: int):
     """Send manage interface for admins."""
-    if actor_id not in ADMIN_IDS:
+    if not await is_admin(actor_id):
         return await bot.send_message(chat_id, "Только для админов")
     users = await db.list_users()
     if not users:
         return await bot.send_message(chat_id, "Пока нет пользователей, попросите нажать /start")
     for u in users[:25]:
-        text = f"<b>{u['full_name'] or '-'}</b> @{u['username'] or '-'}\nID: <code>{u['telegram_id']}</code>\nRole: <code>{u['role']}</code> | Team: <code>{u['team_id'] or '-'}</code> | Active: <code>{'yes' if u['is_active'] else 'no'}</code>"
+        text = f"<b>{safe(u['full_name'] or '-')}</b> @{safe(u['username'] or '-')}\nID: <code>{u['telegram_id']}</code>\nRole: <code>{u['role']}</code> | Team: <code>{u['team_id'] or '-'}</code> | Active: <code>{'yes' if u['is_active'] else 'no'}</code>"
         await bot.send_message(chat_id, text, reply_markup=_user_row_controls(u))
 
 
@@ -159,7 +145,7 @@ async def on_list_users(message: Message):
     # get my role and team
     my = next((u for u in users if u["telegram_id"] == me), None)
     my_role = my["role"] if my else "buyer"
-    if me in ADMIN_IDS:
+    if await is_admin(me):
         my_role = "admin"
     lead_team_ids = await db.list_user_lead_teams(me) if my_role not in ("admin", "head") else []
     for u in users:
@@ -177,9 +163,9 @@ async def on_list_users(message: Message):
     rendered = []
     for u in visible:
         display_role = u['role']
-        if u['telegram_id'] == me and me in ADMIN_IDS:
+        if u['telegram_id'] == me and await is_admin(me):
             display_role = 'admin'
-        rendered.append(f"• <code>{u['telegram_id']}</code> @{u['username'] or '-'} — {u['full_name'] or ''} | role={display_role} | team={u['team_id'] or '-'}")
+        rendered.append(f"• <code>{u['telegram_id']}</code> @{safe(u['username'] or '-')} — {safe(u['full_name'] or '')} | role={display_role} | team={u['team_id'] or '-'}")
     await _send_users_chunked(message.chat.id, rendered)
 
 
@@ -187,7 +173,7 @@ async def on_list_users(message: Message):
 async def on_manage(message: Message):
     """Handle /manage command - admin user management."""
     # Only admins (для MVP) видят управление
-    if message.from_user.id not in ADMIN_IDS:
+    if not await is_admin(message.from_user.id):
         return await message.answer("Только для админов")
     await _send_manage(message.chat.id, message.from_user.id)
 
@@ -199,7 +185,7 @@ async def on_list_routes(message: Message):
     users = await db.list_users()
     my = next((u for u in users if u["telegram_id"] == me), None)
     my_role = (my or {}).get("role", "buyer")
-    if me in ADMIN_IDS:
+    if await is_admin(me):
         my_role = "admin"
     my_team = (my or {}).get("team_id")
     lead_team_ids = await db.list_user_lead_teams(me) if my_role not in ("admin", "head") else []
@@ -220,7 +206,7 @@ async def on_list_routes(message: Message):
     if not vis:
         return await message.answer("Правил нет или нет доступа")
     def fmt(r):
-        return f"#{r['id']} -> <code>{r['user_id']}</code> (@{r['username'] or '-'}) | offer={r['offer'] or '*'} | geo={r['country'] or '*'} | src={r['source'] or '*'} | prio={r['priority']}"
+        return f"#{r['id']} -> <code>{r['user_id']}</code> (@{safe(r['username'] or '-')}) | offer={safe(r['offer'] or '*')} | geo={safe(r['country'] or '*')} | src={safe(r['source'] or '*')} | prio={r['priority']}"
     await message.answer("Правила:\n" + "\n".join(fmt(r) for r in vis))
 
 
@@ -247,7 +233,7 @@ async def on_add_rule(message: Message):
         my = next((u for u in users if u["telegram_id"] == me), None)
         my_role = (my or {}).get("role", "buyer")
         my_team = (my or {}).get("team_id")
-        if my_role not in ("admin", "head") and me not in ADMIN_IDS:
+        if my_role not in ("admin", "head") and not await is_admin(me):
             return await message.answer("Недостаточно прав (нужна роль admin/head)")
         if my_role == "head":
             target = next((u for u in users if u["telegram_id"] == user_id), None)
@@ -263,7 +249,7 @@ async def on_add_rule(message: Message):
 @dp.message(Command("setrole"))
 async def on_set_role(message: Message):
     """Handle /setrole command."""
-    if message.from_user.id not in ADMIN_IDS:
+    if not await is_admin(message.from_user.id):
         return await message.answer("Только для админов")
     # /setrole <telegram_id> <buyer|lead|head|admin|mentor>
     parts = message.text.split()
@@ -282,9 +268,12 @@ async def on_set_role(message: Message):
 @dp.callback_query(F.data.startswith("role:"))
 async def cb_set_role(call: CallbackQuery):
     """Handle role change callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    _, uid, role = call.data.split(":", 2)
+    parts = (call.data or "").split(":", 2)
+    if len(parts) != 3 or not parts[1].lstrip("-").isdigit() or parts[2] not in {r.value for r in Role}:
+        return await call.answer("Устаревшая кнопка", show_alert=True)
+    _, uid, role = parts
     await db.set_user_role(int(uid), role)
     u = await db.get_user(int(uid))
     if u and u.get("team_id") is not None:
@@ -305,9 +294,12 @@ async def cb_set_role(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("active:"))
 async def cb_set_active(call: CallbackQuery):
     """Handle active status change callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    _, uid, active = call.data.split(":", 2)
+    parts = callback_parts(call, 3)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, uid, active = parts
     await db.set_user_active(int(uid), bool(int(active)))
     u = await db.get_user(int(uid))
     if u:
@@ -320,9 +312,12 @@ async def cb_set_active(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("user:delete:"))
 async def cb_delete_user(call: CallbackQuery):
     """Handle user deletion callback (soft delete / deactivate)."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    _, __, uid = call.data.split(":", 2)
+    parts = callback_parts(call, 3)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, __, uid = parts
     target_id = int(uid)
     try:
         await db.deactivate_user(target_id)

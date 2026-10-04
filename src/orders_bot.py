@@ -9,8 +9,11 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 from loguru import logger
 
 from .config import settings
+from .handlers.common import is_admin
 from . import db, underdog
 from .telegram_rate_limit import make_bot
+from .utils.formatting import chunk_lines
+from .utils.html import safe
 
 orders_bot = make_bot(settings.orders_bot_token or settings.telegram_bot_token)
 orders_dp = Dispatcher()
@@ -39,7 +42,7 @@ async def on_orders_start(message: Message) -> None:
     user = message.from_user
     await db.upsert_user(user.id, user.username, user.full_name)
     await db.set_orders_opt_out(user.id, False)
-    keyboard = build_menu_keyboard(is_admin=user.id in settings.admins)
+    keyboard = build_menu_keyboard(is_admin=await is_admin(user.id))
     await message.answer(
         "Привет! Ты зарегистрирован в боте заказов. Ищу все невручённые заказы…",
         reply_markup=keyboard,
@@ -77,7 +80,7 @@ async def on_orders_start(message: Message) -> None:
 
 @orders_dp.message(Command(commands=["menu", "help"]))
 async def show_orders_menu(message: Message) -> None:
-    is_admin = message.from_user.id in settings.admins
+    admin = await is_admin(message.from_user.id)
     lines = [
         "📋 <b>Меню бота заказов</b>",
         "\n",
@@ -85,7 +88,7 @@ async def show_orders_menu(message: Message) -> None:
         "• /menu — показать это меню",
         "• /adminstatus — проверить, видит ли бот вас как админа",
     ]
-    if not is_admin:
+    if not admin:
         lines.append(
             "\n⚠️ Чтобы получать служебные уведомления, сначала нажмите /start и разрешите боту писать вам."
         )
@@ -98,13 +101,13 @@ async def show_orders_menu(message: Message) -> None:
                 "• /unsubscribe <telegram_id> — отписать пользователя от бота",
             ]
         )
-    await message.answer("\n".join(lines), reply_markup=build_menu_keyboard(is_admin=is_admin))
+    await message.answer("\n".join(lines), reply_markup=build_menu_keyboard(is_admin=admin))
 
 
 @orders_dp.message(Command("adminstatus"))
 async def show_admin_status(message: Message) -> None:
-    is_admin = message.from_user.id in settings.admins
-    if is_admin:
+    admin = await is_admin(message.from_user.id)
+    if admin:
         await message.answer(
             "✅ Ты в списке админов. Служебные уведомления будут приходить сюда.",
             reply_markup=build_menu_keyboard(is_admin=True),
@@ -134,30 +137,12 @@ def _format_user_line(user: Dict[str, Any]) -> str:
     if isinstance(created_at, datetime):
         created_text = created_at.strftime("%d.%m.%Y")
     status = "✅" if int(user.get("is_active") or 0) == 1 else "🚫"
-    return f"{status} {full_name} ({username}) — ID {telegram_id}, с {created_text}"
-
-
-def _chunk_lines(lines: Iterable[str], *, max_chars: int = 3500) -> List[str]:
-    chunks: List[str] = []
-    current: List[str] = []
-    current_len = 0
-    for line in lines:
-        line_len = len(line) + 1  # account for newline
-        if current and current_len + line_len > max_chars:
-            chunks.append("\n".join(current))
-            current = [line]
-            current_len = line_len
-            continue
-        current.append(line)
-        current_len += line_len
-    if current:
-        chunks.append("\n".join(current))
-    return chunks
+    return f"{status} {safe(full_name)} ({safe(username)}) — ID {telegram_id}, с {created_text}"
 
 
 @orders_dp.message(Command("users"))
 async def list_bot_users(message: Message) -> None:
-    if message.from_user.id not in settings.admins:
+    if not await is_admin(message.from_user.id):
         await message.answer("❌ Эта команда доступна только администраторам.")
         return
     users = await db.list_users()
@@ -175,7 +160,7 @@ async def list_bot_users(message: Message) -> None:
     header_lines.append("")
 
     user_lines = [_format_user_line(user) for user in active_users]
-    user_chunks = _chunk_lines(user_lines, max_chars=3500)
+    user_chunks = chunk_lines(user_lines) if user_lines else []
     total_parts = len(user_chunks)
 
     if not user_chunks:
@@ -203,7 +188,7 @@ async def list_bot_users(message: Message) -> None:
 
 @orders_dp.message(Command("unsubscribe"))
 async def unsubscribe_user(message: Message) -> None:
-    if message.from_user.id not in settings.admins:
+    if not await is_admin(message.from_user.id):
         await message.answer("❌ Эта команда доступна только администраторам.")
         return
     text = message.text or ""
@@ -217,7 +202,7 @@ async def unsubscribe_user(message: Message) -> None:
     except ValueError:
         await message.answer("ID должен быть числом.")
         return
-    if target_id in settings.admins:
+    if await is_admin(target_id):
         await message.answer("Нельзя отписать администратора через эту команду.")
         return
     user = await db.get_user(target_id)
@@ -228,7 +213,7 @@ async def unsubscribe_user(message: Message) -> None:
     username = _format_username(user.get("username"))
     full_name = user.get("full_name") or "—"
     await message.answer(
-        f"🚫 Пользователь {full_name} ({username}) (ID {target_id}) помечен как отписанный. "
+        f"🚫 Пользователь {safe(full_name)} ({safe(username)}) (ID {target_id}) помечен как отписанный. "
         "Он сможет вернуться, снова нажав /start.",
         reply_markup=build_menu_keyboard(is_admin=True),
     )

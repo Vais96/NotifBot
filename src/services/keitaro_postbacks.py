@@ -7,6 +7,9 @@ import html
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from ..constants import SALE_STATUSES
+from ..utils.numbers import parse_decimal, round_money
+
 
 MEANINGFUL_KEYS = (
     "profit", "payout", "revenue", "conversion_revenue",
@@ -19,9 +22,7 @@ MEANINGFUL_KEYS = (
     "country", "geo", "source", "traffic_source_name", "traffic_source", "affiliate",
 )
 
-SALE_LIKE_STATUSES = frozenset(
-    {"sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"}
-)
+SALE_LIKE_STATUSES = frozenset(SALE_STATUSES)
 
 
 def is_unexpanded_placeholder(value: Any) -> bool:
@@ -175,10 +176,8 @@ def _html(value: Any, fallback: str = "-") -> str:
 def _format_payout(value: Any) -> str | None:
     if value is None:
         return None
-    try:
-        return str(int(round(float(str(value).replace(",", ".").strip()))))
-    except (OverflowError, TypeError, ValueError):
-        return str(value)
+    amount = parse_decimal(value)
+    return str(round_money(amount)) if amount is not None else str(value)
 
 
 def _format_sale_time(value: Any) -> str | None:

@@ -5,7 +5,9 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import ADMIN_IDS, bot, dp
+from .common import STALE_BUTTON, callback_parts, is_admin
 from .. import db
+from ..utils.html import safe
 from ..handlers.users import _resolve_user_id
 from loguru import logger
 
@@ -27,7 +29,7 @@ def _mentor_add_controls() -> InlineKeyboardMarkup:
 
 async def _send_mentors(chat_id: int, actor_id: int):
     """Send mentors management interface."""
-    if actor_id not in ADMIN_IDS:
+    if not await is_admin(actor_id):
         return await bot.send_message(chat_id, "Только для админов")
     users = await db.list_users()
     mentors = [u for u in users if u.get("role") == "mentor"]
@@ -36,7 +38,7 @@ async def _send_mentors(chat_id: int, actor_id: int):
     await bot.send_message(chat_id, "Менторы:", reply_markup=_mentor_add_controls())
     for u in mentors[:25]:
         text = (
-            f"<b>{u['full_name'] or '-'}</b> @{u['username'] or '-'}\n"
+            f"<b>{safe(u['full_name'] or '-')}</b> @{safe(u['username'] or '-')}\n"
             f"ID: <code>{u['telegram_id']}</code>\n"
             f"Role: <code>{u['role']}</code> | Team: <code>{u['team_id'] or '-'}</code> | Active: <code>{'yes' if u['is_active'] else 'no'}</code>"
         )
@@ -57,7 +59,7 @@ def _mentor_subs_keyboard(mentor_id: int, teams: list[dict], followed: set[int])
 @dp.callback_query(F.data == "mentor:add")
 async def cb_mentor_add(call: CallbackQuery):
     """Handle mentor add callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
     await db.set_pending_action(call.from_user.id, "mentor:add", None)
     await call.message.answer("Пришлите Telegram ID или @username пользователя, которому назначить роль mentor")
@@ -67,9 +69,12 @@ async def cb_mentor_add(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("mentor:unset:"))
 async def cb_mentor_unset(call: CallbackQuery):
     """Handle mentor unset callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    _, _, mid = call.data.split(":", 2)
+    parts = callback_parts(call, 3)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, _, mid = parts
     try:
         mid_i = int(mid)
         await db.set_user_role(mid_i, "buyer")
@@ -82,9 +87,12 @@ async def cb_mentor_unset(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("mentor:subs:"))
 async def cb_mentor_subs(call: CallbackQuery):
     """Handle mentor subscriptions callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    _, _, mid = call.data.split(":", 2)
+    parts = callback_parts(call, 3)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, _, mid = parts
     mid_i = int(mid)
     teams = await db.list_teams()
     followed = set(await db.list_mentor_teams(mid_i))
@@ -96,9 +104,12 @@ async def cb_mentor_subs(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("mentor:toggle:"))
 async def cb_mentor_toggle(call: CallbackQuery):
     """Handle mentor toggle subscription callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    _, _, mid, tid = call.data.split(":", 3)
+    parts = callback_parts(call, 4)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, _, mid, tid = parts
     mid_i = int(mid)
     tid_i = int(tid)
     followed = set(await db.list_mentor_teams(mid_i))
@@ -122,7 +133,7 @@ async def cb_mentor_toggle(call: CallbackQuery):
 @dp.callback_query(F.data == "mentor:back")
 async def cb_mentor_back(call: CallbackQuery):
     """Handle mentor back callback."""
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
     await _send_mentors(call.message.chat.id, call.from_user.id)
     await call.answer()
@@ -131,7 +142,7 @@ async def cb_mentor_back(call: CallbackQuery):
 @dp.message(Command("addmentor"))
 async def on_add_mentor(message: Message):
     """Handle /addmentor command."""
-    if message.from_user.id not in ADMIN_IDS:
+    if not await is_admin(message.from_user.id):
         return await message.answer("Только для админов")
     # /addmentor <telegram_id|@username>
     parts = message.text.split()
@@ -149,7 +160,7 @@ async def on_add_mentor(message: Message):
 @dp.message(Command("mentor_follow"))
 async def on_mentor_follow(message: Message):
     """Handle /mentor_follow command."""
-    if message.from_user.id not in ADMIN_IDS:
+    if not await is_admin(message.from_user.id):
         return await message.answer("Только для админов")
     # /mentor_follow <mentor_id> <team_id>
     parts = message.text.split()
@@ -168,7 +179,7 @@ async def on_mentor_follow(message: Message):
 @dp.message(Command("mentor_unfollow"))
 async def on_mentor_unfollow(message: Message):
     """Handle /mentor_unfollow command."""
-    if message.from_user.id not in ADMIN_IDS:
+    if not await is_admin(message.from_user.id):
         return await message.answer("Только для админов")
     # /mentor_unfollow <mentor_id> <team_id>
     parts = message.text.split()

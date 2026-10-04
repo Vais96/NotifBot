@@ -5,6 +5,8 @@ from datetime import datetime, date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Set
 
+from .utils.numbers import parse_decimal
+
 
 HEADER_ALIASES: Dict[str, List[str]] = {
     "account_name": ["названиеаккаунта", "идентификатораккаунта", "accountname", "account"],
@@ -115,13 +117,13 @@ def parse_fb_csv(content: bytes) -> ParsedFbCsv:
         geo = _detect_geo(campaign_name)
         currency_raw = get_value(row, "currency")
         currency = currency_raw.upper() if currency_raw else "USD"
-        spend = _parse_decimal(get_value(row, "spend"))
+        spend = parse_decimal(get_value(row, "spend"))
         impressions = _parse_int(get_value(row, "impressions"))
         clicks = _parse_int(get_value(row, "clicks"))
         leads = _parse_int(get_value(row, "leads"))
         registrations = _parse_int(get_value(row, "registrations"))
-        ctr_csv = _parse_decimal(get_value(row, "ctr"))
-        cpc_csv = _parse_decimal(get_value(row, "cpc"))
+        ctr_csv = parse_decimal(get_value(row, "ctr"))
+        cpc_csv = parse_decimal(get_value(row, "cpc"))
 
         if not any([day_date, spend, impressions, clicks, leads, registrations]):
             continue
@@ -261,21 +263,8 @@ def _normalize_str(value: Optional[str]) -> Optional[str]:
     return value or None
 
 
-def _parse_decimal(value: Optional[str]) -> Optional[Decimal]:
-    if value is None:
-        return None
-    text = value.replace("\u00a0", " ").replace(" ", "")
-    if not text:
-        return None
-    text = text.replace(",", ".")
-    try:
-        return Decimal(text)
-    except (InvalidOperation, ValueError):
-        return None
-
-
 def _parse_int(value: Optional[str]) -> Optional[int]:
-    dec_value = _parse_decimal(value)
+    dec_value = parse_decimal(value)
     if dec_value is None:
         return None
     try:
@@ -310,12 +299,26 @@ def _compute_cpc(spend: Optional[Decimal], clicks: Optional[int], fallback: Opti
     return fallback
 
 
+# ISO 3166-1 alpha-2 + "UK" (used in campaign names instead of GB). 3-letter tokens (PWA, CPA, USD, CBO…) are not geos.
+_GEO_CODES = frozenset(
+    """
+    AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ
+    CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR
+    GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO
+    JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR
+    MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO
+    RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV
+    TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW UK
+    """.split()
+)
+
+
 def _detect_geo(campaign_name: Optional[str]) -> Optional[str]:
     if not campaign_name:
         return None
     tokens = campaign_name.replace("-", "_").split("_")
     for token in tokens:
         cleaned = "".join(ch for ch in token if ch.isalpha())
-        if 2 <= len(cleaned) <= 3 and cleaned.isupper():
+        if cleaned.isupper() and cleaned in _GEO_CODES:
             return cleaned
     return None

@@ -1,12 +1,17 @@
 import asyncio
 import aiomysql
-from typing import Optional, List, Dict, Any, Tuple, Iterable
+from contextlib import asynccontextmanager
+from typing import Optional, List, Dict, Any, AsyncIterator, Tuple, Iterable, Sequence
 from datetime import date, timedelta, datetime, timezone
 from loguru import logger
-from .config import settings
+from .config import secret, settings
+from .constants import SALE_STATUSES, Role
+from .utils.numbers import extract_decimal
 import urllib.parse
 import ssl
 import json
+import re
+from decimal import Decimal
 
 _pool: Optional[aiomysql.Pool] = None
 _pool_lock = asyncio.Lock()
@@ -243,6 +248,159 @@ SCHEMA_SQL = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # Facebook CSV ingestion (fb_*), referenced by services/fb_uploads.py and reports
+    """
+    CREATE TABLE IF NOT EXISTS fb_csv_uploads (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        uploaded_by BIGINT NULL,
+        buyer_id BIGINT NULL,
+        original_filename VARCHAR(255) NOT NULL,
+        period_start DATE NULL,
+        period_end DATE NULL,
+        row_count INT NOT NULL DEFAULT 0,
+        has_totals TINYINT(1) NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_fb_csv_upload_user  FOREIGN KEY (uploaded_by) REFERENCES tg_users (telegram_id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_csv_upload_buyer FOREIGN KEY (buyer_id)   REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fb_csv_rows (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        upload_id BIGINT NOT NULL,
+        account_name VARCHAR(255) NULL,
+        campaign_name VARCHAR(255) NOT NULL,
+        adset_name VARCHAR(255) NULL,
+        ad_name VARCHAR(255) NULL,
+        day_date DATE NULL,
+        currency VARCHAR(16) NULL,
+        spend DECIMAL(18,6) NULL,
+        impressions BIGINT NULL,
+        clicks BIGINT NULL,
+        leads INT NULL,
+        registrations INT NULL,
+        cpc DECIMAL(18,6) NULL,
+        ctr DECIMAL(18,6) NULL,
+        is_total TINYINT(1) NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_fb_rows_upload (upload_id),
+        INDEX idx_fb_rows_campaign_day (campaign_name, day_date),
+        INDEX idx_fb_rows_account_day (account_name, day_date),
+        CONSTRAINT fk_fb_rows_upload FOREIGN KEY (upload_id) REFERENCES fb_csv_uploads (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fb_campaign_daily (
+        campaign_name VARCHAR(255) NOT NULL,
+        day_date DATE NOT NULL,
+        account_name VARCHAR(255) NULL,
+        buyer_id BIGINT NULL,
+        geo VARCHAR(16) NULL,
+        spend DECIMAL(18,6) NULL,
+        impressions BIGINT NULL,
+        clicks BIGINT NULL,
+        registrations INT NULL,
+        leads INT NULL,
+        ftd INT NULL,
+        revenue DECIMAL(18,6) NULL,
+        ctr DECIMAL(18,6) NULL,
+        cpc DECIMAL(18,6) NULL,
+        roi DECIMAL(18,6) NULL,
+        ftd_rate DECIMAL(18,6) NULL,
+        status_id BIGINT NULL,
+        flag_id BIGINT NULL,
+        upload_id BIGINT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (campaign_name, day_date),
+        INDEX idx_fb_daily_buyer_day (buyer_id, day_date),
+        INDEX idx_fb_daily_account_day (account_name, day_date),
+        CONSTRAINT fk_fb_daily_upload FOREIGN KEY (upload_id) REFERENCES fb_csv_uploads (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_daily_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fb_campaign_totals (
+        campaign_name VARCHAR(255) PRIMARY KEY,
+        account_name VARCHAR(255) NULL,
+        buyer_id BIGINT NULL,
+        geo VARCHAR(16) NULL,
+        spend DECIMAL(18,6) NULL,
+        impressions BIGINT NULL,
+        clicks BIGINT NULL,
+        registrations INT NULL,
+        leads INT NULL,
+        ftd INT NULL,
+        revenue DECIMAL(18,6) NULL,
+        ctr DECIMAL(18,6) NULL,
+        cpc DECIMAL(18,6) NULL,
+        roi DECIMAL(18,6) NULL,
+        ftd_rate DECIMAL(18,6) NULL,
+        status_id BIGINT NULL,
+        flag_id BIGINT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_fb_totals_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fb_accounts (
+        account_name VARCHAR(255) PRIMARY KEY,
+        buyer_id BIGINT NULL,
+        owner_since DATE NULL,
+        owner_until DATE NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_fb_accounts_buyer FOREIGN KEY (buyer_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fb_statuses (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        code VARCHAR(32) NOT NULL UNIQUE,
+        title VARCHAR(128) NOT NULL,
+        description TEXT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fb_flags (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        code VARCHAR(32) NOT NULL UNIQUE,
+        title VARCHAR(128) NOT NULL,
+        severity INT NOT NULL DEFAULT 0,
+        description TEXT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fb_campaign_state (
+        campaign_name VARCHAR(255) PRIMARY KEY,
+        status_id BIGINT NULL,
+        flag_id BIGINT NULL,
+        buyer_comment TEXT NULL,
+        lead_comment TEXT NULL,
+        updated_by BIGINT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_fb_state_status FOREIGN KEY (status_id) REFERENCES fb_statuses (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_state_flag FOREIGN KEY (flag_id) REFERENCES fb_flags (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_state_user FOREIGN KEY (updated_by) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fb_campaign_history (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        campaign_name VARCHAR(255) NOT NULL,
+        changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        changed_by BIGINT NULL,
+        old_status_id BIGINT NULL,
+        new_status_id BIGINT NULL,
+        old_flag_id BIGINT NULL,
+        new_flag_id BIGINT NULL,
+        note TEXT NULL,
+        CONSTRAINT fk_fb_hist_status_old FOREIGN KEY (old_status_id) REFERENCES fb_statuses (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_hist_status_new FOREIGN KEY (new_status_id) REFERENCES fb_statuses (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_hist_flag_old FOREIGN KEY (old_flag_id) REFERENCES fb_flags (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_hist_flag_new FOREIGN KEY (new_flag_id) REFERENCES fb_flags (id) ON DELETE SET NULL,
+        CONSTRAINT fk_fb_hist_user FOREIGN KEY (changed_by) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
     # Underdog items delivered to a chat: guards against re-sending when the telegram-sent PATCH failed
     """
     CREATE TABLE IF NOT EXISTS tg_underdog_sent (
@@ -319,6 +477,38 @@ async def _ensure_fb_reference_data(conn: aiomysql.Connection) -> None:
                 ],
             )
 
+_ROW_ALIAS_INSERT_RE = re.compile(r"^(.*?\bVALUES\s*)(\([^()]*\))(\s+AS\s+new\b.*)$", re.S | re.I)
+
+
+async def _executemany_rows(cur: aiomysql.Cursor, sql: str, rows: Iterable[Sequence[Any]], chunk: int = 500) -> None:
+    """executemany for `INSERT ... VALUES (...) AS new ON DUPLICATE KEY UPDATE`: one multi-row statement per chunk.
+
+    aiomysql batches only `VALUES (...) ON DUPLICATE`, the row-alias form would run row by row.
+    """
+    match = _ROW_ALIAS_INSERT_RE.match(sql)
+    assert match, "expected INSERT ... VALUES (...) AS new ..."
+    prefix, row_sql, suffix = match.groups()
+    rows = [tuple(r) for r in rows]
+    for i in range(0, len(rows), chunk):
+        part = rows[i : i + chunk]
+        await cur.execute(prefix + ",".join([row_sql] * len(part)) + suffix, [v for r in part for v in r])
+
+
+@asynccontextmanager
+async def _transaction() -> AsyncIterator[aiomysql.Cursor]:
+    """Cursor inside BEGIN/COMMIT; ROLLBACK on any exception (pool connections are autocommit otherwise)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        await conn.begin()
+        try:
+            async with conn.cursor() as cur:
+                yield cur
+            await conn.commit()
+        except BaseException:
+            await conn.rollback()
+            raise
+
+
 async def _apply_schema(conn: aiomysql.Connection) -> None:
     async with conn.cursor() as cur:
         for i, stmt in enumerate(SCHEMA_SQL, start=1):
@@ -360,7 +550,7 @@ async def _apply_schema(conn: aiomysql.Connection) -> None:
 
 
 async def _create_pool() -> aiomysql.Pool:
-    params = _parse_mysql_dsn(settings.database_url)
+    params = _parse_mysql_dsn(secret(settings.database_url))
     last_error: Optional[Exception] = None
     for attempt in range(1, 6):
         pool: Optional[aiomysql.Pool] = None
@@ -724,10 +914,10 @@ async def set_contractor_telegram(
             await cur.execute(
                 """
                 INSERT INTO tg_underdog_contractor_telegram (contractor_id, telegram_username, telegram_id)
-                VALUES (%s, %s, %s)
+                VALUES (%s, %s, %s) AS new
                 ON DUPLICATE KEY UPDATE
-                    telegram_username = COALESCE(VALUES(telegram_username), telegram_username),
-                    telegram_id = COALESCE(VALUES(telegram_id), telegram_id)
+                    telegram_username = COALESCE(new.telegram_username, tg_underdog_contractor_telegram.telegram_username),
+                    telegram_id = COALESCE(new.telegram_id, tg_underdog_contractor_telegram.telegram_id)
                 """,
                 (str(contractor_id).strip(), telegram_username or None, telegram_id),
             )
@@ -740,10 +930,10 @@ async def upsert_user(telegram_id: int, username: Optional[str], full_name: Opti
             await cur.execute(
                 """
                 INSERT INTO tg_users(telegram_id, username, full_name)
-                VALUES(%s, %s, %s)
+                VALUES(%s, %s, %s) AS new
                 ON DUPLICATE KEY UPDATE
-                    username = COALESCE(NULLIF(VALUES(username), ''), username),
-                    full_name = COALESCE(NULLIF(VALUES(full_name), ''), full_name)
+                    username = COALESCE(NULLIF(new.username, ''), tg_users.username),
+                    full_name = COALESCE(NULLIF(new.full_name, ''), tg_users.full_name)
                 """,
                 (telegram_id, username, full_name)
             )
@@ -805,8 +995,8 @@ async def set_helper_buyer(helper_id: int, buyer_id: int) -> None:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO tg_helper_buyer (helper_id, buyer_id) VALUES (%s, %s)
-                ON DUPLICATE KEY UPDATE buyer_id = VALUES(buyer_id)
+                INSERT INTO tg_helper_buyer (helper_id, buyer_id) VALUES (%s, %s) AS new
+                ON DUPLICATE KEY UPDATE buyer_id = new.buyer_id
                 """,
                 (helper_id, buyer_id),
             )
@@ -826,11 +1016,9 @@ async def remove_helper_and_promote_to_buyer(helper_id: int) -> None:
     - снимает привязку к buyer
     - переводит роль в buyer
     """
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("DELETE FROM tg_helper_buyer WHERE helper_id=%s", (helper_id,))
-            await cur.execute("UPDATE tg_users SET role='buyer' WHERE telegram_id=%s", (helper_id,))
+    async with _transaction() as cur:
+        await cur.execute("DELETE FROM tg_helper_buyer WHERE helper_id=%s", (helper_id,))
+        await cur.execute("UPDATE tg_users SET role='buyer' WHERE telegram_id=%s", (helper_id,))
 
 
 async def deactivate_user(telegram_id: int) -> None:
@@ -839,11 +1027,9 @@ async def deactivate_user(telegram_id: int) -> None:
     - is_active=0
     - удаляем helper-привязки (как helper и как buyer)
     """
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("UPDATE tg_users SET is_active=0 WHERE telegram_id=%s", (telegram_id,))
-            await cur.execute("DELETE FROM tg_helper_buyer WHERE helper_id=%s OR buyer_id=%s", (telegram_id, telegram_id))
+    async with _transaction() as cur:
+        await cur.execute("UPDATE tg_users SET is_active=0 WHERE telegram_id=%s", (telegram_id,))
+        await cur.execute("DELETE FROM tg_helper_buyer WHERE helper_id=%s OR buyer_id=%s", (telegram_id, telegram_id))
 
 
 async def list_helpers_by_buyer(buyer_id: int) -> List[int]:
@@ -950,6 +1136,10 @@ async def list_teams() -> List[Dict[str, Any]]:
             await cur.execute("SELECT id, name, created_at FROM tg_teams ORDER BY id DESC")
             return await cur.fetchall()
 
+def _norm_username(value: Any) -> str:
+    return str(value or "").strip().lstrip("@").lower()
+
+
 async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
     """Persist one trusted employee-directory snapshot atomically.
 
@@ -966,10 +1156,22 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
             try:
                 await cur.execute("SELECT telegram_id, username FROM tg_users")
                 rows = await cur.fetchall() or []
-                username_to_id = {
-                    str(row["username"]).strip().lstrip("@").lower(): int(row["telegram_id"])
-                    for row in rows if row.get("username")
-                }
+                username_to_id: Dict[str, int] = {}
+                ambiguous_usernames: set[str] = set()
+                for row in rows:
+                    key = _norm_username(row.get("username"))
+                    if not key:
+                        continue
+                    other = username_to_id.get(key)
+                    if other is not None and other != int(row["telegram_id"]):
+                        logger.warning(
+                            "Duplicate username in tg_users, not matching it: @{} -> {} and {}",
+                            key, other, int(row["telegram_id"]),
+                        )
+                        ambiguous_usernames.add(key)
+                    username_to_id[key] = int(row["telegram_id"])
+                for key in ambiguous_usernames:
+                    username_to_id.pop(key, None)
                 known_ids = {int(row["telegram_id"]) for row in rows}
                 await cur.execute("SELECT id, name FROM tg_teams")
                 team_rows = await cur.fetchall() or []
@@ -1008,8 +1210,7 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                     uid = getattr(person, "telegram_id", None)
                     if uid:
                         return int(uid)
-                    username = getattr(person, "username", None)
-                    return username_to_id.get(str(username).lower()) if username else None
+                    return username_to_id.get(_norm_username(getattr(person, "username", None)))
 
                 resolved: List[Tuple[Any, int]] = []
                 external_id_to_telegram_id: Dict[str, int] = {}
@@ -1025,9 +1226,9 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                             (uid, getattr(person, "username", None), getattr(person, "full_name", None)),
                         )
                         known_ids.add(uid)
-                        username = getattr(person, "username", None)
-                        if username:
-                            username_to_id[str(username).lower()] = uid
+                        username = _norm_username(getattr(person, "username", None))
+                        if username and username not in ambiguous_usernames:
+                            username_to_id[username] = uid
                     resolved.append((person, uid))
                     external_id = getattr(person, "external_id", None)
                     if external_id:
@@ -1065,12 +1266,11 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                         external_id = getattr(person, "helper_for_external_id", None)
                         buyer_id = external_id_to_telegram_id.get(str(external_id)) if external_id else None
                     if buyer_id is None:
-                        username = getattr(person, "helper_for_username", None)
-                        buyer_id = username_to_id.get(str(username).lower()) if username else None
+                        buyer_id = username_to_id.get(_norm_username(getattr(person, "helper_for_username", None)))
                     if buyer_id and int(buyer_id) in known_ids:
                         await cur.execute(
-                            "INSERT INTO tg_helper_buyer(helper_id, buyer_id) VALUES(%s, %s) "
-                            "ON DUPLICATE KEY UPDATE buyer_id=VALUES(buyer_id)",
+                            "INSERT INTO tg_helper_buyer(helper_id, buyer_id) VALUES(%s, %s) AS new "
+                            "ON DUPLICATE KEY UPDATE buyer_id=new.buyer_id",
                             (helper_id, int(buyer_id)),
                         )
                         stats["helper_links_updated"] += 1
@@ -1119,12 +1319,27 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                                 (team_id, user_id),
                             )
 
+                # Directory users without observer teams lose stale extra-lead rows. Mentors keep theirs:
+                # cb_set_role(mentor) writes tg_team_leads_extra manually.
+                former_observer_ids = sorted(
+                    uid for person, uid in resolved
+                    if uid not in observer_user_ids and getattr(person, "role", None) != Role.MENTOR
+                )
+                if former_observer_ids:
+                    placeholders = ",".join(["%s"] * len(former_observer_ids))
+                    await cur.execute(
+                        f"DELETE FROM tg_team_leads_extra WHERE user_id IN ({placeholders})",
+                        tuple(former_observer_ids),
+                    )
+                    if cur.rowcount:
+                        logger.info("Removed {} stale extra-lead rows (no observer teams in Admin)", cur.rowcount)
+
                 for team_id, user_id in desired_extra.items():
                     await cur.execute(
                         """
                         INSERT INTO tg_team_leads_extra(team_id, user_id)
-                        VALUES(%s, %s)
-                        ON DUPLICATE KEY UPDATE user_id=VALUES(user_id), created_at=CURRENT_TIMESTAMP
+                        VALUES(%s, %s) AS new
+                        ON DUPLICATE KEY UPDATE user_id=new.user_id, created_at=CURRENT_TIMESTAMP
                         """,
                         (team_id, user_id),
                     )
@@ -1161,8 +1376,8 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
                     await cur.execute(
                         """
                         INSERT INTO tg_aliases(alias, buyer_id, lead_id)
-                        VALUES(%s, %s, NULL)
-                        ON DUPLICATE KEY UPDATE buyer_id=VALUES(buyer_id)
+                        VALUES(%s, %s, NULL) AS new
+                        ON DUPLICATE KEY UPDATE buyer_id=new.buyer_id
                         """,
                         (alias, uid),
                     )
@@ -1181,8 +1396,8 @@ async def set_team_lead_override(team_id: int, user_id: int) -> None:
             await cur.execute(
                 """
                 INSERT INTO tg_team_leads_extra(team_id, user_id)
-                VALUES(%s, %s)
-                ON DUPLICATE KEY UPDATE user_id=VALUES(user_id), created_at=CURRENT_TIMESTAMP
+                VALUES(%s, %s) AS new
+                ON DUPLICATE KEY UPDATE user_id=new.user_id, created_at=CURRENT_TIMESTAMP
                 """,
                 (team_id, user_id)
             )
@@ -1349,11 +1564,7 @@ async def claim_keitaro_sale_postback(
             # The stable click-only key may not exist for events processed by older
             # releases. Keep the new key, but suppress delivery if that click was
             # already logged as a sale.
-            sale_like = (
-                "sale", "approved", "approve", "confirmed", "confirm",
-                "purchase", "purchased", "paid", "success",
-            )
-            placeholders = ",".join(["%s"] * len(sale_like))
+            placeholders = ",".join(["%s"] * len(SALE_STATUSES))
             await cur.execute(
                 f"""
                 SELECT 1
@@ -1362,23 +1573,37 @@ async def claim_keitaro_sale_postback(
                   AND LOWER(TRIM(COALESCE(status, ''))) IN ({placeholders})
                 LIMIT 1
                 """,
-                (normalized_click_id, *sale_like),
+                (normalized_click_id, *SALE_STATUSES),
             )
             return (await cur.fetchone()) is None
+
+
+def _first_present(raw: Dict[str, Any], *keys: str) -> Any:
+    """First value that is not None/"" (a payout of 0 is a real value, unlike `a or b`)."""
+    for key in keys:
+        value = raw.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _parse_payout(value: Any) -> Optional[Decimal]:
+    """'1.5 USD' -> 1.5, '1,234.56' -> 1234.56, '{conversion.revenue}' / garbage -> None (event is still logged)."""
+    text = str(value).strip() if value is not None else ""
+    if not text or (text.startswith("{") and text.endswith("}")):
+        return None
+    amount = extract_decimal(value)
+    if amount is None:
+        logger.warning("Unparseable postback payout {!r}, storing NULL", value)
+    return amount
 
 
 async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int], inbound_id: Optional[int] = None) -> None:
     """Insert into tg_events; a retry of the same inbound postback (unique inbound_id) is a no-op."""
     pool = await init_pool()
-    payload = {
-        "status": raw.get("status") or raw.get("action"),
-        "offer": raw.get("offer") or raw.get("offer_name") or raw.get("campaign") or raw.get("campaign_name"),
-        "country": raw.get("country") or raw.get("geo"),
-        "source": raw.get("source") or raw.get("traffic_source_name") or raw.get("traffic_source") or raw.get("affiliate") or raw.get("traffic_source_id"),
-        "payout": raw.get("payout") or raw.get("revenue") or raw.get("conversion_revenue") or raw.get("profit") or raw.get("conversion_profit") or raw.get("conversion_cost"),
-        "currency": raw.get("currency") or raw.get("revenue_currency") or raw.get("payout_currency"),
-        "clickid": raw.get("clickid") or raw.get("click_id") or raw.get("subid") or raw.get("sub_id") or raw.get("tid")
-    }
+    payout = _first_present(
+        raw, "payout", "revenue", "conversion_revenue", "profit", "conversion_profit", "conversion_cost"
+    )
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -1388,17 +1613,19 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int], inbound_
                 ON DUPLICATE KEY UPDATE id = id
                 """,
                 (
-                    payload["status"], payload["offer"], payload["country"], payload["source"],
-                    (
-                        (lambda v: (lambda s: (float(s) if s not in (None, "") else None))(
-                            (str(v).replace(",", ".").strip()) if not (isinstance(v, str) and v.strip().startswith("{") and v.strip().endswith("}")) else None
-                        ))(payload["payout"]) if (payload["payout"] not in (None, "")) else None
-                    )
-                    if True else None,
-                    payload["currency"], payload["clickid"], json.dumps(raw, ensure_ascii=False), routed_user_id,
+                    _first_present(raw, "status", "action"),
+                    _first_present(raw, "offer", "offer_name", "campaign", "campaign_name"),
+                    _first_present(raw, "country", "geo"),
+                    _first_present(raw, "source", "traffic_source_name", "traffic_source", "affiliate", "traffic_source_id"),
+                    _parse_payout(payout),
+                    _first_present(raw, "currency", "revenue_currency", "payout_currency"),
+                    _first_present(raw, "clickid", "click_id", "subid", "sub_id", "tid"),
+                    json.dumps(raw, ensure_ascii=False),
+                    routed_user_id,
                     inbound_id,
-                )
+                ),
             )
+
 
 async def enqueue_inbound_postback(raw: Dict[str, Any], fingerprint: Optional[str]) -> int:
     pool = await init_pool()
@@ -1483,9 +1710,6 @@ async def requeue_inbound_postbacks(
             return found
 
 
-SALE_LIKE_STATUSES: Tuple[str, ...] = (
-    "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
-)
 
 
 def _today_utc_window() -> Tuple[datetime, datetime]:
@@ -1523,11 +1747,11 @@ _USER_SALES_TODAY_WHERE = f"""
 async def _user_sales_today_scalar(select_expr: str, user_id: int) -> Any:
     pool = await init_pool()
     start, end = _today_utc_window()
-    placeholders = ",".join(["%s"] * len(SALE_LIKE_STATUSES))
+    placeholders = ",".join(["%s"] * len(SALE_STATUSES))
     query = f"SELECT {select_expr} FROM tg_events" + _USER_SALES_TODAY_WHERE.format(placeholders=placeholders)
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(query, (user_id, user_id, start, end, *SALE_LIKE_STATUSES))
+            await cur.execute(query, (user_id, user_id, start, end, *SALE_STATUSES))
             row = await cur.fetchone()
             return row[0] if row else None
 
@@ -1556,7 +1780,7 @@ async def today_alias_sales(alias: str) -> Tuple[int, float]:
         return 0, 0.0
     pool = await init_pool()
     start, end = _today_utc_window()
-    placeholders = ",".join(["%s"] * len(SALE_LIKE_STATUSES))
+    placeholders = ",".join(["%s"] * len(SALE_STATUSES))
     query = f"""
         SELECT COUNT(*), COALESCE(SUM(payout), 0)
         FROM tg_events
@@ -1566,7 +1790,7 @@ async def today_alias_sales(alias: str) -> Tuple[int, float]:
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(query, (normalized, start, end, *SALE_LIKE_STATUSES))
+            await cur.execute(query, (normalized, start, end, *SALE_STATUSES))
             row = await cur.fetchone()
     if not row:
         return 0, 0.0
@@ -1580,7 +1804,7 @@ async def sales_by_user_between(start: datetime, end: datetime) -> List[Dict[str
     can decide whether to show them.
     """
     pool = await init_pool()
-    placeholders = ",".join(["%s"] * len(SALE_LIKE_STATUSES))
+    placeholders = ",".join(["%s"] * len(SALE_STATUSES))
     query = f"""
         SELECT routed_user_id, COUNT(*), COALESCE(SUM(payout), 0)
         FROM tg_events
@@ -1590,7 +1814,7 @@ async def sales_by_user_between(start: datetime, end: datetime) -> List[Dict[str
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(query, (start, end, *SALE_LIKE_STATUSES))
+            await cur.execute(query, (start, end, *SALE_STATUSES))
             rows = await cur.fetchall()
     return [
         {
@@ -1640,10 +1864,10 @@ async def set_kpi(user_id: int, daily_goal: Optional[int] = None, weekly_goal: O
             await cur.execute(
                 """
                 INSERT INTO tg_kpi(user_id, daily_goal, weekly_goal)
-                VALUES(%s, %s, %s)
+                VALUES(%s, %s, %s) AS new
                 ON DUPLICATE KEY UPDATE
-                    daily_goal=VALUES(daily_goal),
-                    weekly_goal=VALUES(weekly_goal)
+                    daily_goal=new.daily_goal,
+                    weekly_goal=new.weekly_goal
                 """,
                 (user_id, daily_goal, weekly_goal)
             )
@@ -1665,10 +1889,7 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
             "total": 0,
         }
     pool = await init_pool()
-    sale_like = (
-        "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
-    )
-    placeholders_status = ",".join(["%s"] * len(sale_like))
+    placeholders_status = ",".join(["%s"] * len(SALE_STATUSES))
     # If filter_user_ids provided, intersect with user_ids
     if filter_user_ids is not None:
         base_set = set(user_ids)
@@ -1676,7 +1897,7 @@ async def aggregate_sales(user_ids: List[int], start, end, offer: Optional[str] 
     placeholders_users = ",".join(["%s"] * len(user_ids)) if user_ids else "NULL"
     offer_filter_sql = ""
     creative_filter_sql = ""
-    params: list[Any] = [start, end, *sale_like, *user_ids]
+    params: list[Any] = [start, end, *SALE_STATUSES, *user_ids]
     if offer:
         offer_filter_sql = " AND (offer = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer_name')) = %s OR JSON_UNQUOTE(JSON_EXTRACT(raw, '$.offer')) = %s)"
         params += [offer, offer, offer]
@@ -1835,10 +2056,7 @@ async def trend_daily_sales(user_ids: List[int], days: int = 7) -> List[Tuple[st
     """Return list of (YYYY-MM-DD, count) for last N days (UTC)."""
     from datetime import datetime, timezone, timedelta
     pool = await init_pool()
-    sale_like = (
-        "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
-    )
-    placeholders_status = ",".join(["%s"] * len(sale_like))
+    placeholders_status = ",".join(["%s"] * len(SALE_STATUSES))
     placeholders_users = ",".join(["%s"] * len(user_ids)) if user_ids else "NULL"
     now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     start = now - timedelta(days=days-1)
@@ -1853,7 +2071,7 @@ async def trend_daily_sales(user_ids: List[int], days: int = 7) -> List[Tuple[st
                 GROUP BY d
                 ORDER BY d ASC
             """
-            params = [start, now, *sale_like, *user_ids] if user_ids else [start, now, *sale_like]
+            params = [start, now, *SALE_STATUSES, *user_ids] if user_ids else [start, now, *SALE_STATUSES]
             await cur.execute(query, params)
             rows = await cur.fetchall()
             return [(str(r[0]), int(r[1])) for r in rows]
@@ -1873,8 +2091,8 @@ async def set_report_filter(user_id: int, offer: Optional[str], creative: Option
             await cur.execute(
                 """
                 INSERT INTO tg_report_filters(user_id, offer, creative, buyer_id, team_id)
-                VALUES(%s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE offer=VALUES(offer), creative=VALUES(creative), buyer_id=VALUES(buyer_id), team_id=VALUES(team_id)
+                VALUES(%s, %s, %s, %s, %s) AS new
+                ON DUPLICATE KEY UPDATE offer=new.offer, creative=new.creative, buyer_id=new.buyer_id, team_id=new.team_id
                 """,
                 (user_id, offer, creative, buyer_id, team_id)
             )
@@ -1959,16 +2177,16 @@ async def upsert_keitaro_campaigns(rows: List[Dict[str, Any]]) -> int:
         async with conn.cursor() as cur:
             await conn.begin()
             try:
-                await cur.executemany(
+                await _executemany_rows(cur,
                     """
                     INSERT INTO keitaro_campaigns(id, name, prefix, alias_key, source_domain, target_domain, updated_at)
-                    VALUES(%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    VALUES(%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP) AS new
                     ON DUPLICATE KEY UPDATE
-                        name=VALUES(name),
-                        prefix=VALUES(prefix),
-                        alias_key=VALUES(alias_key),
-                        source_domain=VALUES(source_domain),
-                        target_domain=VALUES(target_domain),
+                        name=new.name,
+                        prefix=new.prefix,
+                        alias_key=new.alias_key,
+                        source_domain=new.source_domain,
+                        target_domain=new.target_domain,
                         updated_at=CURRENT_TIMESTAMP
                     """,
                     payload,
@@ -2079,17 +2297,13 @@ async def list_creatives_for_users(user_ids: List[int], offer: Optional[str] = N
             return [str(r[0]) for r in rows if r and r[0]]
 
 async def set_ui_cache_list(user_id: int, kind: str, values: List[str]) -> None:
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            # clear old
-            await cur.execute("DELETE FROM tg_ui_cache WHERE user_id=%s AND kind=%s", (user_id, kind))
-            # insert new
-            for i, val in enumerate(values):
-                await cur.execute(
-                    "INSERT INTO tg_ui_cache(user_id, kind, idx, value) VALUES(%s, %s, %s, %s)",
-                    (user_id, kind, i, val)
-                )
+    async with _transaction() as cur:
+        await cur.execute("DELETE FROM tg_ui_cache WHERE user_id=%s AND kind=%s", (user_id, kind))
+        if values:
+            await cur.executemany(
+                "INSERT INTO tg_ui_cache(user_id, kind, idx, value) VALUES(%s, %s, %s, %s)",
+                [(user_id, kind, i, val) for i, val in enumerate(values)],
+            )
 
 async def get_ui_cache_value(user_id: int, kind: str, idx: int) -> Optional[str]:
     pool = await init_pool()
@@ -2175,8 +2389,8 @@ async def set_pending_action(admin_id: int, action: str, target_user_id: Optiona
             await cur.execute(
                 """
                 INSERT INTO tg_pending_actions(admin_id, action, target_user_id)
-                VALUES(%s, %s, %s)
-                ON DUPLICATE KEY UPDATE action=VALUES(action), target_user_id=VALUES(target_user_id), created_at=CURRENT_TIMESTAMP
+                VALUES(%s, %s, %s) AS new
+                ON DUPLICATE KEY UPDATE action=new.action, target_user_id=new.target_user_id, created_at=CURRENT_TIMESTAMP
                 """,
                 (admin_id, action, target_user_id)
             )
@@ -2321,13 +2535,13 @@ async def upsert_fb_accounts(records: List[Dict[str, Any]]) -> None:
         )
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.executemany(
+            await _executemany_rows(cur,
                 """
                 INSERT INTO fb_accounts(account_name, buyer_id, owner_since)
-                VALUES(%s, %s, %s)
+                VALUES(%s, %s, %s) AS new
                 ON DUPLICATE KEY UPDATE
-                    buyer_id=VALUES(buyer_id),
-                    owner_since=COALESCE(owner_since, VALUES(owner_since)),
+                    buyer_id=new.buyer_id,
+                    owner_since=COALESCE(fb_accounts.owner_since, new.owner_since),
                     owner_until=NULL,
                     updated_at=CURRENT_TIMESTAMP,
                     is_active=1
@@ -2367,32 +2581,32 @@ async def upsert_fb_campaign_daily(records: List[Dict[str, Any]]) -> None:
         )
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.executemany(
+            await _executemany_rows(cur,
                 """
                 INSERT INTO fb_campaign_daily(
                     campaign_name, day_date, account_name, buyer_id, geo,
                     spend, impressions, clicks, registrations, leads, ftd, revenue,
                     ctr, cpc, roi, ftd_rate, status_id, flag_id, upload_id
                 )
-                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
                 ON DUPLICATE KEY UPDATE
-                    account_name=VALUES(account_name),
-                    buyer_id=VALUES(buyer_id),
-                    geo=VALUES(geo),
-                    spend=VALUES(spend),
-                    impressions=VALUES(impressions),
-                    clicks=VALUES(clicks),
-                    registrations=VALUES(registrations),
-                    leads=VALUES(leads),
-                    ftd=VALUES(ftd),
-                    revenue=VALUES(revenue),
-                    ctr=VALUES(ctr),
-                    cpc=VALUES(cpc),
-                    roi=VALUES(roi),
-                    ftd_rate=VALUES(ftd_rate),
-                    status_id=VALUES(status_id),
-                    flag_id=VALUES(flag_id),
-                    upload_id=VALUES(upload_id)
+                    account_name=new.account_name,
+                    buyer_id=new.buyer_id,
+                    geo=new.geo,
+                    spend=new.spend,
+                    impressions=new.impressions,
+                    clicks=new.clicks,
+                    registrations=new.registrations,
+                    leads=new.leads,
+                    ftd=new.ftd,
+                    revenue=new.revenue,
+                    ctr=new.ctr,
+                    cpc=new.cpc,
+                    roi=new.roi,
+                    ftd_rate=new.ftd_rate,
+                    status_id=new.status_id,
+                    flag_id=new.flag_id,
+                    upload_id=new.upload_id
                 """,
                 payload,
             )
@@ -2427,30 +2641,30 @@ async def upsert_fb_campaign_totals(records: List[Dict[str, Any]]) -> None:
         )
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.executemany(
+            await _executemany_rows(cur,
                 """
                 INSERT INTO fb_campaign_totals(
                     campaign_name, account_name, buyer_id, geo, spend, impressions, clicks,
                     registrations, leads, ftd, revenue, ctr, cpc, roi, ftd_rate, status_id, flag_id
                 )
-                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
                 ON DUPLICATE KEY UPDATE
-                    account_name=VALUES(account_name),
-                    buyer_id=VALUES(buyer_id),
-                    geo=VALUES(geo),
-                    spend=VALUES(spend),
-                    impressions=VALUES(impressions),
-                    clicks=VALUES(clicks),
-                    registrations=VALUES(registrations),
-                    leads=VALUES(leads),
-                    ftd=VALUES(ftd),
-                    revenue=VALUES(revenue),
-                    ctr=VALUES(ctr),
-                    cpc=VALUES(cpc),
-                    roi=VALUES(roi),
-                    ftd_rate=VALUES(ftd_rate),
-                    status_id=VALUES(status_id),
-                    flag_id=VALUES(flag_id)
+                    account_name=new.account_name,
+                    buyer_id=new.buyer_id,
+                    geo=new.geo,
+                    spend=new.spend,
+                    impressions=new.impressions,
+                    clicks=new.clicks,
+                    registrations=new.registrations,
+                    leads=new.leads,
+                    ftd=new.ftd,
+                    revenue=new.revenue,
+                    ctr=new.ctr,
+                    cpc=new.cpc,
+                    roi=new.roi,
+                    ftd_rate=new.ftd_rate,
+                    status_id=new.status_id,
+                    flag_id=new.flag_id
                 """,
                 payload,
             )
@@ -2490,16 +2704,16 @@ async def upsert_fb_campaign_state(states: List[Dict[str, Any]]) -> None:
         )
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.executemany(
+            await _executemany_rows(cur,
                 """
                 INSERT INTO fb_campaign_state(campaign_name, status_id, flag_id, buyer_comment, lead_comment, updated_by)
-                VALUES(%s, %s, %s, %s, %s, %s)
+                VALUES(%s, %s, %s, %s, %s, %s) AS new
                 ON DUPLICATE KEY UPDATE
-                    status_id=VALUES(status_id),
-                    flag_id=VALUES(flag_id),
-                    buyer_comment=VALUES(buyer_comment),
-                    lead_comment=VALUES(lead_comment),
-                    updated_by=VALUES(updated_by)
+                    status_id=new.status_id,
+                    flag_id=new.flag_id,
+                    buyer_comment=new.buyer_comment,
+                    lead_comment=new.lead_comment,
+                    updated_by=new.updated_by
                 """,
                 payload,
             )
@@ -2564,18 +2778,7 @@ async def fetch_keitaro_campaign_stats(
     end_exclusive = end + timedelta(days=1)
     pool = await init_pool()
     placeholders_names = ",".join(["%s"] * len(names))
-    sale_like = (
-        "sale",
-        "approved",
-        "approve",
-        "confirmed",
-        "confirm",
-        "purchase",
-        "paid",
-        "success",
-        "ftd",
-    )
-    placeholders_status = ",".join(["%s"] * len(sale_like))
+    placeholders_status = ",".join(["%s"] * len(SALE_STATUSES))
     query = f"""
         SELECT
             DATE(fc.conversion_time_utc) AS day_date,
@@ -2593,7 +2796,7 @@ async def fetch_keitaro_campaign_stats(
     """
     params: List[Any] = [start, end_exclusive]
     params.extend(names)
-    params.extend(sale_like)
+    params.extend(SALE_STATUSES)
     daily: Dict[Tuple[str, date], Dict[str, Any]] = {}
     totals: Dict[str, Dict[str, Any]] = {}
     async with pool.acquire() as conn:
@@ -2651,19 +2854,7 @@ async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, An
     else:
         month_end = date(normalized.year, normalized.month + 1, 1)
     pool = await init_pool()
-    sale_like = (
-        "sale",
-        "approved",
-        "approve",
-        "confirmed",
-        "confirm",
-        "purchase",
-        "purchased",
-        "paid",
-        "success",
-        "ftd",
-    )
-    placeholders_status = ",".join(["%s"] * len(sale_like))
+    placeholders_status = ",".join(["%s"] * len(SALE_STATUSES))
     query = (
         f"""
         WITH month_data AS (
@@ -2740,7 +2931,7 @@ async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, An
         """
     )
     params: List[Any] = [normalized, month_end, normalized, month_end]
-    params.extend(sale_like)
+    params.extend(SALE_STATUSES)
     params.append(normalized)
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -2751,19 +2942,7 @@ async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, An
 
 async def fetch_fb_monthly_summary(limit: int = 12) -> List[Dict[str, Any]]:
     pool = await init_pool()
-    sale_like = (
-        "sale",
-        "approved",
-        "approve",
-        "confirmed",
-        "confirm",
-        "purchase",
-        "purchased",
-        "paid",
-        "success",
-        "ftd",
-    )
-    placeholders_status = ",".join(["%s"] * len(sale_like))
+    placeholders_status = ",".join(["%s"] * len(SALE_STATUSES))
     query = (
         f"""
         WITH monthly_fb AS (
@@ -2819,7 +2998,7 @@ async def fetch_fb_monthly_summary(limit: int = 12) -> List[Dict[str, Any]]:
     )
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            params: List[Any] = list(sale_like)
+            params: List[Any] = list(SALE_STATUSES)
             params.append(limit)
             await cur.execute(query, tuple(params))
             rows = await cur.fetchall()

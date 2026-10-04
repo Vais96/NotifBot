@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 import httpx
 from loguru import logger
 
-from .config import settings
+from .config import secret, settings
 from . import db
 from .keitaro import parse_campaign_name
 
@@ -18,7 +18,7 @@ _sync_lock = asyncio.Lock()
 def _build_headers() -> Dict[str, str]:
     return {
         "accept": "application/json",
-        "Api-Key": settings.keitaro_api_key,
+        "Api-Key": secret(settings.keitaro_api_key),
     }
 
 

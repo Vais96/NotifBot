@@ -1,8 +1,26 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, field_validator
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
-from typing import List, Optional
+from typing import Any, List, Optional
+
+
+def secret(value: Any) -> str:
+    """Plain string of a SecretStr setting ('' for None) — only where the raw value is actually sent."""
+    if isinstance(value, SecretStr):
+        return value.get_secret_value()
+    return value or ""
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"Env {name} must be an integer, got {raw!r}") from None
 
 _ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 if _ENV_PATH.exists():
@@ -11,12 +29,14 @@ else:
     load_dotenv()
 
 class Settings(BaseModel):
-    telegram_bot_token: str = Field(validation_alias="TELEGRAM_BOT_TOKEN")
-    orders_bot_token: Optional[str] = Field(default=None, validation_alias="ORDERS_BOT_TOKEN")
-    design_bot_token: Optional[str] = Field(default=None, validation_alias="DESIGN_BOT_TOKEN")
-    database_url: str = Field(validation_alias="DATABASE_URL")
+    telegram_bot_token: SecretStr = Field(validation_alias="TELEGRAM_BOT_TOKEN")
+    orders_bot_token: Optional[SecretStr] = Field(default=None, validation_alias="ORDERS_BOT_TOKEN")
+    design_bot_token: Optional[SecretStr] = Field(default=None, validation_alias="DESIGN_BOT_TOKEN")
+    database_url: SecretStr = Field(validation_alias="DATABASE_URL")
     base_url: str = Field(validation_alias="BASE_URL")  # public HTTPS url for webhook
-    webhook_secret_path: str = Field(validation_alias="WEBHOOK_SECRET_PATH", default="/telegram/webhook-secret")
+    webhook_secret_path: str = Field(validation_alias="WEBHOOK_SECRET_PATH", default="/telegram/webhook")
+    # X-Telegram-Bot-Api-Secret-Token for all three bots; empty = webhooks accepted without the header
+    telegram_webhook_secret: Optional[SecretStr] = Field(default=None, validation_alias="TELEGRAM_WEBHOOK_SECRET")
     orders_webhook_path: str = Field(default="/telegram/orders-webhook", validation_alias="ORDERS_WEBHOOK_PATH")
     design_webhook_path: str = Field(default="/telegram/design-webhook", validation_alias="DESIGN_WEBHOOK_PATH")
     admins: List[int] = Field(default_factory=list, validation_alias="ADMINS")
@@ -28,8 +48,8 @@ class Settings(BaseModel):
         validation_alias="UNDERDOG_NOTIFY_ADMIN_USERNAMES",
     )
     port: int = Field(default=8080, validation_alias="PORT")
-    postback_token: str = Field(default="", validation_alias="POSTBACK_TOKEN")
-    keitaro_api_key: str = Field(default="", validation_alias="KEITARO_API_KEY")
+    postback_token: SecretStr = Field(default="", validation_alias="POSTBACK_TOKEN")
+    keitaro_api_key: SecretStr = Field(default="", validation_alias="KEITARO_API_KEY")
     keitaro_base_url: str = Field(default="", validation_alias="KEITARO_BASE_URL")
     youtube_cookies_path: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES_PATH")
     youtube_cookies_raw: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES")
@@ -38,14 +58,14 @@ class Settings(BaseModel):
     youtube_auth_user: Optional[str] = Field(default=None, validation_alias="YTDLP_AUTH_USER")
     underdog_base_url: str = Field(default="https://dashboard.underdog.click", validation_alias="UNDERDOG_BASE_URL")
     underdog_email: str = Field(default="", validation_alias="UNDERDOG_EMAIL")
-    underdog_password: str = Field(default="", validation_alias="UNDERDOG_PASSWORD")
+    underdog_password: SecretStr = Field(default="", validation_alias="UNDERDOG_PASSWORD")
     underdog_token_ttl: int = Field(default=3600, validation_alias="UNDERDOG_TOKEN_TTL")
     # Отдельный Admin API — источник правды по сотрудникам, командам и помощникам.
     new_admin_api_url: str = Field(default="", validation_alias="NEW_ADMIN_API_URL")
     # Kept for the Admin API configuration; employee sync itself uses the machine key.
     new_admin_email: str = Field(default="", validation_alias="NEW_ADMIN_EMAIL")
-    new_admin_password: str = Field(default="", validation_alias="NEW_ADMIN_PASSWORD")
-    new_admin_api_key: str = Field(default="", validation_alias="NEW_ADMIN_API_KEY")
+    new_admin_password: SecretStr = Field(default="", validation_alias="NEW_ADMIN_PASSWORD")
+    new_admin_api_key: SecretStr = Field(default="", validation_alias="NEW_ADMIN_API_KEY")
     new_admin_token_ttl: int = Field(default=3600, validation_alias="NEW_ADMIN_TOKEN_TTL")
     # 3600 = раз в час. 0 выключает синхронизацию.
     new_admin_sync_interval_seconds: int = Field(
@@ -53,7 +73,7 @@ class Settings(BaseModel):
         validation_alias="NEW_ADMIN_SYNC_INTERVAL_SECONDS",
     )
     ads_workspace_api_url: str = Field(default="", validation_alias="ADS_WORKSPACE_API_URL")
-    ads_workspace_token: str = Field(default="", validation_alias="ADS_WORKSPACE_TOKEN")
+    ads_workspace_token: SecretStr = Field(default="", validation_alias="ADS_WORKSPACE_TOKEN")
     # Чат(ы) для рассылки design-уведомлений (группа/канал). Все участники видят сообщение. Через запятую: -100123, -100456
     design_broadcast_chat_ids: List[int] = Field(default_factory=list, validation_alias="DESIGN_BROADCAST_CHAT_IDS")
     # Через сколько часов после назначения напомнить взять таск в работу (по умолчанию 48 = 2 дня)
@@ -81,6 +101,14 @@ class Settings(BaseModel):
         default="UTC",
         validation_alias="DAILY_REVENUE_REPORT_TZ",
     )
+
+    @field_validator("telegram_webhook_secret")
+    @classmethod
+    def _check_webhook_secret(cls, value: Optional[SecretStr]) -> Optional[SecretStr]:
+        # Telegram accepts 1-256 of A-Z a-z 0-9 _ -; a bad value would make set_webhook fail and every update 403
+        if value is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", value.get_secret_value()):
+            raise ValueError("TELEGRAM_WEBHOOK_SECRET: only A-Z a-z 0-9 _ -, 1-256 chars")
+        return value
 
     @classmethod
     def load(cls) -> "Settings":
@@ -119,29 +147,20 @@ class Settings(BaseModel):
         underdog_notify_admins, underdog_notify_admin_usernames = _parse_underdog_notify_admins(
             "UNDERDOG_NOTIFY_ADMINS"
         )
-        design_broadcast = []
-        broadcast_env = os.getenv("DESIGN_BROADCAST_CHAT_IDS", "").strip()
-        if broadcast_env:
-            for part in broadcast_env.split(","):
-                part = part.strip()
-                if part:
-                    try:
-                        design_broadcast.append(int(part))
-                    except ValueError:
-                        pass
         raw = {
             "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
             "ORDERS_BOT_TOKEN": os.getenv("ORDERS_BOT_TOKEN"),
             "DESIGN_BOT_TOKEN": os.getenv("DESIGN_BOT_TOKEN") or os.getenv("DESIGNBOT_TOKEN"),
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
             "BASE_URL": os.getenv("BASE_URL", ""),
-            "WEBHOOK_SECRET_PATH": os.getenv("WEBHOOK_SECRET_PATH", "/telegram/webhook"),
+            "WEBHOOK_SECRET_PATH": os.getenv("WEBHOOK_SECRET_PATH") or cls.model_fields["webhook_secret_path"].default,
+            "TELEGRAM_WEBHOOK_SECRET": os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip() or None,
             "ORDERS_WEBHOOK_PATH": os.getenv("ORDERS_WEBHOOK_PATH", "/telegram/orders-webhook"),
             "DESIGN_WEBHOOK_PATH": os.getenv("DESIGN_WEBHOOK_PATH", "/telegram/design-webhook"),
             "ADMINS": admins,
             "UNDERDOG_NOTIFY_ADMINS": underdog_notify_admins,
             "UNDERDOG_NOTIFY_ADMIN_USERNAMES": underdog_notify_admin_usernames,
-            "PORT": int(os.getenv("PORT", "8080")),
+            "PORT": _env_int("PORT", 8080),
             "POSTBACK_TOKEN": os.getenv("POSTBACK_TOKEN", ""),
             "KEITARO_API_KEY": os.getenv("KEITARO_API_KEY", ""),
             "KEITARO_BASE_URL": os.getenv("KEITARO_BASE_URL", ""),
@@ -153,27 +172,19 @@ class Settings(BaseModel):
             "UNDERDOG_BASE_URL": os.getenv("UNDERDOG_BASE_URL", "https://dashboard.underdog.click"),
             "UNDERDOG_EMAIL": os.getenv("UNDERDOG_EMAIL", ""),
             "UNDERDOG_PASSWORD": os.getenv("UNDERDOG_PASSWORD", ""),
-            "UNDERDOG_TOKEN_TTL": int(os.getenv("UNDERDOG_TOKEN_TTL", "3600")),
+            "UNDERDOG_TOKEN_TTL": _env_int("UNDERDOG_TOKEN_TTL", 3600),
             "NEW_ADMIN_API_URL": os.getenv("NEW_ADMIN_API_URL", ""),
             "NEW_ADMIN_EMAIL": os.getenv("NEW_ADMIN_EMAIL", ""),
             "NEW_ADMIN_PASSWORD": os.getenv("NEW_ADMIN_PASSWORD", ""),
             "NEW_ADMIN_API_KEY": os.getenv("NEW_ADMIN_API_KEY", ""),
-            "NEW_ADMIN_TOKEN_TTL": int(os.getenv("NEW_ADMIN_TOKEN_TTL", "3600")),
-            "NEW_ADMIN_SYNC_INTERVAL_SECONDS": int(
-                os.getenv("NEW_ADMIN_SYNC_INTERVAL_SECONDS", "3600")
-            ),
+            "NEW_ADMIN_TOKEN_TTL": _env_int("NEW_ADMIN_TOKEN_TTL", 3600),
+            "NEW_ADMIN_SYNC_INTERVAL_SECONDS": _env_int("NEW_ADMIN_SYNC_INTERVAL_SECONDS", 3600),
             "ADS_WORKSPACE_API_URL": os.getenv("ADS_WORKSPACE_API_URL", ""),
             "ADS_WORKSPACE_TOKEN": os.getenv("ADS_WORKSPACE_TOKEN", ""),
-            "DESIGN_BROADCAST_CHAT_IDS": design_broadcast,
-            "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": int(
-                os.getenv("DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS", "48")
-            ),
-            "DESIGN_NOTIFY_INTERVAL_SECONDS": int(
-                os.getenv("DESIGN_NOTIFY_INTERVAL_SECONDS", "3600")
-            ),
-            "KEITARO_SYNC_INTERVAL_SECONDS": int(
-                os.getenv("KEITARO_SYNC_INTERVAL_SECONDS", "86400")
-            ),
+            "DESIGN_BROADCAST_CHAT_IDS": _parse_id_list("DESIGN_BROADCAST_CHAT_IDS"),
+            "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": _env_int("DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS", 48),
+            "DESIGN_NOTIFY_INTERVAL_SECONDS": _env_int("DESIGN_NOTIFY_INTERVAL_SECONDS", 3600),
+            "KEITARO_SYNC_INTERVAL_SECONDS": _env_int("KEITARO_SYNC_INTERVAL_SECONDS", 86400),
             "DAILY_REVENUE_REPORT_TIME": os.getenv("DAILY_REVENUE_REPORT_TIME", "23:55").strip(),
             "DAILY_REVENUE_REPORT_TZ": os.getenv("DAILY_REVENUE_REPORT_TZ", "UTC").strip() or "UTC",
         }

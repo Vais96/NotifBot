@@ -4,7 +4,9 @@ from aiogram import F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..dispatcher import ADMIN_IDS, bot, dp
+from .common import STALE_BUTTON, callback_parts, is_admin
 from .. import db
+from ..utils.html import safe
 from loguru import logger
 
 _BUYERS_PER_PAGE = 30
@@ -68,7 +70,7 @@ def _buyer_picker(
 
 async def _send_helpers_list(chat_id: int, actor_id: int):
     """Плашка «Помощники»: список и кнопка добавить."""
-    if actor_id not in ADMIN_IDS:
+    if not await is_admin(actor_id):
         return await bot.send_message(chat_id, "Только для админов")
     rows = await db.list_helpers_with_buyers()
     await bot.send_message(chat_id, "Помощники:", reply_markup=_helper_add_button())
@@ -94,7 +96,7 @@ async def _send_helpers_list(chat_id: int, actor_id: int):
 
 @dp.callback_query(F.data == "helper:add")
 async def cb_helper_add(call: CallbackQuery):
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
     await db.set_pending_action(call.from_user.id, "helper:add", None)
     await call.message.answer(
@@ -106,9 +108,11 @@ async def cb_helper_add(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("helper:setbuyer:"))
 async def cb_helper_set_buyer(call: CallbackQuery):
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
     parts = call.data.split(":")
+    if len(parts) not in (3, 4) or not all(p.lstrip("-").isdigit() for p in parts[2:]):
+        return await call.answer(STALE_BUTTON, show_alert=True)
     helper_id = int(parts[2])
     page = int(parts[3]) if len(parts) > 3 else 0
     buyers = await db.list_users_as_buyer_candidates()
@@ -124,15 +128,17 @@ async def cb_helper_set_buyer(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("helper:assign:"))
 async def cb_helper_assign(call: CallbackQuery):
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
     parts = call.data.split(":")
+    if len(parts) != 4 or not all(p.lstrip("-").isdigit() for p in parts[2:]):
+        return await call.answer(STALE_BUTTON, show_alert=True)
     helper_id = int(parts[2])
     buyer_id = int(parts[3])
     try:
         await db.set_helper_buyer(helper_id, buyer_id)
         buyer = await db.get_user(buyer_id)
-        b_label = f"@{buyer.get('username') or buyer_id}" if buyer else str(buyer_id)
+        b_label = f"@{safe(buyer.get('username') or buyer_id)}" if buyer else str(buyer_id)
         await call.message.answer(f"Помощник <code>{helper_id}</code> привязан к байеру {b_label}.")
     except Exception as e:
         logger.exception("Failed to set helper buyer", helper_id=helper_id, buyer_id=buyer_id, error=e)
@@ -143,9 +149,12 @@ async def cb_helper_assign(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("helper:delete:"))
 async def cb_helper_delete(call: CallbackQuery):
-    if call.from_user.id not in ADMIN_IDS:
+    if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    _, __, helper_id_s = call.data.split(":", 2)
+    parts = callback_parts(call, 3)
+    if not parts:
+        return await call.answer(STALE_BUTTON, show_alert=True)
+    _, __, helper_id_s = parts
     helper_id = int(helper_id_s)
     try:
         await db.remove_helper_and_promote_to_buyer(helper_id)

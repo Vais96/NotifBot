@@ -7,7 +7,7 @@ from typing import Any, Dict, Mapping, Tuple, Optional
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from loguru import logger
-from .config import settings
+from .config import secret, settings
 from .dispatcher import dp, bot, notify_buyer
 from .orders_bot import orders_dp, orders_bot
 from .design_bot import design_dp, design_bot
@@ -226,7 +226,7 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
 def _token_matches(supplied: Any) -> bool:
     if supplied is None:
         return False
-    return hmac.compare_digest(str(supplied).strip(), settings.postback_token)
+    return hmac.compare_digest(str(supplied).strip(), secret(settings.postback_token))
 
 
 def _require_internal_token(authorization: str | None, inline_token: Optional[str] = None) -> None:
@@ -691,13 +691,13 @@ async def on_startup():
         logger.exception(f"DB init failed: {e}")
         raise
     _spawn(_recover_inbound_postbacks(), "inbound-postback-recovery")
+    if not settings.postback_token:
+        logger.warning("POSTBACK_TOKEN is empty: /keitaro/postback and internal endpoints accept requests without auth")
     # set webhook for Telegram
-    secret_path = settings.webhook_secret_path.strip()
-    if not secret_path.startswith("/"):
-        secret_path = "/" + secret_path
-    url = settings.base_url.rstrip("/") + secret_path
+    webhook_secret = secret(settings.telegram_webhook_secret) or None
+    url = settings.base_url.rstrip("/") + WEBHOOK_PATH
     try:
-        await bot.set_webhook(url)
+        await bot.set_webhook(url, secret_token=webhook_secret)
         logger.info("Main Telegram webhook configured")
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
@@ -706,7 +706,7 @@ async def on_startup():
     if orders_token and orders_token != settings.telegram_bot_token:
         orders_url = settings.base_url.rstrip("/") + ORDERS_WEBHOOK_PATH
         try:
-            await orders_bot.set_webhook(orders_url)
+            await orders_bot.set_webhook(orders_url, secret_token=webhook_secret)
             logger.info("Orders Telegram webhook configured")
         except Exception as e:
             logger.error(f"Failed to set orders webhook: {e}")
@@ -740,7 +740,7 @@ async def on_startup():
     if design_token and design_token not in (settings.telegram_bot_token, orders_token):
         design_url = settings.base_url.rstrip("/") + DESIGN_WEBHOOK_PATH
         try:
-            await design_bot.set_webhook(design_url)
+            await design_bot.set_webhook(design_url, secret_token=webhook_secret)
             logger.info("Design Telegram webhook configured")
         except Exception as e:
             logger.error(f"Failed to set design webhook: {e}")
@@ -1005,6 +1005,11 @@ async def _feed_update(dispatcher, bot_instance, update: Update, name: str) -> N
 
 async def _accept_webhook(request: Request, dispatcher, bot_instance, name: str) -> JSONResponse:
     """ACK Telegram immediately; long handlers (yt-dlp, reports, sync) must not trigger Telegram retries."""
+    expected = secret(settings.telegram_webhook_secret)
+    supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token") or ""
+    if expected and not hmac.compare_digest(supplied, expected):
+        logger.warning("{} webhook rejected: bad or missing secret token", name)
+        return JSONResponse({"ok": False}, status_code=403)
     try:
         update = Update.model_validate(await request.json())
     except Exception as e:

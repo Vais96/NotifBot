@@ -4,6 +4,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from ..dispatcher import ADMIN_IDS, dp
+from .common import is_admin
 from .. import db
 from ..handlers.menu import send_user_menu
 
@@ -13,7 +14,7 @@ async def on_start(message: Message):
     """Handle /start command - register user."""
     await db.upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     # Автоповышение роли для ID из ADMINS
-    if message.from_user.id in ADMIN_IDS:
+    if await is_admin(message.from_user.id):
         try:
             await db.set_user_role(message.from_user.id, "admin")
         except Exception:

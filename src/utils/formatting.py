@@ -3,7 +3,7 @@
 import html
 from datetime import date
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from .. import fb_csv
 
@@ -152,3 +152,11 @@ def chunk_lines(lines: List[str], limit: int = 3500) -> List[str]:
     if current:
         messages.append("\n".join(current))
     return messages or [""]
+
+
+async def send_long(bot: Any, chat_id: int, lines_or_text: str | Iterable[str], reply_markup: Any = None, *, limit: int = 3500) -> None:
+    """Send text (or lines) split by lines into Telegram-sized chunks; reply_markup goes on the last chunk."""
+    lines = lines_or_text.split("\n") if isinstance(lines_or_text, str) else list(lines_or_text)
+    chunks = [chunk for chunk in chunk_lines(lines, limit) if chunk.strip()]
+    for idx, chunk in enumerate(chunks):
+        await bot.send_message(chat_id, chunk, reply_markup=reply_markup if idx == len(chunks) - 1 else None)

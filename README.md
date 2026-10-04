@@ -14,10 +14,11 @@ A FastAPI + aiogram bot that receives Keitaro S2S postbacks and notifies the app
 - ORDERS_WEBHOOK_PATH: HTTP path for the orders bot webhook (default `/telegram/orders-webhook`)
 - DATABASE_URL: MySQL connection URL (mysql://user:pass@host:3306/dbname?charset=utf8mb4)
 - BASE_URL: Public HTTPS URL of your deployed app (Railway)
-- WEBHOOK_SECRET_PATH: Secret path for Telegram webhook (e.g. /telegram/secret)
+- WEBHOOK_SECRET_PATH: Secret path for Telegram webhook (default `/telegram/webhook`)
+- TELEGRAM_WEBHOOK_SECRET: Optional secret (A-Z a-z 0-9 _ -, up to 256). When set, all three webhooks are registered with `secret_token` and requests without a matching `X-Telegram-Bot-Api-Secret-Token` header get 403. Empty = no check (as before).
 - ADMINS: Comma-separated Telegram user IDs with admin rights
 - PORT: Port to listen on (Railway provides)
-- POSTBACK_TOKEN: Optional token to validate Keitaro postbacks via Authorization header
+- POSTBACK_TOKEN: Token for Keitaro postbacks and internal endpoints (Authorization header). Empty = no auth; the app logs a warning on startup.
 - KEITARO_API_KEY / KEITARO_BASE_URL: Admin API for campaign/domain lookup (`/checkdomain`)
 - KEITARO_SYNC_INTERVAL_SECONDS: How often to pull new Keitaro domains (default `86400` = daily; `0` disables)
 - NEW_ADMIN_API_URL / NEW_ADMIN_API_KEY: new Admin API and its machine key. The bot reads `GET /users` and synchronizes matched Telegram users, their roles, teams and helper-to-buyer links.

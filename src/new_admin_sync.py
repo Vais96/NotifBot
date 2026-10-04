@@ -11,7 +11,7 @@ import httpx
 from loguru import logger
 
 from . import db
-from .config import settings
+from .config import secret, settings
 
 
 USERS_PATH = "/users"
@@ -270,7 +270,7 @@ async def fetch_employees() -> list[DirectoryEmployee]:
         raise NewAdminSyncError("NEW_ADMIN_API_URL or NEW_ADMIN_API_KEY is not configured")
     base_url = settings.new_admin_api_url.rstrip("/")
     url = base_url + USERS_PATH
-    headers = {"Accept": "application/json", "X-API-Key": settings.new_admin_api_key}
+    headers = {"Accept": "application/json", "X-API-Key": secret(settings.new_admin_api_key)}
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=15.0)) as client:
         response = await client.get(url, headers=headers)
         try:

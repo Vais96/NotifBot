@@ -30,6 +30,8 @@ from aiogram.methods import TelegramMethod
 from aiogram.methods.base import TelegramType
 from loguru import logger
 
+from .config import secret
+
 # Последний HTTP-статус ответа Bot API в рамках текущего запроса метода (устанавливает session).
 _telegram_http_status_ctx: ContextVar[Optional[int]] = ContextVar(
     "telegram_http_status_ctx", default=None
@@ -67,10 +69,10 @@ class StatusCapturingAiohttpSession(AiohttpSession):
         return cast(TelegramType, response.result)
 
 
-def make_bot(token: str) -> Bot:
-    """Bot с HTML по умолчанию и сессией, сохраняющей HTTP-статус (нужен limited_send_message)."""
+def make_bot(token: Any) -> Bot:
+    """Bot с HTML по умолчанию и сессией, сохраняющей HTTP-статус (нужен limited_send_message). token: str | SecretStr."""
     return Bot(
-        token=token,
+        token=secret(token),
         session=StatusCapturingAiohttpSession(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )

@@ -7,7 +7,7 @@ import html
 import httpx
 from loguru import logger
 
-from ..config import settings
+from ..config import secret, settings
 
 ADS_KEY_ROLES = frozenset({"buyer", "lead", "mentor", "head", "admin"})
 
@@ -70,7 +70,7 @@ def format_ads_key_message(payload: dict) -> str:
 
 async def request_ads_key(telegram_id: int, label: str, *, rotate: bool = False) -> dict:
     base = (settings.ads_workspace_api_url or "").rstrip("/")
-    token = settings.ads_workspace_token or ""
+    token = secret(settings.ads_workspace_token)
     if not base or not token:
         raise AdsWorkspaceError("not_configured")
     try:

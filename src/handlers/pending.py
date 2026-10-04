@@ -5,6 +5,7 @@ from loguru import logger
 
 from ..dispatcher import dp
 from .. import db
+from ..utils.html import safe
 from ..utils.domain import lookup_domains_text
 from ..handlers.youtube import handle_youtube_download
 from ..handlers.users import _resolve_user_id
@@ -108,7 +109,7 @@ async def on_text_fallback(message: Message):
             name = user.get("full_name") or user.get("username") or uid
             await notify_helper_domain_access(uid)
             return await message.answer(
-                f"Пользователь {name} (@{user.get('username') or uid}) назначен помощником.\n"
+                f"Пользователь {safe(name)} (@{safe(user.get('username') or uid)}) назначен помощником.\n"
                 "Откройте «Помощники» в меню и нажмите «Назначить байера» рядом с ним.\n"
                 "Помощнику уже доступны /checkdomain и кнопка «Проверить домен»."
             )

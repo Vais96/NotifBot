@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .. import db
+from .html import safe
 from ..keitaro import normalize_domain, parse_campaign_name
 
 _DOMAIN_SPLIT_RE = re.compile(r"[\s,;]+")
@@ -115,7 +116,7 @@ async def render_domain_block(
     """Render domain block with campaign information."""
     rows = await db.find_campaigns_by_domain(domain)
     if not rows:
-        return f"Кампании для домена <code>{domain}</code>:\n\nНе найдено."
+        return f"Кампании для домена <code>{safe(domain)}</code>:\n\nНе найдено."
     lines: list[str] = []
     for row in rows[:20]:
         # Всегда пытаемся извлечь алиас из названия кампании (часть до первого _)
@@ -162,10 +163,10 @@ async def render_domain_block(
             mention = prefix
         header = prefix if mention == prefix else f"{prefix} — {mention}"
         display_domain = row.get("source_domain") or domain
-        lines.append(f"{header}\n{display_domain}")
+        lines.append(f"{safe(header)}\n{safe(display_domain)}")
     if len(rows) > 20:
         lines.append(f"… и ещё {len(rows) - 20}")
-    return f"Кампании для домена <code>{domain}</code>:\n\n" + "\n\n".join(lines)
+    return f"Кампании для домена <code>{safe(domain)}</code>:\n\n" + "\n\n".join(lines)
 
 
 async def lookup_domains_text(raw_text: str) -> str:
