@@ -5,11 +5,12 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import STALE_BUTTON, callback_parts, is_admin
+from .common import STALE_BUTTON, admin_only, callback_parts, is_admin
 from .. import db
 from ..utils.html import safe
 from ..handlers.users import _resolve_user_id
 from loguru import logger
+from ..constants import PendingAction
 
 
 def _mentor_row_controls(mentor_id: int) -> InlineKeyboardMarkup:
@@ -57,20 +58,18 @@ def _mentor_subs_keyboard(mentor_id: int, teams: list[dict], followed: set[int])
 
 
 @dp.callback_query(F.data == "mentor:add")
+@admin_only
 async def cb_mentor_add(call: CallbackQuery):
     """Handle mentor add callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
-    await db.set_pending_action(call.from_user.id, "mentor:add", None)
+    await db.set_pending_action(call.from_user.id, PendingAction.MENTOR_ADD, None)
     await call.message.answer("Пришлите Telegram ID или @username пользователя, которому назначить роль mentor")
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("mentor:unset:"))
+@admin_only
 async def cb_mentor_unset(call: CallbackQuery):
     """Handle mentor unset callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = callback_parts(call, 3)
     if not parts:
         return await call.answer(STALE_BUTTON, show_alert=True)
@@ -85,10 +84,9 @@ async def cb_mentor_unset(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("mentor:subs:"))
+@admin_only
 async def cb_mentor_subs(call: CallbackQuery):
     """Handle mentor subscriptions callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = callback_parts(call, 3)
     if not parts:
         return await call.answer(STALE_BUTTON, show_alert=True)
@@ -102,10 +100,9 @@ async def cb_mentor_subs(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("mentor:toggle:"))
+@admin_only
 async def cb_mentor_toggle(call: CallbackQuery):
     """Handle mentor toggle subscription callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = callback_parts(call, 4)
     if not parts:
         return await call.answer(STALE_BUTTON, show_alert=True)
@@ -131,19 +128,17 @@ async def cb_mentor_toggle(call: CallbackQuery):
 
 
 @dp.callback_query(F.data == "mentor:back")
+@admin_only
 async def cb_mentor_back(call: CallbackQuery):
     """Handle mentor back callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     await _send_mentors(call.message.chat.id, call.from_user.id)
     await call.answer()
 
 
 @dp.message(Command("addmentor"))
+@admin_only
 async def on_add_mentor(message: Message):
     """Handle /addmentor command."""
-    if not await is_admin(message.from_user.id):
-        return await message.answer("Только для админов")
     # /addmentor <telegram_id|@username>
     parts = message.text.split()
     if len(parts) != 2:
@@ -158,10 +153,9 @@ async def on_add_mentor(message: Message):
 
 
 @dp.message(Command("mentor_follow"))
+@admin_only
 async def on_mentor_follow(message: Message):
     """Handle /mentor_follow command."""
-    if not await is_admin(message.from_user.id):
-        return await message.answer("Только для админов")
     # /mentor_follow <mentor_id> <team_id>
     parts = message.text.split()
     if len(parts) != 3:
@@ -177,10 +171,9 @@ async def on_mentor_follow(message: Message):
 
 
 @dp.message(Command("mentor_unfollow"))
+@admin_only
 async def on_mentor_unfollow(message: Message):
     """Handle /mentor_unfollow command."""
-    if not await is_admin(message.from_user.id):
-        return await message.answer("Только для админов")
     # /mentor_unfollow <mentor_id> <team_id>
     parts = message.text.split()
     if len(parts) != 3:

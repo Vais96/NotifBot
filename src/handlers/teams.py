@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import STALE_BUTTON, callback_parts, is_admin
+from .common import STALE_BUTTON, admin_only, callback_parts, is_admin
 from ..constants import Role
 from .. import db
 from ..utils.html import safe
@@ -73,10 +73,9 @@ async def cb_myteam_list(call: CallbackQuery):
 
 
 @dp.callback_query(F.data == "teams:list")
+@admin_only
 async def cb_teams_list(call: CallbackQuery):
     """Handle teams list callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     teams = await db.list_teams()
     if not teams:
         await call.message.answer("Команд нет")
@@ -87,10 +86,9 @@ async def cb_teams_list(call: CallbackQuery):
 
 
 @dp.callback_query(F.data == "teams:members")
+@admin_only
 async def cb_team_members(call: CallbackQuery):
     """Handle team members callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     teams = await db.list_teams()
     if not teams:
         await call.message.answer("Команд нет")
@@ -101,10 +99,9 @@ async def cb_team_members(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("team:members:"))
+@admin_only
 async def cb_team_members_manage(call: CallbackQuery):
     """Handle team members management callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = callback_parts(call, 3)
     if not parts or not parts[2].isdigit():
         return await call.answer(STALE_BUTTON, show_alert=True)

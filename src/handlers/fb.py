@@ -16,6 +16,7 @@ from .. import db, fb_csv
 from ..dispatcher import ADMIN_IDS, bot, dp
 from ..services.fb_uploads import CSV_ALLOWED_MIME_TYPES, MAX_CSV_FILE_SIZE_BYTES, process_fb_csv_upload
 from ..utils.formatting import as_decimal, chunk_lines, fmt_money, fmt_percent
+from ..constants import PendingAction
 
 
 def _decimal_or_none(value: Any) -> Optional[Decimal]:
@@ -86,7 +87,7 @@ async def _notify_admins_about_exception(context: str, exc: Exception, extra_det
 @dp.message(F.document)
 async def on_document_upload(message: Message):
     pending = await db.get_pending_action(message.from_user.id)
-    if not pending or pending[0] != "fb:await_csv":
+    if not pending or pending[0] != PendingAction.FB_AWAIT_CSV:
         return
     document = message.document
     if document.file_size and document.file_size > MAX_CSV_FILE_SIZE_BYTES:

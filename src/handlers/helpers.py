@@ -4,10 +4,11 @@ from aiogram import F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..dispatcher import bot, dp
-from .common import STALE_BUTTON, callback_parts, is_admin
+from .common import STALE_BUTTON, admin_only, callback_parts, is_admin
 from .. import db
 from ..utils.html import safe
 from loguru import logger
+from ..constants import PendingAction
 
 _BUYERS_PER_PAGE = 30
 
@@ -95,10 +96,9 @@ async def _send_helpers_list(chat_id: int, actor_id: int):
 
 
 @dp.callback_query(F.data == "helper:add")
+@admin_only
 async def cb_helper_add(call: CallbackQuery):
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
-    await db.set_pending_action(call.from_user.id, "helper:add", None)
+    await db.set_pending_action(call.from_user.id, PendingAction.HELPER_ADD, None)
     await call.message.answer(
         "Введите @username пользователя, которого сделать помощником.\n"
         "Пользователь должен хотя бы раз нажать /start в боте."
@@ -107,9 +107,8 @@ async def cb_helper_add(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("helper:setbuyer:"))
+@admin_only
 async def cb_helper_set_buyer(call: CallbackQuery):
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = call.data.split(":")
     if len(parts) not in (3, 4) or not all(p.lstrip("-").isdigit() for p in parts[2:]):
         return await call.answer(STALE_BUTTON, show_alert=True)
@@ -127,9 +126,8 @@ async def cb_helper_set_buyer(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("helper:assign:"))
+@admin_only
 async def cb_helper_assign(call: CallbackQuery):
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = call.data.split(":")
     if len(parts) != 4 or not all(p.lstrip("-").isdigit() for p in parts[2:]):
         return await call.answer(STALE_BUTTON, show_alert=True)
@@ -148,9 +146,8 @@ async def cb_helper_assign(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("helper:delete:"))
+@admin_only
 async def cb_helper_delete(call: CallbackQuery):
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = callback_parts(call, 3)
     if not parts:
         return await call.answer(STALE_BUTTON, show_alert=True)

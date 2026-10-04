@@ -7,9 +7,10 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import is_admin
+from .common import admin_only, is_admin
 from .. import db
 from ..utils.html import safe
+from ..constants import PendingAction
 
 
 def _alias_token(alias: str) -> str:
@@ -56,10 +57,9 @@ async def _send_aliases(chat_id: int, actor_id: int):
 
 
 @dp.message(Command("aliases"))
+@admin_only
 async def on_aliases(message: Message):
     """Handle /aliases command."""
-    if not await is_admin(message.from_user.id):
-        return await message.answer("Только для админов")
     rows = await db.list_aliases()
     if not rows:
         await message.answer("Алиасов пока нет.")
@@ -73,10 +73,9 @@ async def on_aliases(message: Message):
 
 
 @dp.message(Command("setalias"))
+@admin_only
 async def on_setalias(message: Message):
     """Handle /setalias command."""
-    if not await is_admin(message.from_user.id):
-        return await message.answer("Только для админов")
     # /setalias <alias> buyer=<id|-> lead=<id|->
     parts = message.text.split()
     if len(parts) < 2:
@@ -96,10 +95,9 @@ async def on_setalias(message: Message):
 
 
 @dp.message(Command("delalias"))
+@admin_only
 async def on_delalias(message: Message):
     """Handle /delalias command."""
-    if not await is_admin(message.from_user.id):
-        return await message.answer("Только для админов")
     parts = message.text.split()
     if len(parts) != 2:
         return await message.answer("Использование: /delalias <alias>")
@@ -108,46 +106,42 @@ async def on_delalias(message: Message):
 
 
 @dp.callback_query(F.data == "alias:new")
+@admin_only
 async def cb_alias_new(call: CallbackQuery):
     """Handle alias creation callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
-    await db.set_pending_action(call.from_user.id, "alias:new", None)
+    await db.set_pending_action(call.from_user.id, PendingAction.ALIAS_NEW, None)
     await call.message.answer("Введите имя алиаса (префикс campaign_name до _):")
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("alias:setbuyer:"))
+@admin_only
 async def cb_alias_setbuyer(call: CallbackQuery):
     """Handle alias buyer setting callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     alias = await _alias_from_callback(call)
     if alias is None:
         return await call.answer("Устаревшая кнопка", show_alert=True)
-    await db.set_pending_action(call.from_user.id, f"alias:setbuyer:{alias}", None)
+    await db.set_pending_action(call.from_user.id, f"{PendingAction.ALIAS_SET_BUYER}:{alias}", None)
     await call.message.answer(f"Пришлите Telegram ID или @username покупателя для алиаса {safe(alias)}, или '-' чтобы убрать")
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("alias:setlead:"))
+@admin_only
 async def cb_alias_setlead(call: CallbackQuery):
     """Handle alias lead setting callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     alias = await _alias_from_callback(call)
     if alias is None:
         return await call.answer("Устаревшая кнопка", show_alert=True)
-    await db.set_pending_action(call.from_user.id, f"alias:setlead:{alias}", None)
+    await db.set_pending_action(call.from_user.id, f"{PendingAction.ALIAS_SET_LEAD}:{alias}", None)
     await call.message.answer(f"Пришлите Telegram ID или @username лида для алиаса {safe(alias)}, или '-' чтобы убрать")
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("alias:delete:"))
+@admin_only
 async def cb_alias_delete(call: CallbackQuery):
     """Handle alias deletion callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     alias = await _alias_from_callback(call)
     if alias is None:
         return await call.answer("Устаревшая кнопка", show_alert=True)

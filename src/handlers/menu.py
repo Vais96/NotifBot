@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import is_admin
+from .common import admin_only, get_actor, is_admin
 from .. import db, keitaro_sync
 from ..handlers.users import _send_whoami, _send_list_users, _send_list_routes, _send_manage
 from ..handlers.aliases import _send_aliases
@@ -16,6 +16,7 @@ from ..handlers.reports import _send_reports_menu, _send_kpi_menu
 from ..handlers.ads_key import send_ads_key
 from ..services.ads_workspace import can_use_ads_key
 from loguru import logger
+from ..constants import PendingAction
 
 
 ADS_KEY_BUTTON = [InlineKeyboardButton(text="Мой ключ для АДС", callback_data="menu:adskey")]
@@ -59,16 +60,8 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
 
 async def user_menu_flags(user_id: int) -> tuple[bool, str | None, bool]:
     """Return (is_admin, role, has_lead_access) for building the main menu."""
-    me = await db.get_user(user_id)
-    admin = await is_admin(user_id, me)
-    role = (me or {}).get("role")
-    if admin:
-        role = "admin"
-    has_lead_access = admin
-    if not has_lead_access:
-        lead_team_ids = await db.list_user_lead_teams(user_id)
-        has_lead_access = bool(lead_team_ids) or (role in ("lead", "head"))
-    return admin, role, has_lead_access
+    actor = await get_actor(user_id)
+    return actor.is_admin, actor.role, actor.has_lead_access
 
 
 async def send_user_menu(chat_id: int, user_id: int, *, intro: str = "Меню:") -> None:
@@ -96,11 +89,11 @@ async def on_menu_click(call: CallbackQuery):
         await _send_list_routes(call.message.chat.id, call.from_user.id)
         return await call.answer()
     if key == "checkdomain":
-        await db.set_pending_action(call.from_user.id, "domain:check", None)
+        await db.set_pending_action(call.from_user.id, PendingAction.DOMAIN_CHECK, None)
         await call.message.answer("Пришлите домен в формате example.com или ссылку")
         return await call.answer()
     if key == "uploadcsv":
-        await db.set_pending_action(call.from_user.id, "fb:await_csv", None)
+        await db.set_pending_action(call.from_user.id, PendingAction.FB_AWAIT_CSV, None)
         await call.message.answer(
             "Пришлите CSV из Facebook Ads Manager.\n"
             "Файл должен содержать колонку 'День' с разбивкой по датам.\n"
@@ -108,7 +101,7 @@ async def on_menu_click(call: CallbackQuery):
         )
         return await call.answer()
     if key == "yt_download":
-        await db.set_pending_action(call.from_user.id, "youtube:await_url", None)
+        await db.set_pending_action(call.from_user.id, PendingAction.YOUTUBE_AWAIT_URL, None)
         await call.message.answer(
             "Пришлите ссылку на видео YouTube.\n"
             "Если передумаете, отправьте '-' чтобы отменить."
@@ -177,10 +170,9 @@ async def on_menu_click(call: CallbackQuery):
 
 
 @dp.callback_query(F.data == "resetfbdata:confirm")
+@admin_only
 async def cb_resetfbdata_confirm(call: CallbackQuery):
     """Handle FB data reset confirmation."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     await call.answer("Очищаю данные…")
     try:
         await db.reset_fb_upload_data()

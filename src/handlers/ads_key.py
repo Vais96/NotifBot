@@ -5,8 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import is_admin
-from .. import db
+from .common import get_actor
 from ..services.ads_workspace import (
     AdsWorkspaceError,
     ads_key_label,
@@ -32,13 +31,9 @@ def _confirm_rotate_keyboard() -> InlineKeyboardMarkup:
 
 
 async def _actor_may_use(user_id: int) -> tuple[bool, dict | None]:
-    me = await db.get_user(user_id)
-    admin = await is_admin(user_id, me)
-    role = (me or {}).get("role")
-    if admin:
-        role = "admin"
-    active = True if not me else bool(me.get("is_active", 1))
-    return can_use_ads_key(admin, role, active), me
+    actor = await get_actor(user_id)
+    active = True if not actor.row else bool(actor.row.get("is_active", 1))
+    return can_use_ads_key(actor.is_admin, actor.role, active), actor.row
 
 
 async def send_ads_key(chat_id: int, user_id: int, username: str | None, *, rotate: bool = False) -> None:

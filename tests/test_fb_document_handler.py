@@ -58,7 +58,7 @@ class FbAccountReportTests(unittest.IsolatedAsyncioTestCase):
     async def test_account_report_has_drilldown_buttons_and_cache(self) -> None:
         from datetime import date
 
-        from src.handlers import reports
+        from src.handlers.reports import fb as reports
 
         rows = [
             {"account_name": "Acc <1>", "campaign_name": "C1", "spend": "100", "revenue": "150", "ftd": 2,
@@ -69,12 +69,12 @@ class FbAccountReportTests(unittest.IsolatedAsyncioTestCase):
         send = AsyncMock()
         cache = AsyncMock()
         with (
-            patch("src.handlers.reports.db.fetch_fb_campaign_month_report", AsyncMock(return_value=rows)),
-            patch("src.handlers.reports.is_admin", AsyncMock(return_value=True)),
-            patch("src.handlers.reports.db.list_fb_flags", AsyncMock(return_value=[{"id": 1, "code": "GREEN", "severity": 0}])),
-            patch("src.handlers.reports.db.list_users", AsyncMock(return_value=[])),
-            patch("src.handlers.reports.db.set_ui_cache_list", cache),
-            patch("src.handlers.reports.bot.send_message", send),
+            patch("src.handlers.reports.fb.db.fetch_fb_campaign_month_report", AsyncMock(return_value=rows)),
+            patch("src.handlers.reports.fb.is_admin", AsyncMock(return_value=True)),
+            patch("src.handlers.reports.fb.db.list_fb_flags", AsyncMock(return_value=[{"id": 1, "code": "GREEN", "severity": 0}])),
+            patch("src.handlers.reports.fb.db.list_users", AsyncMock(return_value=[])),
+            patch("src.handlers.reports.fb.db.set_ui_cache_list", cache),
+            patch("src.handlers.reports.fb.bot.send_message", send),
         ):
             await reports._send_fb_account_report(5, date(2026, 9, 15), 7)
 

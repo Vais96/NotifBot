@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import STALE_BUTTON, callback_parts, is_admin
+from .common import STALE_BUTTON, admin_only, callback_parts, is_admin
 from ..constants import Role
 from .. import db
 from ..utils.html import safe
@@ -170,11 +170,10 @@ async def on_list_users(message: Message):
 
 
 @dp.message(Command("manage"))
+@admin_only
 async def on_manage(message: Message):
     """Handle /manage command - admin user management."""
     # Only admins (для MVP) видят управление
-    if not await is_admin(message.from_user.id):
-        return await message.answer("Только для админов")
     await _send_manage(message.chat.id, message.from_user.id)
 
 
@@ -247,10 +246,9 @@ async def on_add_rule(message: Message):
 
 
 @dp.message(Command("setrole"))
+@admin_only
 async def on_set_role(message: Message):
     """Handle /setrole command."""
-    if not await is_admin(message.from_user.id):
-        return await message.answer("Только для админов")
     # /setrole <telegram_id> <buyer|lead|head|admin|mentor>
     parts = message.text.split()
     if len(parts) != 3:
@@ -266,10 +264,9 @@ async def on_set_role(message: Message):
 
 
 @dp.callback_query(F.data.startswith("role:"))
+@admin_only
 async def cb_set_role(call: CallbackQuery):
     """Handle role change callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = (call.data or "").split(":", 2)
     if len(parts) != 3 or not parts[1].lstrip("-").isdigit() or parts[2] not in {r.value for r in Role}:
         return await call.answer("Устаревшая кнопка", show_alert=True)
@@ -292,10 +289,9 @@ async def cb_set_role(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("active:"))
+@admin_only
 async def cb_set_active(call: CallbackQuery):
     """Handle active status change callback."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = callback_parts(call, 3)
     if not parts:
         return await call.answer(STALE_BUTTON, show_alert=True)
@@ -310,10 +306,9 @@ async def cb_set_active(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("user:delete:"))
+@admin_only
 async def cb_delete_user(call: CallbackQuery):
     """Handle user deletion callback (soft delete / deactivate)."""
-    if not await is_admin(call.from_user.id):
-        return await call.answer("Нет прав", show_alert=True)
     parts = callback_parts(call, 3)
     if not parts:
         return await call.answer(STALE_BUTTON, show_alert=True)

@@ -1,147 +1,185 @@
-"""Pending action text handlers."""
+"""Text replies for pending multi-step actions (tg_pending_actions) + catch-all for stale buttons.
+
+Registered last: its @dp.message() / @dp.callback_query() catch everything other handlers did not take.
+"""
+
+from typing import Awaitable, Callable, Dict, Optional, Tuple
 
 from aiogram.types import CallbackQuery, Message
 from loguru import logger
 
-from ..dispatcher import dp
 from .. import db
-from .common import STALE_BUTTON
-from ..utils.html import safe
-from ..utils.domain import lookup_domains_text
-from ..handlers.youtube import handle_youtube_download
-from ..handlers.users import _resolve_user_id
+from ..constants import PendingAction, Role
+from ..dispatcher import dp
 from ..handlers.domains import notify_helper_domain_access
+from ..handlers.users import _resolve_user_id
+from ..handlers.youtube import handle_youtube_download
+from ..utils.domain import lookup_domains_text
+from ..utils.html import safe
+from .common import STALE_BUTTON
+
+PendingHandler = Callable[[Message, str], Awaitable[object]]
+_HANDLERS: Dict[PendingAction, PendingHandler] = {}
+
+UNKNOWN_USER_TEXT = (
+    "Не удалось распознать пользователя. Пришлите numeric ID или @username. "
+    "Если пользователь не писал боту, попросите его отправить /start."
+)
+
+
+def pending(action: PendingAction):
+    def register(handler: PendingHandler) -> PendingHandler:
+        _HANDLERS[action] = handler
+        return handler
+    return register
+
+
+def parse_action(raw: str) -> Tuple[Optional[PendingAction], str]:
+    """'alias:setbuyer:foo' -> (ALIAS_SET_BUYER, 'foo'); unknown -> (None, '')."""
+    for action in sorted(PendingAction, key=len, reverse=True):
+        if raw == action:
+            return action, ""
+        if raw.startswith(action + ":"):
+            return action, raw[len(action) + 1:]
+    return None, ""
+
+
+@pending(PendingAction.FB_AWAIT_CSV)
+async def _fb_await_csv(message: Message, _arg: str):
+    # The CSV itself is handled by handlers/fb.py (document handler); here only text arrives.
+    if (message.text or "").strip().lower() in ("-", "стоп", "stop"):
+        await db.clear_pending_action(message.from_user.id)
+        return await message.answer("Загрузка CSV отменена")
+    return await message.answer("Пришлите CSV файлом или '-' чтобы отменить ожидание")
+
+
+@pending(PendingAction.ALIAS_NEW)
+async def _alias_new(message: Message, _arg: str):
+    await db.set_alias(message.text.strip())
+    await db.clear_pending_action(message.from_user.id)
+    return await message.answer("Алиас создан. Откройте Алиасы в меню, чтобы назначить buyer/lead")
+
+
+@pending(PendingAction.DOMAIN_CHECK)
+async def _domain_check(message: Message, _arg: str):
+    text = (message.text or "").strip()
+    if text.lower() in ("-", "stop", "стоп"):
+        await db.clear_pending_action(message.from_user.id)
+        return await message.answer("Готово. Проверка доменов завершена")
+    result = await lookup_domains_text(text)
+    return await message.answer(result + "\n\nОтправьте следующий домен или '-' чтобы завершить")
+
+
+@pending(PendingAction.YOUTUBE_AWAIT_URL)
+async def _youtube_await_url(message: Message, _arg: str):
+    return await handle_youtube_download(message)
+
+
+async def _alias_assign(message: Message, alias: str, field: str, done_text: str):
+    value = message.text.strip()
+    user_id = None
+    if value != "-":  # '-' clears the assignment
+        try:
+            user_id = await _resolve_user_id(value)
+        except ValueError:
+            await db.clear_pending_action(message.from_user.id)
+            return await message.answer(UNKNOWN_USER_TEXT)
+    await db.set_alias(alias, **{field: user_id})
+    await db.clear_pending_action(message.from_user.id)
+    return await message.answer(done_text)
+
+
+@pending(PendingAction.ALIAS_SET_BUYER)
+async def _alias_set_buyer(message: Message, alias: str):
+    return await _alias_assign(message, alias, "buyer_id", "Buyer назначен")
+
+
+@pending(PendingAction.ALIAS_SET_LEAD)
+async def _alias_set_lead(message: Message, alias: str):
+    return await _alias_assign(message, alias, "lead_id", "Lead назначен")
+
+
+@pending(PendingAction.MENTOR_ADD)
+async def _mentor_add(message: Message, _arg: str):
+    try:
+        uid = await _resolve_user_id(message.text.strip())
+    except Exception:
+        await db.clear_pending_action(message.from_user.id)
+        return await message.answer("Не удалось распознать пользователя. Пришлите numeric ID или @username.")
+    try:
+        await db.upsert_user(uid, None, None)
+    except Exception:
+        pass
+    await db.set_user_role(uid, Role.MENTOR)
+    await db.clear_pending_action(message.from_user.id)
+    return await message.answer("Назначен ментором")
+
+
+@pending(PendingAction.HELPER_ADD)
+async def _helper_add(message: Message, _arg: str):
+    value = (message.text or "").strip()
+    if value.lower() in ("-", "отмена", "cancel"):
+        await db.clear_pending_action(message.from_user.id)
+        return await message.answer("Отменено.")
+    try:
+        uid = await _resolve_user_id(value)
+    except ValueError as e:
+        return await message.answer(safe(str(e)))
+    user = await db.get_user(uid)
+    if not user:
+        return await message.answer("Пользователь не найден в базе. Пусть нажмёт /start в боте.")
+    await db.set_user_role(uid, Role.HELPER)
+    await db.clear_pending_action(message.from_user.id)
+    name = user.get("full_name") or user.get("username") or uid
+    await notify_helper_domain_access(uid)
+    return await message.answer(
+        f"Пользователь {safe(name)} (@{safe(user.get('username') or uid)}) назначен помощником.\n"
+        "Откройте «Помощники» в меню и нажмите «Назначить байера» рядом с ним.\n"
+        "Помощнику уже доступны /checkdomain и кнопка «Проверить домен»."
+    )
+
+
+@pending(PendingAction.KPI_SET)
+async def _kpi_set(message: Message, which: str):
+    value = message.text.strip()
+    goal = None
+    if value != "-":  # '-' clears the goal
+        try:
+            goal = max(0, int(value))
+        except Exception:
+            await db.clear_pending_action(message.from_user.id)
+            return await message.answer("Нужно целое число или '-' для очистки")
+    current = await db.get_kpi(message.from_user.id)
+    daily, weekly = current.get("daily_goal"), current.get("weekly_goal")
+    if which == "daily":
+        daily = goal
+    else:
+        weekly = goal
+    await db.set_kpi(message.from_user.id, daily_goal=daily, weekly_goal=weekly)
+    await db.clear_pending_action(message.from_user.id)
+    return await message.answer("KPI обновлен")
 
 
 @dp.message()
 async def on_text_fallback(message: Message):
-    # Ignore slash commands
-    if message.text and message.text.startswith('/'):
+    if message.text and message.text.startswith("/"):
         return
-    pending = await db.get_pending_action(message.from_user.id)
-    if not pending:
+    stored = await db.get_pending_action(message.from_user.id)
+    if not stored:
         return
-    action, _ = pending
+    action, arg = parse_action(stored[0])
+    handler = _HANDLERS.get(action) if action else None
+    if handler is None:
+        logger.warning("Unknown pending action {!r} for {}", stored[0], message.from_user.id)
+        return
     try:
-        if action == "fb:await_csv":
-            text = (message.text or "").strip()
-            if text.lower() in ("-", "стоп", "stop"):
-                await db.clear_pending_action(message.from_user.id)
-                return await message.answer("Загрузка CSV отменена")
-            return await message.answer("Пришлите CSV файлом или '-' чтобы отменить ожидание")
-        if action == "alias:new":
-            alias = message.text.strip()
-            await db.set_alias(alias)
-            await db.clear_pending_action(message.from_user.id)
-            return await message.answer("Алиас создан. Откройте Алиасы в меню, чтобы назначить buyer/lead")
-        if action == "domain:check":
-            text = (message.text or "").strip()
-            if text.lower() in ("-", "stop", "стоп"):
-                await db.clear_pending_action(message.from_user.id)
-                return await message.answer("Готово. Проверка доменов завершена")
-            result = await lookup_domains_text(text)
-            await message.answer(result + "\n\nОтправьте следующий домен или '-' чтобы завершить")
-            return
-        if action == "youtube:await_url":
-            if await handle_youtube_download(message):
-                return
-        if action.startswith("alias:setbuyer:"):
-            alias = action.split(":", 2)[2]
-            v = message.text.strip()
-            if v == '-':
-                buyer_id = None
-            else:
-                try:
-                    buyer_id = await _resolve_user_id(v)
-                except ValueError:
-                    await db.clear_pending_action(message.from_user.id)
-                    return await message.answer(
-                        "Не удалось распознать пользователя. Пришлите numeric ID или @username. "
-                        "Если пользователь не писал боту, попросите его отправить /start."
-                    )
-            await db.set_alias(alias, buyer_id=buyer_id)
-            await db.clear_pending_action(message.from_user.id)
-            return await message.answer("Buyer назначен")
-        if action.startswith("alias:setlead:"):
-            alias = action.split(":", 2)[2]
-            v = message.text.strip()
-            if v == '-':
-                lead_id = None
-            else:
-                try:
-                    lead_id = await _resolve_user_id(v)
-                except ValueError:
-                    await db.clear_pending_action(message.from_user.id)
-                    return await message.answer(
-                        "Не удалось распознать пользователя. Пришлите numeric ID или @username. "
-                        "Если пользователь не писал боту, попросите его отправить /start."
-                    )
-            await db.set_alias(alias, lead_id=lead_id)
-            await db.clear_pending_action(message.from_user.id)
-            return await message.answer("Lead назначен")
-        if action == "mentor:add":
-            v = message.text.strip()
-            try:
-                uid = await _resolve_user_id(v)
-            except Exception:
-                await db.clear_pending_action(message.from_user.id)
-                return await message.answer("Не удалось распознать пользователя. Пришлите numeric ID или @username.")
-            try:
-                await db.upsert_user(uid, None, None)
-            except Exception:
-                pass
-            await db.set_user_role(uid, "mentor")
-            await db.clear_pending_action(message.from_user.id)
-            return await message.answer("Назначен ментором")
-        if action == "helper:add":
-            v = (message.text or "").strip()
-            if v.lower() in ("-", "отмена", "cancel"):
-                await db.clear_pending_action(message.from_user.id)
-                return await message.answer("Отменено.")
-            try:
-                uid = await _resolve_user_id(v)
-            except ValueError as e:
-                return await message.answer(str(e))
-            user = await db.get_user(uid)
-            if not user:
-                return await message.answer("Пользователь не найден в базе. Пусть нажмёт /start в боте.")
-            await db.set_user_role(uid, "helper")
-            await db.clear_pending_action(message.from_user.id)
-            name = user.get("full_name") or user.get("username") or uid
-            await notify_helper_domain_access(uid)
-            return await message.answer(
-                f"Пользователь {safe(name)} (@{safe(user.get('username') or uid)}) назначен помощником.\n"
-                "Откройте «Помощники» в меню и нажмите «Назначить байера» рядом с ним.\n"
-                "Помощнику уже доступны /checkdomain и кнопка «Проверить домен»."
-            )
-        if action.startswith("kpi:set:"):
-            which = action.split(":", 2)[2]
-            v = message.text.strip()
-            goal_val = None
-            if v != '-':
-                try:
-                    goal_val = int(v)
-                    if goal_val < 0:
-                        goal_val = 0
-                except Exception:
-                    await db.clear_pending_action(message.from_user.id)
-                    return await message.answer("Нужно целое число или '-' для очистки")
-            current = await db.get_kpi(message.from_user.id)
-            daily = current.get('daily_goal')
-            weekly = current.get('weekly_goal')
-            if which == 'daily':
-                daily = goal_val
-            else:
-                weekly = goal_val
-            await db.set_kpi(message.from_user.id, daily_goal=daily, weekly_goal=weekly)
-            await db.clear_pending_action(message.from_user.id)
-            return await message.answer("KPI обновлен")
-    except Exception as exc:
-        logger.exception(exc)
-        return await message.answer("Ошибка обработки ввода")
+        await handler(message, arg)
+    except Exception:
+        logger.exception("Pending action {} failed", stored[0])
+        await message.answer("Ошибка обработки ввода")
 
 
 @dp.callback_query()
 async def on_stale_callback(call: CallbackQuery):
-    """Registered last: buttons from removed/old menus get an answer instead of an endless spinner."""
+    """Buttons from removed/old menus get an answer instead of an endless spinner."""
     await call.answer(STALE_BUTTON, show_alert=True)

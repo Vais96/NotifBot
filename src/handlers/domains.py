@@ -7,6 +7,7 @@ from loguru import logger
 from ..dispatcher import bot, dp
 from .. import db
 from ..utils.domain import lookup_domains_text
+from ..constants import PendingAction
 
 HELPER_DOMAIN_HINT = (
     "Вас назначили помощником.\n"
@@ -27,7 +28,7 @@ async def on_checkdomain(message: Message):
     """Handle /checkdomain command. Available to all roles, including helpers."""
     text = message.text or ""
     parts = text.split(maxsplit=1)
-    await db.set_pending_action(message.from_user.id, "domain:check", None)
+    await db.set_pending_action(message.from_user.id, PendingAction.DOMAIN_CHECK, None)
     if len(parts) < 2:
         return await message.answer("Пришлите домен, например salongierpl.online")
     result = await lookup_domains_text(parts[1])
