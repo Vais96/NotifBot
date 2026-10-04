@@ -2754,9 +2754,9 @@ async def reset_fb_upload_data() -> None:
                 for table in tables:
                     try:
                         await cur.execute(f"TRUNCATE TABLE {table}")
-                        logger.info("Truncated table %s during FB data reset", table)
+                        logger.info("Truncated table {} during FB data reset", table)
                     except Exception as exc:
-                        logger.error("Failed to truncate table %s: %s", table, exc)
+                        logger.error("Failed to truncate table {}: {}", table, exc)
                         raise
             finally:
                 await cur.execute("SET FOREIGN_KEY_CHECKS=1")

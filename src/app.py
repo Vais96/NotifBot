@@ -818,7 +818,7 @@ async def design_subscribers(
         chat_ids = await db.list_design_bot_subscribers()
         return {"subscribers_count": len(chat_ids), "subscriber_chat_ids": chat_ids}
     except Exception as e:
-        logger.exception("Failed to list design subscribers: %s", e)
+        logger.exception("Failed to list design subscribers: {}", e)
         raise HTTPException(500, str(e))
 
 

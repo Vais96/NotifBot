@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Iterable, Mapping, Sequence
 
-from .formatting import chunk_lines
+from ..utils.formatting import chunk_lines
 
 REPORT_ROLES = frozenset({"lead", "mentor", "head"})
 NO_TEAM_LABEL = "Без команды"

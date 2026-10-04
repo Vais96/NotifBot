@@ -1,4 +1,5 @@
 import html
+import json
 from datetime import date
 from typing import Any
 from decimal import Decimal
@@ -11,83 +12,15 @@ from loguru import logger
 
 from ..dispatcher import dp, bot, ADMIN_IDS
 from .. import db
-
-
-_MONTH_NAMES_RU = {
-    1: "Январь",
-    2: "Февраль",
-    3: "Март",
-    4: "Апрель",
-    5: "Май",
-    6: "Июнь",
-    7: "Июль",
-    8: "Август",
-    9: "Сентябрь",
-    10: "Октябрь",
-    11: "Ноябрь",
-    12: "Декабрь",
-}
-
-
-def _month_label_ru(month: date) -> str:
-    name = _MONTH_NAMES_RU.get(month.month, month.strftime("%m"))
-    return f"{name} {month.year}"
-
-
-def _fmt_money(value: Decimal | float | int | None) -> str:
-    if value is None:
-        return "$0.00"
-    amount = float(value)
-    return f"${amount:,.2f}".replace(",", " ")
-
-
-def _fmt_percent(value: Decimal | float | None) -> str:
-    if value is None:
-        return "—"
-    return f"{float(value):.1f}%"
-
-
-def _as_decimal(value) -> Decimal:
-    if value is None:
-        return Decimal("0")
-    if isinstance(value, Decimal):
-        return value
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return Decimal("0")
-
-
-def _format_flag_label(flag_id, flags_by_id: dict[int, dict[str, Any]]) -> str:
-    if flag_id is None:
-        return "—"
-    try:
-        fid = int(flag_id)
-    except Exception:
-        return str(flag_id)
-    row = flags_by_id.get(fid)
-    if not row:
-        return str(fid)
-    return row.get("title") or row.get("code") or str(fid)
-
-
-def _format_buyer_label(buyer_id, users_by_id: dict[int, dict[str, Any]]) -> str:
-    if buyer_id is None:
-        return "—"
-    try:
-        uid = int(buyer_id)
-    except Exception:
-        return html.escape(str(buyer_id))
-    user = users_by_id.get(uid)
-    if not user:
-        return f"<code>{uid}</code>"
-    username = user.get("username")
-    if username:
-        return f"@{html.escape(username)}"
-    full_name = user.get("full_name")
-    if full_name:
-        return html.escape(str(full_name))
-    return f"<code>{uid}</code>"
+from ..utils.formatting import (
+    as_decimal as _as_decimal,
+    chunk_lines,
+    fmt_money as _fmt_money,
+    fmt_percent as _fmt_percent,
+    format_buyer_label as _format_buyer_label,
+    format_flag_label as _format_flag_label,
+    month_label_ru as _month_label_ru,
+)
 
 
 async def _resolve_scope_user_ids(actor_id: int) -> list[int]:
@@ -263,7 +196,7 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
                 f"Aggregate result: count={agg.get('count')}, profit={agg.get('profit')}, top_offer={agg.get('top_offer')}"
             )
         except Exception as agg_err:
-            logger.exception(f"Error in aggregate_sales: {agg_err}", exc_info=agg_err)
+            logger.exception("Error in aggregate_sales: {}", agg_err)
             raise
         text = _report_text(title, agg)
         logger.info("Report text generated")
@@ -330,7 +263,7 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
         await _send_long_html(chat_id, text, reply_markup=_reports_menu(actor_id))
         logger.info("Report sent successfully")
     except Exception as e:
-        logger.exception(f"Error in _send_period_report: {e}", exc_info=e)
+        logger.exception("Error in _send_period_report: {}", e)
         raise
 
 def _reports_menu(actor_id: int) -> InlineKeyboardMarkup:
@@ -540,7 +473,7 @@ async def _send_fb_campaign_report(chat_id: int, month_start: date) -> None:
         await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
 
 
-async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
+async def _send_fb_account_report(chat_id: int, month_start: date, requester_id: int) -> None:
     month = month_start.replace(day=1)
     rows = await db.fetch_fb_campaign_month_report(month)
     if not rows:
@@ -590,6 +523,7 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
                 "prev_flag_severity": -1,
                 "curr_flag_id": None,
                 "curr_flag_severity": -1,
+                "campaign_lines": [],
             },
         )
         spend = _as_decimal(row.get("spend"))
@@ -613,6 +547,12 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
         campaign_name = row.get("campaign_name")
         if campaign_name:
             entry["campaigns"].add(str(campaign_name))
+        campaign_roi = ((revenue - spend) / spend * Decimal(100)) if spend else None
+        campaign_flag = _format_flag_label(row.get("curr_flag_id") or row.get("state_flag_id"), flags_by_id)
+        entry["campaign_lines"].append(
+            f"• <code>{html.escape(str(campaign_name or '—'))}</code> — {html.escape(campaign_flag)}. "
+            f"Spend {_fmt_money(spend)} | FTD {ftd} | Rev {_fmt_money(revenue)} | ROI {_fmt_percent(campaign_roi)}"
+        )
         prev_flag_id = row.get("prev_flag_id")
         if prev_flag_id is not None:
             try:
@@ -642,6 +582,9 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
     total_registrations = sum(info["registrations"] for _, info in sorted_accounts)
     lines: list[str] = []
     max_items = 20
+    cache_kind = f"fbar:{month.isoformat()}"
+    account_cache_values: list[str] = []
+    account_keyboard_rows: list[list[InlineKeyboardButton]] = []
     for idx, (account_name_raw, info) in enumerate(sorted_accounts[:max_items], start=1):
         spend = info["spend"]
         revenue = info["revenue"]
@@ -661,7 +604,8 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
             buyers_text = "—"
         prev_flag_label = html.escape(_format_flag_label(info["prev_flag_id"], flags_by_id))
         curr_flag_id = info["curr_flag_id"] or info["prev_flag_id"]
-        curr_flag_label = html.escape(_format_flag_label(curr_flag_id, flags_by_id))
+        curr_flag_raw = _format_flag_label(curr_flag_id, flags_by_id)
+        curr_flag_label = html.escape(curr_flag_raw)
         account_name = html.escape(account_name_raw)
         line = (
             f"{idx}) <code>{account_name}</code> | Кампаний: {len(info['campaigns'])} | "
@@ -670,6 +614,24 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
             f"Флаг: {prev_flag_label} → {curr_flag_label}"
         )
         lines.append(line)
+        ctr_value = (Decimal(info["clicks"]) / Decimal(info["impressions"]) * Decimal(100)) if info["impressions"] else None
+        account_cache_values.append(json.dumps({
+            "account_name": account_name_raw,
+            "flag_label": curr_flag_raw,
+            "spend": str(spend),
+            "revenue": str(revenue),
+            "roi": str(roi) if roi is not None else None,
+            "ftd": ftd,
+            "campaign_count": len(info["campaigns"]),
+            "campaign_lines": info["campaign_lines"],
+            "ctr": str(ctr_value) if ctr_value is not None else None,
+            "ftd_rate": str(ftd_rate) if ftd_rate is not None else None,
+        }))
+        short_name = account_name_raw if len(account_name_raw) <= 28 else account_name_raw[:27] + "…"
+        button_text = f"{idx}. {curr_flag_raw.split(' ', 1)[0]} {short_name}"[:64]
+        account_keyboard_rows.append(
+            [InlineKeyboardButton(text=button_text, callback_data=f"{cache_kind}:{idx - 1}")]
+        )
     header_lines = [
         f"<b>FB кабинеты — {html.escape(_month_label_ru(month))}</b>",
         f"Кабинетов: <b>{len(sorted_accounts)}</b>",
@@ -684,12 +646,23 @@ async def _send_fb_account_report(chat_id: int, month_start: date) -> None:
         header_lines.append(f"CTR: <b>{_fmt_percent(ctr)}</b> ({total_clicks}/{total_impressions})")
     if total_registrations:
         header_lines.append(f"Регистраций: <b>{total_registrations}</b>")
-    text = "\n".join(header_lines)
+    summary_lines = header_lines[:]
     if lines:
-        text += "\n\n" + "\n".join(lines)
+        summary_lines += [""] + lines
     if len(sorted_accounts) > max_items:
-        text += f"\n\nПоказаны первые {max_items} кабинетов из {len(sorted_accounts)}."
-    await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+        summary_lines += ["", f"Показаны первые {max_items} кабинетов из {len(sorted_accounts)}."]
+    keyboard_markup = None
+    if account_keyboard_rows:
+        summary_lines += ["", "Нажми кнопку ниже, чтобы раскрыть кабинет."]
+        keyboard_markup = InlineKeyboardMarkup(inline_keyboard=account_keyboard_rows[:12])
+    first_chunk, *rest_chunks = chunk_lines(summary_lines)
+    await bot.send_message(chat_id, first_chunk, parse_mode=ParseMode.HTML, reply_markup=keyboard_markup)
+    for chunk in rest_chunks:
+        await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML)
+    try:
+        await db.set_ui_cache_list(requester_id, cache_kind, account_cache_values)
+    except Exception as exc:
+        logger.warning("Failed to cache FB account report payloads: {}", exc)
 
 
 @dp.callback_query(F.data == "report:fb:campaigns")
@@ -751,7 +724,7 @@ async def cb_report_fb_month(call: CallbackQuery):
         if kind == "campaigns":
             await _send_fb_campaign_report(call.message.chat.id, month)
         elif kind == "accounts":
-            await _send_fb_account_report(call.message.chat.id, month)
+            await _send_fb_account_report(call.message.chat.id, month, call.from_user.id)
         else:
             await call.message.answer("Неизвестный тип отчёта.")
         await status_msg.edit_text("Отчёт готов.")
@@ -791,7 +764,7 @@ async def cb_report_today(call: CallbackQuery):
             except Exception:
                 pass
     except Exception as e:
-        logger.exception(f"Failed to build report for user {call.from_user.id}", exc_info=e)
+        logger.exception("Failed to build report for user {}", call.from_user.id)
         error_text = f"Не удалось построить отчёт: <code>{html.escape(str(type(e).__name__))}: {html.escape(str(e))}</code>"
         if status_msg:
             try:
@@ -831,7 +804,7 @@ async def cb_report_yesterday(call: CallbackQuery):
             except Exception:
                 pass
     except Exception as e:
-        logger.exception(f"Failed to build report for user {call.from_user.id}", exc_info=e)
+        logger.exception("Failed to build report for user {}", call.from_user.id)
         error_text = f"Не удалось построить отчёт: <code>{html.escape(str(type(e).__name__))}: {html.escape(str(e))}</code>"
         if status_msg:
             try:
@@ -871,7 +844,7 @@ async def cb_report_week(call: CallbackQuery):
             except Exception:
                 pass
     except Exception as e:
-        logger.exception(f"Failed to build report for user {call.from_user.id}", exc_info=e)
+        logger.exception("Failed to build report for user {}", call.from_user.id)
         error_text = f"Не удалось построить отчёт: <code>{html.escape(str(type(e).__name__))}: {html.escape(str(e))}</code>"
         if status_msg:
             try:

@@ -10,4 +10,5 @@ from . import domains  # noqa: F401
 from . import youtube  # noqa: F401
 from . import reports  # noqa: F401
 from . import ads_key  # noqa: F401
+from . import fb  # noqa: F401 — before pending: its catch-all @dp.message() must not swallow documents
 from . import pending  # noqa: F401

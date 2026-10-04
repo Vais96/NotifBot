@@ -75,6 +75,40 @@ class DesignReminderTests(unittest.IsolatedAsyncioTestCase):
         mark_sent.assert_awaited_once_with(34912)
         self.assertEqual(stats.notified, 1)
 
+    async def _run_unresolved_designer(self, admin_ids):
+        """Дизайнер не резолвится: sent ставится, только если кто-то (админ) получил."""
+        mark_sent = AsyncMock()
+        throttle = AsyncMock(return_value=True)
+        with (
+            patch(
+                "src.underdog.db.list_design_assignments_pending_take_in_progress_reminder",
+                AsyncMock(return_value=[{"order_id": 34912, "created_at": datetime.now(timezone.utc) - timedelta(hours=49)}]),
+            ),
+            patch("src.underdog.db.is_design_not_in_progress_48h_sent", AsyncMock(return_value=False)),
+            patch("src.underdog.db.list_design_bot_subscribers", AsyncMock(return_value=[])),
+            patch(
+                "src.underdog._resolve_designer_telegram_id_from_order",
+                AsyncMock(return_value=(None, "77", "", None)),
+            ),
+            patch("src.underdog.limited_send_message", AsyncMock()),
+            patch("src.underdog.db.mark_design_not_in_progress_48h_sent", mark_sent),
+            patch("src.underdog.db.admin_notify_throttle_allow_send", throttle),
+        ):
+            await DesignNotInProgress48hNotifier(
+                underdog=_UnderdogStub(), bot=object(), admin_ids=admin_ids
+            ).notify_design_not_in_progress_48h(dry_run=False)
+        return mark_sent, throttle
+
+    async def test_marked_sent_when_only_admin_received(self) -> None:
+        mark_sent, throttle = await self._run_unresolved_designer([42])
+        mark_sent.assert_awaited_once_with(34912)
+        throttle.assert_not_awaited()
+
+    async def test_not_marked_when_nobody_received(self) -> None:
+        mark_sent, throttle = await self._run_unresolved_designer([])
+        mark_sent.assert_not_awaited()
+        throttle.assert_awaited_once_with("design:not_in_progress_48h:undelivered:34912")
+
 
 if __name__ == "__main__":
     unittest.main()

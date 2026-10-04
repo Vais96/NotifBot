@@ -428,6 +428,16 @@ def _build_design_not_in_progress_48h_message(
     )
 
 
+async def _finish_design_delivery(kind: str, order_id: int, delivered: int, mark_sent) -> bool:
+    """Помечаем sent, если доставлено хоть кому-то; иначе не помечаем (повтор в след. цикле) и warning через throttle."""
+    if delivered:
+        await mark_sent(order_id)
+        return True
+    if await db.admin_notify_throttle_allow_send(f"design:{kind}:undelivered:{order_id}"):
+        logger.warning("Design {} not delivered to anyone, not marked sent: order_id={}", kind, order_id)
+    return False
+
+
 async def _resolve_designer_telegram_id_from_order(
     order: Dict[str, Any],
     *,
@@ -1366,11 +1376,13 @@ class DesignAssignmentNotifier:
                 stats.notified += len(self.broadcast_chat_ids) + len(subscribers) + len(self.admin_ids)
                 continue
 
+            delivered = 0
             # 1) В broadcast-чаты (группа/канал) — видят все участники
             for chat_id in self.broadcast_chat_ids:
                 try:
                     await limited_send_message(self.bot, int(chat_id), text=message_for_broadcast)
                     stats.notified += 1
+                    delivered += 1
                 except (TelegramForbiddenError, TelegramBadRequest) as exc:
                     stats.errors += 1
                     logger.warning("Failed to send design assignment to broadcast chat", order_id=order_id, chat_id=chat_id, error=str(exc))
@@ -1384,6 +1396,7 @@ class DesignAssignmentNotifier:
                 try:
                     await limited_send_message(self.bot, chat_id, text=text)
                     stats.notified += 1
+                    delivered += 1
                 except (TelegramForbiddenError, TelegramBadRequest) as exc:
                     stats.errors += 1
                     logger.warning("Failed to send design assignment to subscriber", order_id=order_id, chat_id=chat_id, error=str(exc))
@@ -1395,6 +1408,7 @@ class DesignAssignmentNotifier:
                 for admin_id in self.admin_ids:
                     try:
                         await limited_send_message(self.bot, int(admin_id), text=admin_message)
+                        delivered += 1
                         logger.info("Sent design assignment copy to admin", admin_id=admin_id, order_id=order_id)
                     except (TelegramForbiddenError, TelegramBadRequest) as exc:
                         logger.warning(
@@ -1416,8 +1430,8 @@ class DesignAssignmentNotifier:
                     order_id=order_id,
                 )
 
-            await db.mark_design_assignment_sent(int(order_id))
-            stats.matched_users += 1
+            if await _finish_design_delivery("assignment", int(order_id), delivered, db.mark_design_assignment_sent):
+                stats.matched_users += 1
         return stats
 
 
@@ -1500,11 +1514,13 @@ class DesignCompletionNotifier:
                 stats.notified += len(self.admin_ids)
                 continue
 
+            delivered = 0
             # 1) В broadcast-чаты
             for chat_id in self.broadcast_chat_ids:
                 try:
                     await limited_send_message(self.bot, int(chat_id), text=message_for_broadcast)
                     stats.notified += 1
+                    delivered += 1
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
                     logger.warning(
@@ -1519,6 +1535,7 @@ class DesignCompletionNotifier:
                 try:
                     await limited_send_message(self.bot, designer_telegram_id, text=message_personal)
                     stats.notified += 1
+                    delivered += 1
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
                     logger.warning(
@@ -1533,6 +1550,7 @@ class DesignCompletionNotifier:
                 for admin_id in self.admin_ids:
                     try:
                         await limited_send_message(self.bot, int(admin_id), text=admin_message)
+                        delivered += 1
                     except Exception as exc:  # pragma: no cover
                         stats.errors += 1
                         logger.warning(
@@ -1542,8 +1560,8 @@ class DesignCompletionNotifier:
                             error=str(exc),
                         )
 
-            await db.mark_design_completion_sent(order_id)
-            stats.matched_users += 1
+            if await _finish_design_delivery("completion", order_id, delivered, db.mark_design_completion_sent):
+                stats.matched_users += 1
 
         return stats
 
@@ -1636,11 +1654,13 @@ class DesignSLA24hNotifier:
                 stats.notified += len(self.broadcast_chat_ids) + len(self.admin_ids)
                 continue
 
+            delivered = 0
             # 1) Designer personal message
             if designer_telegram_id is not None and designer_telegram_id in subscribers_set:
                 try:
                     await limited_send_message(self.bot, designer_telegram_id, text=message_personal)
                     stats.notified += 1
+                    delivered += 1
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
                     logger.warning(
@@ -1655,6 +1675,7 @@ class DesignSLA24hNotifier:
                 try:
                     await limited_send_message(self.bot, int(chat_id), text=message_for_broadcast)
                     stats.notified += 1
+                    delivered += 1
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
                     logger.warning(
@@ -1669,6 +1690,7 @@ class DesignSLA24hNotifier:
                 for admin_id in self.admin_ids:
                     try:
                         await limited_send_message(self.bot, int(admin_id), text=admin_message)
+                        delivered += 1
                     except Exception as exc:  # pragma: no cover
                         stats.errors += 1
                         logger.warning(
@@ -1678,8 +1700,8 @@ class DesignSLA24hNotifier:
                             error=str(exc),
                         )
 
-            await db.mark_design_sla_24h_alert_sent(order_id)
-            stats.matched_users += 1
+            if await _finish_design_delivery("sla_24h", order_id, delivered, db.mark_design_sla_24h_alert_sent):
+                stats.matched_users += 1
 
         return stats
 
@@ -1782,13 +1804,13 @@ class DesignNotInProgress48hNotifier:
                 stats.notified += len(self.broadcast_chat_ids) + len(self.admin_ids)
                 continue
 
-            designer_delivered = False
+            delivered = 0
 
             if designer_telegram_id is not None and designer_telegram_id in subscribers_set:
                 try:
                     await limited_send_message(self.bot, designer_telegram_id, text=message_personal)
                     stats.notified += 1
-                    designer_delivered = True
+                    delivered += 1
                     logger.info(
                         "Design take-in-progress reminder sent to designer",
                         order_id=order_id,
@@ -1815,6 +1837,7 @@ class DesignNotInProgress48hNotifier:
                 try:
                     await limited_send_message(self.bot, int(chat_id), text=message_for_broadcast)
                     stats.notified += 1
+                    delivered += 1
                 except Exception as exc:  # pragma: no cover
                     stats.errors += 1
                     logger.warning(
@@ -1829,6 +1852,7 @@ class DesignNotInProgress48hNotifier:
                     try:
                         await limited_send_message(self.bot, int(admin_id), text=admin_message)
                         stats.notified += 1
+                        delivered += 1
                     except Exception as exc:  # pragma: no cover
                         stats.errors += 1
                         logger.warning(
@@ -1838,16 +1862,10 @@ class DesignNotInProgress48hNotifier:
                             error=str(exc),
                         )
 
-            if designer_delivered:
-                await db.mark_design_not_in_progress_48h_sent(order_id)
+            if await _finish_design_delivery(
+                "not_in_progress_48h", order_id, delivered, db.mark_design_not_in_progress_48h_sent
+            ):
                 stats.matched_users += 1
-            else:
-                logger.warning(
-                    "Take-in-progress reminder not marked sent: designer delivery failed or skipped",
-                    order_id=order_id,
-                    contractor_id=contractor_id,
-                    telegram=telegram_from_order,
-                )
 
         return stats
 
@@ -2228,7 +2246,7 @@ class IPNotifier:
                         }
                     )
                     logger.warning(
-                        "Failed to mark IP telegram_sent: ip_id=%s path=PATCH /api/v2/ip/{id}/telegram-sent error=%s",
+                        "Failed to mark IP telegram_sent: ip_id={} path=PATCH /api/v2/ip/{{id}}/telegram-sent error={}",
                         ip_id,
                         exc,
                     )

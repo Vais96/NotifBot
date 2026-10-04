@@ -111,7 +111,7 @@ async def sync_campaigns() -> int:
         logger.info("Fetching campaigns from Keitaro")
         raw = await _fetch_all_campaigns()
         prepared = _prepare_rows(raw)
-        logger.info("Fetched %s campaigns, %s with domains", len(raw), len(prepared))
+        logger.info("Fetched {} campaigns, {} with domains", len(raw), len(prepared))
         await db.upsert_keitaro_campaigns(prepared)
         return len(prepared)
 
