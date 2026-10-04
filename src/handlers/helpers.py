@@ -3,7 +3,7 @@
 from aiogram import F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
-from ..dispatcher import ADMIN_IDS, bot, dp
+from ..dispatcher import bot, dp
 from .common import STALE_BUTTON, callback_parts, is_admin
 from .. import db
 from ..utils.html import safe

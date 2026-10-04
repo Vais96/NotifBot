@@ -1,10 +1,11 @@
 """Pending action text handlers."""
 
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from loguru import logger
 
 from ..dispatcher import dp
 from .. import db
+from .common import STALE_BUTTON
 from ..utils.html import safe
 from ..utils.domain import lookup_domains_text
 from ..handlers.youtube import handle_youtube_download
@@ -113,89 +114,6 @@ async def on_text_fallback(message: Message):
                 "Откройте «Помощники» в меню и нажмите «Назначить байера» рядом с ним.\n"
                 "Помощнику уже доступны /checkdomain и кнопка «Проверить домен»."
             )
-        if action == "team:new":
-            name = message.text.strip()
-            tid = await db.create_team(name)
-            await db.clear_pending_action(message.from_user.id)
-            return await message.answer(f"Команда создана: id={tid}")
-        if action.startswith("team:setlead:"):
-            team_id = int(action.split(":", 2)[2])
-            v = message.text.strip()
-            uid = None
-            if v.startswith("tg://user?id="):
-                try:
-                    uid = int(v.split("=", 1)[1])
-                except Exception:
-                    uid = None
-            if uid is None and v.startswith("@"):
-                uname = v[1:].strip().lower()
-                users = await db.list_users()
-                hit = next((u for u in users if (u.get("username") or "").lower() == uname), None)
-                if hit:
-                    uid = int(hit["telegram_id"])  # type: ignore
-            if uid is None:
-                try:
-                    uid = int(v)
-                except Exception:
-                    await db.clear_pending_action(message.from_user.id)
-                    return await message.answer(
-                        "Не удалось распознать пользователя. Пришлите numeric Telegram ID или @username. "
-                        "Если пользователь не писал боту, попросите его отправить /start."
-                    )
-            try:
-                await db.upsert_user(uid, None, None)
-            except Exception:
-                pass
-            await db.set_user_team(uid, team_id)
-            user_row = await db.get_user(uid)
-            role_before = (user_row or {}).get("role")
-            if role_before not in ("mentor", "admin", "head"):
-                await db.set_user_role(uid, "lead")
-            await db.set_team_lead_override(team_id, uid)
-            await db.clear_pending_action(message.from_user.id)
-            return await message.answer("Лид назначен")
-        if action.startswith("myteam:add"):
-            users = await db.list_users()
-            team_id = None
-            parts = action.split(":", 2)
-            if len(parts) == 3 and parts[2]:
-                try:
-                    team_id = int(parts[2])
-                except Exception:
-                    team_id = None
-            if team_id is None:
-                team_id = await db.get_primary_lead_team(message.from_user.id)
-            if team_id is None:
-                await db.clear_pending_action(message.from_user.id)
-                return await message.answer("Нет прав или команда не найдена")
-            v = message.text.strip()
-            uid = None
-            if v.startswith("tg://user?id="):
-                try:
-                    uid = int(v.split("=", 1)[1])
-                except Exception:
-                    uid = None
-            if uid is None and v.startswith("@"):
-                uname = v[1:].strip().lower()
-                hit = next((u for u in users if (u.get("username") or "").lower() == uname), None)
-                if hit:
-                    uid = int(hit["telegram_id"])  # type: ignore
-            if uid is None:
-                try:
-                    uid = int(v)
-                except Exception:
-                    await db.clear_pending_action(message.from_user.id)
-                    return await message.answer(
-                        "Не удалось распознать пользователя. Пришлите numeric ID или @username. "
-                        "Если пользователь не писал боту, попросите его отправить /start."
-                    )
-            try:
-                await db.upsert_user(uid, None, None)
-            except Exception:
-                pass
-            await db.set_user_team(uid, team_id)
-            await db.clear_pending_action(message.from_user.id)
-            return await message.answer("Пользователь добавлен в вашу команду")
         if action.startswith("kpi:set:"):
             which = action.split(":", 2)[2]
             v = message.text.strip()
@@ -221,3 +139,9 @@ async def on_text_fallback(message: Message):
     except Exception as exc:
         logger.exception(exc)
         return await message.answer("Ошибка обработки ввода")
+
+
+@dp.callback_query()
+async def on_stale_callback(call: CallbackQuery):
+    """Registered last: buttons from removed/old menus get an answer instead of an endless spinner."""
+    await call.answer(STALE_BUTTON, show_alert=True)

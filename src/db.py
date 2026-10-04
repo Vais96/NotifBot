@@ -712,19 +712,6 @@ async def list_design_bot_subscribers() -> List[int]:
             return [int(r[0]) for r in rows] if rows else []
 
 
-async def list_telegram_ids_tg_users(*, active_only: bool = True) -> List[int]:
-    """Все telegram_id из tg_users (кто уже в основном боте). Для рассылки design-уведомлений в основной бот."""
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            if active_only:
-                await cur.execute("SELECT telegram_id FROM tg_users WHERE is_active = 1")
-            else:
-                await cur.execute("SELECT telegram_id FROM tg_users")
-            rows = await cur.fetchall()
-            return [int(r[0]) for r in rows] if rows else []
-
-
 async def is_design_assignment_sent(order_id: int) -> bool:
     """True if we already sent 'task assigned' notification for this order."""
     pool = await init_pool()
@@ -902,27 +889,6 @@ async def get_contractor_telegram_id(contractor_id: str) -> Optional[int]:
     return None
 
 
-async def set_contractor_telegram(
-    contractor_id: str,
-    telegram_username: Optional[str] = None,
-    telegram_id: Optional[int] = None,
-) -> None:
-    """Set mapping Underdog contractor_id -> telegram (for assignment notifications)."""
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO tg_underdog_contractor_telegram (contractor_id, telegram_username, telegram_id)
-                VALUES (%s, %s, %s) AS new
-                ON DUPLICATE KEY UPDATE
-                    telegram_username = COALESCE(new.telegram_username, tg_underdog_contractor_telegram.telegram_username),
-                    telegram_id = COALESCE(new.telegram_id, tg_underdog_contractor_telegram.telegram_id)
-                """,
-                (str(contractor_id).strip(), telegram_username or None, telegram_id),
-            )
-
-
 async def upsert_user(telegram_id: int, username: Optional[str], full_name: Optional[str]) -> None:
     pool = await init_pool()
     async with pool.acquire() as conn:
@@ -1000,14 +966,6 @@ async def set_helper_buyer(helper_id: int, buyer_id: int) -> None:
                 """,
                 (helper_id, buyer_id),
             )
-
-
-async def clear_helper_buyer(helper_id: int) -> None:
-    """Удаляет привязку helper -> buyer."""
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("DELETE FROM tg_helper_buyer WHERE helper_id=%s", (helper_id,))
 
 
 async def remove_helper_and_promote_to_buyer(helper_id: int) -> None:
@@ -1116,18 +1074,6 @@ async def find_user_by_username(username: Optional[str]) -> Optional[Dict[str, A
     key = username.strip().lstrip("@").lower()
     return users.get(key)
 
-async def create_team(name: str) -> int:
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("INSERT INTO tg_teams(name) VALUES(%s)", (name,))
-            return cur.lastrowid
-
-async def set_user_team(telegram_id: int, team_id: Optional[int]) -> None:
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("UPDATE tg_users SET team_id=%s WHERE telegram_id=%s", (team_id, telegram_id))
 
 async def list_teams() -> List[Dict[str, Any]]:
     pool = await init_pool()
@@ -1474,9 +1420,6 @@ async def list_user_lead_teams(user_id: int) -> List[int]:
             unique.append(tid)
     return unique
 
-async def user_has_lead_privileges(user_id: int) -> bool:
-    teams = await list_user_lead_teams(user_id)
-    return bool(teams)
 
 async def get_primary_lead_team(user_id: int) -> Optional[int]:
     teams = await list_user_lead_teams(user_id)
@@ -1708,8 +1651,6 @@ async def requeue_inbound_postbacks(
                     tuple(found),
                 )
             return found
-
-
 
 
 def _today_utc_window() -> Tuple[datetime, datetime]:
@@ -2197,10 +2138,6 @@ async def upsert_keitaro_campaigns(rows: List[Dict[str, Any]]) -> int:
                 raise
     return len(payload)
 
-
-async def replace_keitaro_campaigns(rows: List[Dict[str, Any]]) -> None:
-    """Compatibility wrapper: add/update campaigns, keep previously cached domains."""
-    await upsert_keitaro_campaigns(rows)
 
 async def find_campaigns_by_domain(domain: str) -> List[Dict[str, Any]]:
     if not domain:
@@ -2749,14 +2686,6 @@ async def log_fb_campaign_history(entries: List[Dict[str, Any]]) -> None:
             )
 
 
-async def list_fb_statuses() -> List[Dict[str, Any]]:
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute("SELECT id, code, title, description FROM fb_statuses ORDER BY id ASC")
-            return await cur.fetchall()
-
-
 async def list_fb_flags() -> List[Dict[str, Any]]:
     pool = await init_pool()
     async with pool.acquire() as conn:
@@ -2938,88 +2867,6 @@ async def fetch_fb_campaign_month_report(month_start: date) -> List[Dict[str, An
             await cur.execute(query, tuple(params))
             rows = await cur.fetchall()
     return rows or []
-
-
-async def fetch_fb_monthly_summary(limit: int = 12) -> List[Dict[str, Any]]:
-    pool = await init_pool()
-    placeholders_status = ",".join(["%s"] * len(SALE_STATUSES))
-    query = (
-        f"""
-        WITH monthly_fb AS (
-            SELECT
-                DATE_SUB(d.day_date, INTERVAL DAY(d.day_date) - 1 DAY) AS month_start,
-                COUNT(DISTINCT d.campaign_name) AS campaign_count,
-                COUNT(DISTINCT d.account_name) AS account_count,
-                SUM(COALESCE(d.spend, 0)) AS spend,
-                SUM(COALESCE(d.impressions, 0)) AS impressions,
-                SUM(COALESCE(d.clicks, 0)) AS clicks,
-                SUM(COALESCE(d.registrations, 0)) AS registrations
-            FROM fb_campaign_daily d
-            GROUP BY month_start
-        ),
-        monthly_conv AS (
-            SELECT
-                DATE_SUB(DATE(fc.conversion_time_utc), INTERVAL DAY(DATE(fc.conversion_time_utc)) - 1 DAY) AS month_start,
-                COUNT(DISTINCT fc.sub_id_2) AS campaign_count,
-                COUNT(*) AS ftd,
-                SUM(COALESCE(fc.revenue, 0)) AS revenue
-            FROM fact_conversions fc
-            WHERE fc.sub_id_2 IS NOT NULL
-              AND fc.sub_id_2 <> ''
-              AND LOWER(fc.status) IN ({placeholders_status})
-              AND EXISTS (
-                    SELECT 1
-                    FROM fb_campaign_daily d
-                    WHERE d.campaign_name = fc.sub_id_2
-                )
-            GROUP BY month_start
-        ),
-        all_months AS (
-            SELECT month_start FROM monthly_fb
-            UNION
-            SELECT month_start FROM monthly_conv
-        )
-        SELECT
-            am.month_start,
-            COALESCE(fb.campaign_count, conv.campaign_count, 0) AS campaign_count,
-            COALESCE(fb.account_count, 0) AS account_count,
-            COALESCE(fb.spend, 0) AS spend,
-            COALESCE(conv.revenue, 0) AS revenue,
-            COALESCE(conv.ftd, 0) AS ftd,
-            COALESCE(fb.impressions, 0) AS impressions,
-            COALESCE(fb.clicks, 0) AS clicks,
-            COALESCE(fb.registrations, 0) AS registrations
-        FROM all_months am
-        LEFT JOIN monthly_fb fb ON fb.month_start = am.month_start
-        LEFT JOIN monthly_conv conv ON conv.month_start = am.month_start
-        ORDER BY am.month_start DESC
-        LIMIT %s
-        """
-    )
-    async with pool.acquire() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            params: List[Any] = list(SALE_STATUSES)
-            params.append(limit)
-            await cur.execute(query, tuple(params))
-            rows = await cur.fetchall()
-    result: List[Dict[str, Any]] = []
-    for row in rows or []:
-        value = row.get("month_start")
-        month_value: Optional[date] = None
-        if isinstance(value, datetime):
-            month_value = value.date().replace(day=1)
-        elif isinstance(value, date):
-            month_value = value.replace(day=1)
-        elif isinstance(value, str):
-            try:
-                month_value = datetime.strptime(value, "%Y-%m-%d").date().replace(day=1)
-            except ValueError:
-                month_value = None
-        if month_value is None:
-            continue
-        row["month_start"] = month_value
-        result.append(row)
-    return result
 
 
 async def recompute_fb_campaign_totals(campaign_names: Iterable[str]) -> List[Dict[str, Any]]:

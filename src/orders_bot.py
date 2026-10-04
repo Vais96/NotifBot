@@ -1,7 +1,7 @@
 """Lightweight dispatcher for the dedicated orders notification bot."""
 
 from datetime import datetime
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List
 
 from aiogram import Dispatcher
 from aiogram.filters import Command, CommandStart

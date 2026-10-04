@@ -7,7 +7,6 @@ from typing import Optional
 from aiogram.types import FSInputFile, Message
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from ..dispatcher import dp
 from .. import db
 from ..services.youtube import (
     download_youtube_video,

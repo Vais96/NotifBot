@@ -10,7 +10,7 @@ from aiogram.enums.parse_mode import ParseMode
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from loguru import logger
 
-from ..dispatcher import dp, bot, ADMIN_IDS
+from ..dispatcher import dp, bot
 from .common import STALE_BUTTON, callback_parts, is_admin
 from .. import db
 from ..utils.html import safe, user_label
@@ -116,13 +116,10 @@ def _report_text(title: str, agg: dict) -> str:
 async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int | None = None, yesterday: bool = False):
     from datetime import datetime, timezone, timedelta
     try:
-        logger.info(f"Building report: title={title}, days={days}, yesterday={yesterday}, actor_id={actor_id}, chat_id={chat_id}")
         users = await db.list_users()
-        logger.info(f"Got {len(users)} users")
         if not users:
             logger.warning("No users found in database")
         user_ids = await _resolve_scope_user_ids(actor_id)
-        logger.info(f"Resolved {len(user_ids)} user_ids: {user_ids[:5] if user_ids else []}")
         if not user_ids:
             logger.warning(f"No user_ids resolved for actor_id={actor_id}, sending empty report")
         now = datetime.now(timezone.utc)
@@ -134,9 +131,7 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
         if days is not None:
             start = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days-1))
             end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        logger.info(f"Time range: {start} to {end}")
         filt = await db.get_report_filter(actor_id)
-        logger.info(f"Filters: {filt}")
         # Фильтр по байеру хранит Telegram ID. Если там чужой id (CRM/админка) или
         # байер вне доступа — раньше отчёт молча выдавал нули. Снимаем и сообщаем.
         if filt.get('buyer_id'):
@@ -169,7 +164,6 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
                 tid = int(filt['team_id'])
                 team_ids = [int(u['telegram_id']) for u in users if u.get('team_id') == tid and u.get('is_active')]
                 filter_user_ids = [uid for uid in team_ids if uid in allowed_ids]
-        logger.info(f"Calling aggregate_sales with {len(user_ids)} user_ids, start={start}, end={end}")
         try:
             agg = await db.aggregate_sales(
                 user_ids,
@@ -179,14 +173,10 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
                 creative=filt.get('creative'),
                 filter_user_ids=filter_user_ids,
             )
-            logger.info(
-                f"Aggregate result: count={agg.get('count')}, profit={agg.get('profit')}, top_offer={agg.get('top_offer')}"
-            )
         except Exception as agg_err:
             logger.exception("Error in aggregate_sales: {}", agg_err)
             raise
         text = _report_text(title, agg)
-        logger.info("Report text generated")
         # Append buyer breakdown if available
         buyer_dist = agg.get('buyer_dist') or {}
         if buyer_dist:
@@ -221,7 +211,6 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
             else:
                 text += "\n\n🧾 Офферы по выбранному байеру: данных нет."
         if days == 7 and not yesterday:
-            logger.info("Fetching trend data")
             trend = await db.trend_daily_sales(user_ids, days=7)
             if trend:
                 tline = ", ".join(f"{d.split('-')[-1]}:{c}" for d, c in trend)
@@ -246,9 +235,7 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
                 tn = next((t['name'] for t in teams if int(t['id']) == tid), str(tid))
                 fparts.append(f"team=<code>{tn}</code>")
             text += "\n🔎 Фильтры: " + ", ".join(fparts)
-        logger.info(f"Sending report message (length={len(text)})")
         await send_long(bot, chat_id, text, reply_markup=_reports_menu(actor_id))
-        logger.info("Report sent successfully")
     except Exception as e:
         logger.exception("Error in _send_period_report: {}", e)
         raise
@@ -705,7 +692,6 @@ async def cb_report_fb_month(call: CallbackQuery):
 
 @dp.callback_query(F.data == "report:today")
 async def cb_report_today(call: CallbackQuery):
-    logger.info(f"Report today requested by user {call.from_user.id}")
     try:
         await call.answer()  # Remove loading indicator immediately
     except Exception as e:
@@ -717,9 +703,7 @@ async def cb_report_today(call: CallbackQuery):
         logger.warning(f"Failed to send status message: {e}")
         status_msg = None
     try:
-        logger.info(f"Calling _send_period_report for user {call.from_user.id}")
         await _send_period_report(call.message.chat.id, call.from_user.id, "Сегодня", None, False)
-        logger.info("Report sent successfully")
         if status_msg:
             try:
                 await status_msg.delete()
@@ -745,7 +729,6 @@ async def cb_report_today(call: CallbackQuery):
 
 @dp.callback_query(F.data == "report:yesterday")
 async def cb_report_yesterday(call: CallbackQuery):
-    logger.info(f"Report yesterday requested by user {call.from_user.id}")
     try:
         await call.answer()  # Remove loading indicator immediately
     except Exception as e:
@@ -757,9 +740,7 @@ async def cb_report_yesterday(call: CallbackQuery):
         logger.warning(f"Failed to send status message: {e}")
         status_msg = None
     try:
-        logger.info(f"Calling _send_period_report for user {call.from_user.id}")
         await _send_period_report(call.message.chat.id, call.from_user.id, "Вчера", None, True)
-        logger.info("Report sent successfully")
         if status_msg:
             try:
                 await status_msg.delete()
@@ -785,7 +766,6 @@ async def cb_report_yesterday(call: CallbackQuery):
 
 @dp.callback_query(F.data == "report:week")
 async def cb_report_week(call: CallbackQuery):
-    logger.info(f"Report week requested by user {call.from_user.id}")
     try:
         await call.answer()  # Remove loading indicator immediately
     except Exception as e:
@@ -797,9 +777,7 @@ async def cb_report_week(call: CallbackQuery):
         logger.warning(f"Failed to send status message: {e}")
         status_msg = None
     try:
-        logger.info(f"Calling _send_period_report for user {call.from_user.id}")
         await _send_period_report(call.message.chat.id, call.from_user.id, "Последние 7 дней", 7, False)
-        logger.info("Report sent successfully")
         if status_msg:
             try:
                 await status_msg.delete()

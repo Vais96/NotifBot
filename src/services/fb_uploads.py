@@ -5,7 +5,7 @@ import json
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
@@ -13,9 +13,16 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from loguru import logger
 
 from .. import db, fb_csv
-from .campaigns import format_flag_decision, format_flag_label
 from ..utils.domain import resolve_campaign_assignments
-from ..utils.formatting import chunk_lines, fmt_money, fmt_percent, month_label_ru, send_long
+from ..utils.formatting import (
+    chunk_lines,
+    fmt_money,
+    fmt_percent,
+    format_flag_decision,
+    format_flag_label,
+    month_label_ru,
+    send_long,
+)
 
 NotifyAdminsFunc = Callable[[str, Exception, Optional[List[str]]], Awaitable[None]]
 

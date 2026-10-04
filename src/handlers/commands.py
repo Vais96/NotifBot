@@ -3,7 +3,7 @@
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
-from ..dispatcher import ADMIN_IDS, dp
+from ..dispatcher import dp
 from .common import is_admin
 from .. import db
 from ..handlers.menu import send_user_menu

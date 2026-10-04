@@ -296,25 +296,6 @@ def _build_order_message(order: Dict[str, Any]) -> str:
     return "\n".join(str(line) for line in lines)
 
 
-def _build_design_order_message(order: Dict[str, Any]) -> str:
-    """Сообщение для заказа дизайна (креатив/PWA) с учётом статуса."""
-    order_id = order.get("id")
-    name = order.get("name") or order.get("type") or "—"
-    count = order.get("count") or 0
-    total = order.get("total") or order.get("price") or "0"
-    status_id = order.get("status_id")
-    status_text = _order_status_text(status_id)
-    lines = [
-        f"📐 Заказ (дизайн) ID {order_id}",
-        "",
-        f"Название: {safe(name)}",
-        f"Количество: {count}",
-        f"Сумма: {safe(total)}",
-        f"Статус: {status_text}",
-    ]
-    return "\n".join(str(line) for line in lines)
-
-
 def _build_design_assignment_message(
     order: Dict[str, Any],
     designer_name: Optional[str] = None,
@@ -554,10 +535,6 @@ def _is_design_order_awaiting_take_in_progress(order: Dict[str, Any]) -> bool:
     return not _is_design_order_taken_in_progress(order)
 
 
-def _yesterday() -> date:
-    return datetime.now(timezone.utc).date() - timedelta(days=1)
-
-
 def _parse_date(value: Any) -> Optional[date]:
     if not value:
         return None
@@ -730,37 +707,6 @@ class UnderdogClient:
         logger.info("Received orders", type=order_type, count=len(orders))
         return orders
 
-    async def fetch_orders_for_date(
-        self,
-        target_date: date,
-        *,
-        status_id: int = 1,
-        telegram_sent: int = 0,
-    ) -> List[Dict[str, Any]]:
-        params = {
-            "date_from": target_date.strftime("%Y-%m-%d"),
-            "date_to": target_date.strftime("%Y-%m-%d"),
-            "status_id": status_id,
-            "telegram_sent": telegram_sent,
-        }
-        logger.info("Fetching Underdog orders", params=params)
-        resp = await self.request("GET", ORDERS_PATH, params=params)
-        orders = _extract_items(resp.json())
-        filtered = [
-            order
-            for order in orders
-            if int(order.get("status_id", 0)) == status_id
-            and int(order.get("telegram_sent", 0)) == telegram_sent
-        ]
-        logger.info("Received orders", total=len(orders), matched=len(filtered))
-        return filtered
-
-    async def fetch_yesterday_orders(self, *, status_id: int = 1, telegram_sent: int = 0) -> List[Dict[str, Any]]:
-        return await self.fetch_orders_for_date(
-            _yesterday(),
-            status_id=status_id,
-            telegram_sent=telegram_sent,
-        )
 
     ORDER_TYPES_ORDERS_BOT = ("domain", "transferDomain")
     ORDER_TYPES_DESIGN_BOT = ("pwaDesign", "creative")

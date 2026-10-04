@@ -4,12 +4,11 @@ from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from ..dispatcher import ADMIN_IDS, bot, dp
+from ..dispatcher import bot, dp
 from .common import STALE_BUTTON, callback_parts, is_admin
 from ..constants import Role
 from .. import db
 from ..utils.html import safe
-from ..handlers.users import _resolve_user_id
 
 TEAM_PICKER_PAGE_SIZE = 40
 
@@ -18,61 +17,6 @@ def _same_team(user_team_id, team_id: int) -> bool:
     if user_team_id is None:
         return False
     return int(user_team_id) == int(team_id)
-
-
-def _user_picker_label(user: dict) -> str:
-    username = user.get("username")
-    if username:
-        return f"@{username}"
-    return str(user["telegram_id"])
-
-
-def _team_add_picker_kb(team_id: int, users: list[dict], page: int = 0) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    total = len(users)
-    pages = max((total - 1) // TEAM_PICKER_PAGE_SIZE + 1, 1)
-    page = max(0, min(page, pages - 1))
-    start = page * TEAM_PICKER_PAGE_SIZE
-    for u in users[start : start + TEAM_PICKER_PAGE_SIZE]:
-        rows.append([
-            InlineKeyboardButton(
-                text=f"Добавить {_user_picker_label(u)}",
-                callback_data=f"team:add:{team_id}:{u['telegram_id']}",
-            )
-        ])
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"team:add_page:{team_id}:{page - 1}"))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="team:noop"))
-    if page < pages - 1:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"team:add_page:{team_id}:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _team_remove_picker_kb(team_id: int, users: list[dict], page: int = 0) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    total = len(users)
-    pages = max((total - 1) // TEAM_PICKER_PAGE_SIZE + 1, 1)
-    page = max(0, min(page, pages - 1))
-    start = page * TEAM_PICKER_PAGE_SIZE
-    for u in users[start : start + TEAM_PICKER_PAGE_SIZE]:
-        rows.append([
-            InlineKeyboardButton(
-                text=f"Убрать {_user_picker_label(u)}",
-                callback_data=f"team:remove:{team_id}:{u['telegram_id']}",
-            )
-        ])
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"team:remove_page:{team_id}:{page - 1}"))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="team:noop"))
-    if page < pages - 1:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"team:remove_page:{team_id}:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _myteam_menu() -> InlineKeyboardMarkup:
@@ -128,24 +72,6 @@ async def cb_myteam_list(call: CallbackQuery):
     await call.answer()
 
 
-@dp.callback_query(F.data == "myteam:add")
-async def cb_myteam_add(call: CallbackQuery):
-    """Handle my team add callback."""
-    await call.answer("Состав команд обновляется из Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data == "myteam:remove")
-async def cb_myteam_remove(call: CallbackQuery):
-    """Handle my team remove callback."""
-    await call.answer("Состав команд обновляется из Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("myteam:remove:"))
-async def cb_myteam_remove_user(call: CallbackQuery):
-    """Handle my team remove user callback."""
-    await call.answer("Состав команд обновляется из Admin API", show_alert=True)
-
-
 @dp.callback_query(F.data == "teams:list")
 async def cb_teams_list(call: CallbackQuery):
     """Handle teams list callback."""
@@ -158,24 +84,6 @@ async def cb_teams_list(call: CallbackQuery):
     lines = [f"#{t['id']} — {safe(t['name'])}" for t in teams]
     await call.message.answer("Команды:\n" + "\n".join(lines))
     await call.answer()
-
-
-@dp.callback_query(F.data == "teams:new")
-async def cb_team_new(call: CallbackQuery):
-    """Handle team creation callback."""
-    await call.answer("Команды создаются в Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data == "teams:setlead")
-async def cb_team_setlead(call: CallbackQuery):
-    """Handle team set lead callback."""
-    await call.answer("Лиды назначаются в Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("team:choose_for_lead:"))
-async def cb_team_choose_for_lead(call: CallbackQuery):
-    """Handle team choose for lead callback."""
-    await call.answer("Лиды назначаются в Admin API", show_alert=True)
 
 
 @dp.callback_query(F.data == "teams:members")
@@ -208,51 +116,6 @@ async def cb_team_members_manage(call: CallbackQuery):
     else:
         await call.message.answer("Участники: пусто")
     await call.answer()
-
-
-@dp.callback_query(F.data == "team:noop")
-async def cb_team_noop(call: CallbackQuery):
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("team:add_page:"))
-async def cb_team_add_page(call: CallbackQuery):
-    await call.answer("Состав команд обновляется из Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("team:remove_page:"))
-async def cb_team_remove_page(call: CallbackQuery):
-    await call.answer("Состав команд обновляется из Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("team:refresh_names:"))
-async def cb_team_refresh_names(call: CallbackQuery):
-    """Handle team refresh names callback."""
-    await call.answer("Профили и состав обновляются из Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("team:add:"))
-async def cb_team_add_member(call: CallbackQuery):
-    """Handle team add member callback."""
-    await call.answer("Состав команд обновляется из Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("team:remove:"))
-async def cb_team_remove_member(call: CallbackQuery):
-    """Handle team remove member callback."""
-    await call.answer("Состав команд обновляется из Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("team:choose:"))
-async def cb_team_choose(call: CallbackQuery):
-    """Handle team choose callback."""
-    await call.answer("Состав команд обновляется из Admin API", show_alert=True)
-
-
-@dp.callback_query(F.data.startswith("team:set:"))
-async def cb_team_set(call: CallbackQuery):
-    """Handle team set callback."""
-    await call.answer("Состав команд обновляется из Admin API", show_alert=True)
 
 
 @dp.message(Command("createteam"))

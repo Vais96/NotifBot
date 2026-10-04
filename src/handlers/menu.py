@@ -4,7 +4,7 @@ from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from ..dispatcher import ADMIN_IDS, bot, dp
+from ..dispatcher import bot, dp
 from .common import is_admin
 from .. import db, keitaro_sync
 from ..handlers.users import _send_whoami, _send_list_users, _send_list_routes, _send_manage

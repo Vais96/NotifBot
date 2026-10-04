@@ -4,7 +4,7 @@ from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from ..dispatcher import ADMIN_IDS, bot, dp
+from ..dispatcher import bot, dp
 from .common import STALE_BUTTON, callback_parts, is_admin
 from ..constants import Role
 from .. import db

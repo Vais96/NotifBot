@@ -1,7 +1,7 @@
 """Domain-related utilities."""
 
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set
 
 from .. import db
 from .html import safe

@@ -6,11 +6,10 @@ from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from ..dispatcher import ADMIN_IDS, bot, dp
+from ..dispatcher import bot, dp
 from .common import is_admin
 from .. import db
 from ..utils.html import safe
-from ..handlers.users import _resolve_user_id
 
 
 def _alias_token(alias: str) -> str:

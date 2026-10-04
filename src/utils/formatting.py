@@ -3,7 +3,7 @@
 import html
 from datetime import date
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 from .. import fb_csv
 
@@ -101,7 +101,7 @@ def format_flag_decision(decision: Optional[fb_csv.FlagDecision]) -> str:
         label = _FLAG_CODE_LABELS.get((decision.code or "").upper(), decision.code)
     if reasons:
         return f"{label} ({'; '.join(reasons)})"
-    return label
+    return label or "—"
 
 
 def format_buyer_label(buyer_id, users_by_id: dict[int, dict[str, Any]]) -> str:
