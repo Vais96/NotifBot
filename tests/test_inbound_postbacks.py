@@ -109,7 +109,7 @@ class UnderdogRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_retries_5xx_then_succeeds(self) -> None:
         statuses = iter([503, 429, 200])
         client = self._client(lambda request: httpx.Response(next(statuses), json={}))
-        with patch("src.underdog.asyncio.sleep", AsyncMock()):
+        with patch("src.underdog.client.asyncio.sleep", AsyncMock()):
             resp = await client.request("GET", "/api/x")
         self.assertEqual(resp.status_code, 200)
 
@@ -118,7 +118,7 @@ class UnderdogRetryTests(unittest.IsolatedAsyncioTestCase):
             raise httpx.ConnectError("refused", request=request)
 
         client = self._client(boom)
-        with patch("src.underdog.asyncio.sleep", AsyncMock()), self.assertRaises(underdog.UnderdogAPIError):
+        with patch("src.underdog.client.asyncio.sleep", AsyncMock()), self.assertRaises(underdog.UnderdogAPIError):
             await client.request("GET", "/api/x")
 
     async def test_4xx_not_retried(self) -> None:

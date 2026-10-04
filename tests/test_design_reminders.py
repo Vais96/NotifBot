@@ -57,10 +57,10 @@ class DesignReminderTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(return_value=[123456]),
             ),
             patch(
-                "src.underdog._resolve_designer_telegram_id_from_order",
+                "src.underdog.notifiers.design._resolve_designer_telegram_id_from_order",
                 AsyncMock(return_value=(123456, "77", "designer", "Designer")),
             ),
-            patch("src.underdog.limited_send_message", send_message),
+            patch("src.underdog.notifiers.design.limited_send_message", send_message),
             patch("src.underdog.db.mark_design_not_in_progress_48h_sent", mark_sent),
         ):
             stats = await DesignNotInProgress48hNotifier(
@@ -87,10 +87,10 @@ class DesignReminderTests(unittest.IsolatedAsyncioTestCase):
             patch("src.underdog.db.is_design_not_in_progress_48h_sent", AsyncMock(return_value=False)),
             patch("src.underdog.db.list_design_bot_subscribers", AsyncMock(return_value=[])),
             patch(
-                "src.underdog._resolve_designer_telegram_id_from_order",
+                "src.underdog.notifiers.design._resolve_designer_telegram_id_from_order",
                 AsyncMock(return_value=(None, "77", "", None)),
             ),
-            patch("src.underdog.limited_send_message", AsyncMock()),
+            patch("src.underdog.notifiers.design.limited_send_message", AsyncMock()),
             patch("src.underdog.db.mark_design_not_in_progress_48h_sent", mark_sent),
             patch("src.underdog.db.admin_notify_throttle_allow_send", throttle),
         ):
