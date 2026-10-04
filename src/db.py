@@ -9,6 +9,7 @@ import ssl
 import json
 
 _pool: Optional[aiomysql.Pool] = None
+_pool_lock = asyncio.Lock()
 
 def _parse_mysql_dsn(dsn: str) -> Dict[str, Any]:
     # supports mysql://user:pass@host:port/db?charset=utf8mb4
@@ -242,6 +243,46 @@ SCHEMA_SQL = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # Underdog items delivered to a chat: guards against re-sending when the telegram-sent PATCH failed
+    """
+    CREATE TABLE IF NOT EXISTS tg_underdog_sent (
+        kind ENUM('order','domain','ip','ticket') NOT NULL,
+        external_id VARCHAR(64) NOT NULL,
+        chat_id BIGINT NOT NULL,
+        sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (kind, external_id, chat_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Durable inbox for Keitaro postbacks: row is written before the 200, processed afterwards, retried on startup
+    """
+    CREATE TABLE IF NOT EXISTS tg_inbound_postbacks (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        fingerprint VARCHAR(64) NULL,
+        raw JSON NOT NULL,
+        status ENUM('pending','done','failed','duplicate') NOT NULL DEFAULT 'pending',
+        attempts TINYINT NOT NULL DEFAULT 0,
+        error TEXT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        processed_at TIMESTAMP NULL,
+        INDEX idx_inbound_status_created (status, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+]
+
+# (table, column, ADD COLUMN clause) — applied when SHOW COLUMNS lacks the column
+_COLUMN_MIGRATIONS: List[Tuple[str, str, str]] = [
+    ("tg_report_filters", "buyer_id", "buyer_id BIGINT NULL AFTER creative"),
+    ("tg_report_filters", "team_id", "team_id BIGINT NULL AFTER buyer_id"),
+    ("tg_events", "inbound_id", "inbound_id BIGINT NULL"),
+    ("tg_users", "orders_opt_out", "orders_opt_out TINYINT(1) NOT NULL DEFAULT 0"),
+    ("tg_keitaro_sale_dedupe", "inbound_id", "inbound_id BIGINT NULL"),
+]
+# (table, index name, ADD clause) — applied when SHOW INDEX lacks the index
+_INDEX_MIGRATIONS: List[Tuple[str, str, str]] = [
+    ("tg_events", "idx_events_clickid", "INDEX idx_events_clickid (clickid)"),
+    ("tg_events", "idx_events_created", "INDEX idx_events_created (created_at)"),
+    ("tg_events", "idx_events_routed_created", "INDEX idx_events_routed_created (routed_user_id, created_at)"),
+    ("tg_events", "uq_events_inbound", "UNIQUE INDEX uq_events_inbound (inbound_id)"),
 ]
 
 
@@ -278,78 +319,90 @@ async def _ensure_fb_reference_data(conn: aiomysql.Connection) -> None:
                 ],
             )
 
+async def _apply_schema(conn: aiomysql.Connection) -> None:
+    async with conn.cursor() as cur:
+        for i, stmt in enumerate(SCHEMA_SQL, start=1):
+            try:
+                await cur.execute(stmt)
+            except Exception as e:
+                logger.error("Schema DDL failed at statement {}: {}\nError: {}", i, stmt, e)
+                raise
+        # Ensure 'mentor'/'helper' exist in role enum (migration for existing installations)
+        try:
+            await cur.execute("SHOW COLUMNS FROM tg_users LIKE 'role'")
+            col = await cur.fetchone()
+            col_type = str(col[1]).lower() if col and len(col) > 1 else ""
+            if "enum(" in col_type and ("mentor" not in col_type or "helper" not in col_type):
+                logger.info("Altering tg_users.role to include 'mentor' and 'helper'")
+                await cur.execute("ALTER TABLE tg_users MODIFY role ENUM('buyer','lead','head','admin','mentor','helper') NOT NULL DEFAULT 'buyer'")
+        except Exception as e:
+            logger.warning("Failed to ensure mentor/helper in role enum: {}", e)
+        for table, column, clause in _COLUMN_MIGRATIONS:
+            try:
+                await cur.execute(f"SHOW COLUMNS FROM {table} LIKE %s", (column,))
+                if not await cur.fetchone():
+                    logger.info("Altering {}: ADD COLUMN {}", table, column)
+                    await cur.execute(f"ALTER TABLE {table} ADD COLUMN {clause}")
+            except Exception as e:
+                logger.warning("Failed to add column {}.{}: {}", table, column, e)
+        for table, index, clause in _INDEX_MIGRATIONS:
+            try:
+                await cur.execute(f"SHOW INDEX FROM {table} WHERE Key_name = %s", (index,))
+                if not await cur.fetchone():
+                    logger.info("Altering {}: ADD {}", table, index)
+                    await cur.execute(f"ALTER TABLE {table} ADD {clause}")
+            except Exception as e:
+                logger.warning("Failed to add index {}.{}: {}", table, index, e)
+    try:
+        await _ensure_fb_reference_data(conn)
+    except Exception as e:
+        logger.warning("Failed to ensure default FB reference data: {}", e)
+
+
+async def _create_pool() -> aiomysql.Pool:
+    params = _parse_mysql_dsn(settings.database_url)
+    last_error: Optional[Exception] = None
+    for attempt in range(1, 6):
+        pool: Optional[aiomysql.Pool] = None
+        try:
+            # Session in UTC: TIMESTAMP columns are compared with datetime.now(timezone.utc) in Python
+            pool = await aiomysql.create_pool(
+                **params, minsize=1, maxsize=10, pool_recycle=3600, init_command="SET time_zone='+00:00'"
+            )
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT 1")
+            return pool
+        except Exception as e:
+            last_error = e
+            if pool is not None:
+                pool.close()
+                await pool.wait_closed()
+            logger.warning("MySQL connection attempt {}/5 failed: {}. Retrying in {}s...", attempt, e, attempt * 2)
+            if attempt < 5:
+                await asyncio.sleep(attempt * 2)
+    assert last_error is not None
+    raise last_error
+
+
 async def init_pool() -> aiomysql.Pool:
     global _pool
-    if _pool is None:
+    if _pool is not None:
+        return _pool
+    async with _pool_lock:
+        if _pool is not None:
+            return _pool
         logger.info("Creating MySQL pool")
-        params = _parse_mysql_dsn(settings.database_url)
-        last_error: Optional[Exception] = None
-        for attempt in range(1, 6):
-            try:
-                _pool = await aiomysql.create_pool(**params, minsize=1, maxsize=10)
-                async with _pool.acquire() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.execute("SELECT 1")
-                break
-            except Exception as e:
-                last_error = e
-                if _pool is not None:
-                    try:
-                        _pool.close()
-                        await _pool.wait_closed()
-                    except Exception:
-                        pass
-                    _pool = None
-                logger.warning(
-                    f"MySQL connection attempt {attempt}/5 failed: {e}. Retrying in {attempt * 2}s..."
-                )
-                if attempt < 5:
-                    await asyncio.sleep(attempt * 2)
-        if _pool is None:
-            assert last_error is not None
-            raise last_error
-        async with _pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                for i, stmt in enumerate(SCHEMA_SQL, start=1):
-                    try:
-                        logger.debug(f"Applying schema statement {i}/{len(SCHEMA_SQL)}")
-                        await cur.execute(stmt)
-                    except Exception as e:
-                        logger.error(f"Schema DDL failed at statement {i}: {stmt}\nError: {e}")
-                        raise
-                # Ensure 'mentor' exists in role enum (migration for existing installations)
-                try:
-                    await cur.execute("SHOW COLUMNS FROM tg_users LIKE 'role'")
-                    col = await cur.fetchone()
-                    if col and isinstance(col, (list, tuple)):
-                        col_type = col[1] if len(col) > 1 else ''
-                    else:
-                        col_type = ''
-                    if 'enum(' in col_type.lower() and 'mentor' not in col_type:
-                        logger.info("Altering tg_users.role to include 'mentor'")
-                        await cur.execute("ALTER TABLE tg_users MODIFY role ENUM('buyer','lead','head','admin','mentor') NOT NULL DEFAULT 'buyer'")
-                    if 'enum(' in col_type.lower() and 'helper' not in col_type:
-                        logger.info("Altering tg_users.role to include 'helper'")
-                        await cur.execute("ALTER TABLE tg_users MODIFY role ENUM('buyer','lead','head','admin','mentor','helper') NOT NULL DEFAULT 'buyer'")
-                except Exception as e:
-                    logger.warning(f"Failed to ensure mentor/helper in role enum: {e}")
-                # Ensure tg_report_filters has buyer_id and team_id columns (migration for existing installations)
-                try:
-                    await cur.execute("SHOW COLUMNS FROM tg_report_filters")
-                    cols = await cur.fetchall()
-                    col_names = {str(c[0]) for c in cols} if cols else set()
-                    if 'buyer_id' not in col_names:
-                        logger.info("Altering tg_report_filters to add buyer_id")
-                        await cur.execute("ALTER TABLE tg_report_filters ADD COLUMN buyer_id BIGINT NULL AFTER creative")
-                    if 'team_id' not in col_names:
-                        logger.info("Altering tg_report_filters to add team_id")
-                        await cur.execute("ALTER TABLE tg_report_filters ADD COLUMN team_id BIGINT NULL AFTER buyer_id")
-                except Exception as e:
-                    logger.warning(f"Failed to ensure columns in tg_report_filters: {e}")
-                try:
-                    await _ensure_fb_reference_data(conn)
-                except Exception as e:
-                    logger.warning(f"Failed to ensure default FB reference data: {e}")
+        pool = await _create_pool()
+        try:
+            async with pool.acquire() as conn:
+                await _apply_schema(conn)
+        except Exception:
+            # Do not keep a pool with a half-applied schema: next call retries the DDL
+            pool.close()
+            await pool.wait_closed()
+            raise
+        _pool = pool
     return _pool
 
 async def close_pool() -> None:
@@ -379,33 +432,30 @@ def _dt_as_utc_naive(dt: Any) -> datetime:
 async def admin_notify_throttle_allow_send(dedupe_key: str) -> bool:
     """Отправить ли админский алерт в Telegram. Первый раз пишем в БД; далее не чаще раза в час; спустя 24 ч с первого — больше не слать (пока не clear)."""
     k = (dedupe_key or "none")[:384]
-    pool = await init_pool()
+    now = _utc_naive().replace(microsecond=0)
     try:
+        pool = await init_pool()
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
+                # One atomic statement: rowcount 1 = new key, 2 = window passed (bumped), 0 = throttled
                 await cur.execute(
-                    "SELECT first_sent_at, last_sent_at FROM tg_admin_notify_throttle WHERE dedupe_key=%s",
-                    (k,),
-                )
-                row = await cur.fetchone()
-                now = _utc_naive()
-                if row is None:
-                    await cur.execute(
-                        "INSERT INTO tg_admin_notify_throttle (dedupe_key, first_sent_at, last_sent_at) VALUES (%s, %s, %s)",
-                        (k, now, now),
+                    """
+                    INSERT INTO tg_admin_notify_throttle (dedupe_key, first_sent_at, last_sent_at)
+                    VALUES (%s, %s, %s) AS new
+                    ON DUPLICATE KEY UPDATE last_sent_at = IF(
+                        tg_admin_notify_throttle.first_sent_at > new.last_sent_at - INTERVAL %s SECOND
+                        AND tg_admin_notify_throttle.last_sent_at <= new.last_sent_at - INTERVAL %s SECOND,
+                        new.last_sent_at,
+                        tg_admin_notify_throttle.last_sent_at
                     )
-                    return True
-                first_sent = _dt_as_utc_naive(row[0])
-                last_sent = _dt_as_utc_naive(row[1])
-                if now - first_sent >= _ADMIN_ALERT_MUTE_AFTER_FIRST:
-                    return False
-                if now - last_sent < _ADMIN_ALERT_MIN_INTERVAL:
-                    return False
-                await cur.execute(
-                    "UPDATE tg_admin_notify_throttle SET last_sent_at=%s WHERE dedupe_key=%s",
-                    (now, k),
+                    """,
+                    (
+                        k, now, now,
+                        int(_ADMIN_ALERT_MUTE_AFTER_FIRST.total_seconds()),
+                        int(_ADMIN_ALERT_MIN_INTERVAL.total_seconds()),
+                    ),
                 )
-                return True
+                return int(cur.rowcount or 0) in (1, 2)
     except Exception as e:
         logger.warning("admin_notify_throttle_allow_send failed, allowing send", key=k, error=str(e))
         return True
@@ -423,6 +473,32 @@ async def admin_notify_throttle_clear(dedupe_key: str) -> None:
                 await cur.execute("DELETE FROM tg_admin_notify_throttle WHERE dedupe_key=%s", (k,))
     except Exception as e:
         logger.warning("admin_notify_throttle_clear failed", key=k, error=str(e))
+
+
+async def underdog_sent_ids(kind: str, external_ids: List[str], chat_id: int) -> set:
+    if not external_ids:
+        return set()
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            placeholders = ",".join(["%s"] * len(external_ids))
+            await cur.execute(
+                f"SELECT external_id FROM tg_underdog_sent WHERE kind=%s AND chat_id=%s AND external_id IN ({placeholders})",
+                (kind, chat_id, *external_ids),
+            )
+            return {str(r[0]) for r in await cur.fetchall()}
+
+
+async def mark_underdog_sent(kind: str, external_ids: List[str], chat_id: int) -> None:
+    if not external_ids:
+        return
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                "INSERT IGNORE INTO tg_underdog_sent (kind, external_id, chat_id) VALUES (%s, %s, %s)",
+                [(kind, eid, chat_id) for eid in external_ids],
+            )
 
 
 async def add_design_bot_subscriber(chat_id: int) -> None:
@@ -625,14 +701,14 @@ async def get_contractor_telegram_id(contractor_id: str) -> Optional[int]:
                 (str(contractor_id).strip(),),
             )
             row = await cur.fetchone()
-            if row and row.get("telegram_id"):
-                return int(row["telegram_id"])
-            username = (row or {}).get("telegram_username")
-            if username:
-                handle = (str(username).strip()).lstrip("@").lower()
-                user = await find_user_by_username(handle)
-                if user:
-                    return int(user["telegram_id"])
+    # find_user_by_username takes its own connection — call it after releasing ours
+    if row and row.get("telegram_id"):
+        return int(row["telegram_id"])
+    username = (row or {}).get("telegram_username")
+    if username:
+        user = await find_user_by_username(str(username).strip().lstrip("@").lower())
+        if user:
+            return int(user["telegram_id"])
     return None
 
 
@@ -667,8 +743,7 @@ async def upsert_user(telegram_id: int, username: Optional[str], full_name: Opti
                 VALUES(%s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     username = COALESCE(NULLIF(VALUES(username), ''), username),
-                    full_name = COALESCE(NULLIF(VALUES(full_name), ''), full_name),
-                    is_active = 1
+                    full_name = COALESCE(NULLIF(VALUES(full_name), ''), full_name)
                 """,
                 (telegram_id, username, full_name)
             )
@@ -697,6 +772,14 @@ async def set_user_role(telegram_id: int, role: str) -> None:
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("UPDATE tg_users SET role=%s WHERE telegram_id=%s", (role, telegram_id))
+
+async def set_orders_opt_out(telegram_id: int, opt_out: bool) -> None:
+    """Orders-bot unsubscribe (/unsubscribe, cleared by /start in orders bot); main bot is unaffected."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("UPDATE tg_users SET orders_opt_out=%s WHERE telegram_id=%s", (1 if opt_out else 0, telegram_id))
+
 
 async def set_user_active(telegram_id: int, is_active: bool) -> None:
     pool = await init_pool()
@@ -811,7 +894,9 @@ async def list_users_as_buyer_candidates() -> List[Dict[str, Any]]:
             return await cur.fetchall() or []
 
 
-async def fetch_users_by_usernames(usernames: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+async def fetch_users_by_usernames(usernames: Iterable[str], *, orders_recipients: bool = False) -> Dict[str, Dict[str, Any]]:
+    """orders_recipients=True — для рассылок orders-бота: без отписавшихся (/unsubscribe)."""
+    opt_out_sql = "AND orders_opt_out=0 " if orders_recipients else ""
     normalized = []
     for raw in usernames:
         if not raw:
@@ -826,7 +911,7 @@ async def fetch_users_by_usernames(usernames: Iterable[str]) -> Dict[str, Dict[s
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                f"SELECT telegram_id, username, full_name FROM tg_users WHERE is_active=1 AND LOWER(username) IN ({placeholders})",
+                f"SELECT telegram_id, username, full_name FROM tg_users WHERE is_active=1 {opt_out_sql}AND LOWER(username) IN ({placeholders})",
                 tuple(normalized),
             )
             rows = await cur.fetchall()
@@ -1235,17 +1320,27 @@ async def claim_keitaro_sale_postback(
     fingerprint: str,
     *,
     click_id: Optional[str] = None,
+    inbound_id: Optional[int] = None,
 ) -> bool:
-    """Atomically claim a sale and reject retries of click IDs saved before this key format."""
+    """Atomically claim a sale and reject retries of click IDs saved before this key format.
+
+    A claim made by the same tg_inbound_postbacks row (retry after a crash) stays ours.
+    """
     pool = await init_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "INSERT IGNORE INTO tg_keitaro_sale_dedupe (dedupe_key) VALUES (%s)",
-                (fingerprint,),
+                "INSERT IGNORE INTO tg_keitaro_sale_dedupe (dedupe_key, inbound_id) VALUES (%s, %s)",
+                (fingerprint, inbound_id),
             )
             if int(cur.rowcount or 0) != 1:
-                return False
+                if inbound_id is None:
+                    return False
+                await cur.execute(
+                    "SELECT inbound_id FROM tg_keitaro_sale_dedupe WHERE dedupe_key=%s", (fingerprint,)
+                )
+                row = await cur.fetchone()
+                return bool(row) and row[0] is not None and int(row[0]) == int(inbound_id)
 
             normalized_click_id = str(click_id or "").strip()
             if not normalized_click_id:
@@ -1272,7 +1367,8 @@ async def claim_keitaro_sale_postback(
             return (await cur.fetchone()) is None
 
 
-async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
+async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int], inbound_id: Optional[int] = None) -> None:
+    """Insert into tg_events; a retry of the same inbound postback (unique inbound_id) is a no-op."""
     pool = await init_pool()
     payload = {
         "status": raw.get("status") or raw.get("action"),
@@ -1287,8 +1383,9 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO tg_events(status, offer, country, source, payout, currency, clickid, raw, routed_user_id)
-                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO tg_events(status, offer, country, source, payout, currency, clickid, raw, routed_user_id, inbound_id)
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE id = id
                 """,
                 (
                     payload["status"], payload["offer"], payload["country"], payload["source"],
@@ -1298,9 +1395,93 @@ async def log_event(raw: Dict[str, Any], routed_user_id: Optional[int]) -> None:
                         ))(payload["payout"]) if (payload["payout"] not in (None, "")) else None
                     )
                     if True else None,
-                    payload["currency"], payload["clickid"], json.dumps(raw, ensure_ascii=False), routed_user_id
+                    payload["currency"], payload["clickid"], json.dumps(raw, ensure_ascii=False), routed_user_id,
+                    inbound_id,
                 )
             )
+
+async def enqueue_inbound_postback(raw: Dict[str, Any], fingerprint: Optional[str]) -> int:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO tg_inbound_postbacks (fingerprint, raw) VALUES (%s, %s)",
+                (fingerprint, json.dumps(raw, ensure_ascii=False)),
+            )
+            return int(cur.lastrowid)
+
+
+async def claim_inbound_postback(inbound_id: int) -> Optional[Dict[str, Any]]:
+    """Take a pending/failed row for processing (attempts += 1). None if already done/duplicate or missing."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE tg_inbound_postbacks SET attempts = attempts + 1 WHERE id=%s AND status IN ('pending','failed')",
+                (inbound_id,),
+            )
+            if int(cur.rowcount or 0) != 1:
+                return None
+            await cur.execute("SELECT raw FROM tg_inbound_postbacks WHERE id=%s", (inbound_id,))
+            row = await cur.fetchone()
+            return json.loads(row[0]) if row else None
+
+
+async def finish_inbound_postback(inbound_id: int, status: str, error: Optional[str] = None) -> None:
+    assert status in ("done", "failed", "duplicate")
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE tg_inbound_postbacks SET status=%s, error=%s, processed_at=UTC_TIMESTAMP() WHERE id=%s",
+                (status, (error or None) and error[:4000], inbound_id),
+            )
+
+
+async def list_inbound_postbacks_for_retry(max_attempts: int = 3, min_age_seconds: int = 60) -> List[int]:
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT id FROM tg_inbound_postbacks WHERE status IN ('pending','failed') AND attempts < %s "
+                "AND created_at < UTC_TIMESTAMP() - INTERVAL %s SECOND ORDER BY id",
+                (max_attempts, min_age_seconds),
+            )
+            return [int(r[0]) for r in await cur.fetchall()]
+
+
+async def requeue_inbound_postbacks(
+    *,
+    ids: Optional[List[int]] = None,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    dry_run: bool = False,
+) -> List[int]:
+    """Select rows for replay and (unless dry_run) reset them to pending.
+
+    Explicit ids — any status (manual resend). Time range [since, until) in UTC — only pending/failed.
+    """
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            if ids:
+                placeholders = ",".join(["%s"] * len(ids))
+                await cur.execute(f"SELECT id FROM tg_inbound_postbacks WHERE id IN ({placeholders}) ORDER BY id", tuple(ids))
+            else:
+                await cur.execute(
+                    "SELECT id FROM tg_inbound_postbacks WHERE status IN ('pending','failed') "
+                    "AND created_at >= %s AND created_at < %s ORDER BY id",
+                    (_dt_as_utc_naive(since), _dt_as_utc_naive(until)),
+                )
+            found = [int(r[0]) for r in await cur.fetchall()]
+            if found and not dry_run:
+                placeholders = ",".join(["%s"] * len(found))
+                await cur.execute(
+                    f"UPDATE tg_inbound_postbacks SET status='pending', attempts=0, error=NULL WHERE id IN ({placeholders})",
+                    tuple(found),
+                )
+            return found
+
 
 SALE_LIKE_STATUSES: Tuple[str, ...] = (
     "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success"
@@ -1720,19 +1901,15 @@ async def set_alias(alias: str, buyer_id: Any = _UNSET, lead_id: Any = _UNSET) -
     a = (alias or "").strip().lower()
     if not a:
         return
-    # Upsert logic: if row exists, update provided fields; else insert
+    # Atomic upsert: on existing alias only the provided fields change
+    updates = [f"{col} = new.{col}" for col, val in (("buyer_id", buyer_id), ("lead_id", lead_id)) if val is not _UNSET]
     async with pool.acquire() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute("SELECT buyer_id, lead_id FROM tg_aliases WHERE alias=%s", (a,))
-            row = await cur.fetchone()
-            if row:
-                new_buyer = row.get("buyer_id") if buyer_id is _UNSET else buyer_id
-                new_lead = row.get("lead_id") if lead_id is _UNSET else lead_id
-                await cur.execute("UPDATE tg_aliases SET buyer_id=%s, lead_id=%s WHERE alias=%s", (new_buyer, new_lead, a))
-            else:
-                b_val = None if buyer_id is _UNSET else buyer_id
-                l_val = None if lead_id is _UNSET else lead_id
-                await cur.execute("INSERT INTO tg_aliases(alias, buyer_id, lead_id) VALUES(%s, %s, %s)", (a, b_val, l_val))
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO tg_aliases(alias, buyer_id, lead_id) VALUES(%s, %s, %s) AS new "
+                "ON DUPLICATE KEY UPDATE " + (", ".join(updates) or "alias = tg_aliases.alias"),
+                (a, None if buyer_id is _UNSET else buyer_id, None if lead_id is _UNSET else lead_id),
+            )
 
 async def list_aliases() -> List[Dict[str, Any]]:
     pool = await init_pool()

@@ -3,20 +3,16 @@
 from datetime import datetime
 from typing import Any, Dict, Iterable, List
 
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram import Dispatcher
 from aiogram.filters import Command, CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 from loguru import logger
 
 from .config import settings
 from . import db, underdog
+from .telegram_rate_limit import make_bot
 
-orders_bot = Bot(
-    token=settings.orders_bot_token or settings.telegram_bot_token,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
+orders_bot = make_bot(settings.orders_bot_token or settings.telegram_bot_token)
 orders_dp = Dispatcher()
 
 def build_menu_keyboard(*, is_admin: bool) -> ReplyKeyboardMarkup:
@@ -42,6 +38,7 @@ async def on_orders_start(message: Message) -> None:
     """Register the user and immediately attempt to deliver pending orders."""
     user = message.from_user
     await db.upsert_user(user.id, user.username, user.full_name)
+    await db.set_orders_opt_out(user.id, False)
     keyboard = build_menu_keyboard(is_admin=user.id in settings.admins)
     await message.answer(
         "Привет! Ты зарегистрирован в боте заказов. Ищу все невручённые заказы…",
@@ -227,7 +224,7 @@ async def unsubscribe_user(message: Message) -> None:
     if not user:
         await message.answer("Пользователь с таким ID не найден.")
         return
-    await db.set_user_active(target_id, False)
+    await db.set_orders_opt_out(target_id, True)
     username = _format_username(user.get("username"))
     full_name = user.get("full_name") or "—"
     await message.answer(

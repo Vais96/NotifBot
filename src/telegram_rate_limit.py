@@ -22,7 +22,9 @@ from typing import Any, Deque, Dict, Optional, cast
 
 from aiohttp import ClientError
 from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
 from aiogram.methods import TelegramMethod
 from aiogram.methods.base import TelegramType
@@ -32,9 +34,6 @@ from loguru import logger
 _telegram_http_status_ctx: ContextVar[Optional[int]] = ContextVar(
     "telegram_http_status_ctx", default=None
 )
-
-_ensure_session_lock = asyncio.Lock()
-
 
 class StatusCapturingAiohttpSession(AiohttpSession):
     """
@@ -68,27 +67,13 @@ class StatusCapturingAiohttpSession(AiohttpSession):
         return cast(TelegramType, response.result)
 
 
-async def _ensure_status_capturing_session(bot: Bot) -> None:
-    if isinstance(bot.session, StatusCapturingAiohttpSession):
-        return
-    async with _ensure_session_lock:
-        if isinstance(bot.session, StatusCapturingAiohttpSession):
-            return
-        old = bot.session
-        kwargs: Dict[str, Any] = {
-            "timeout": old.timeout,
-            "json_loads": old.json_loads,
-            "json_dumps": old.json_dumps,
-            "api": old.api,
-        }
-        if isinstance(old, AiohttpSession):
-            kwargs["proxy"] = old.proxy
-            kwargs["limit"] = int(old._connector_init.get("limit", 100))
-        bot.session = StatusCapturingAiohttpSession(**kwargs)
-        try:
-            await old.close()
-        except Exception:
-            pass
+def make_bot(token: str) -> Bot:
+    """Bot с HTML по умолчанию и сессией, сохраняющей HTTP-статус (нужен limited_send_message)."""
+    return Bot(
+        token=token,
+        session=StatusCapturingAiohttpSession(),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
 
 # Запас к официальным лимитам (~30/s общий, 1/s на чат, ~20/мин в группы/каналы).
 GLOBAL_MAX_PER_SECOND = 25
@@ -211,7 +196,6 @@ async def limited_send_message(
     Успешный ответ дополняется ``__tg_http_status__`` (ожидается 200), если доступен
     захват через ``StatusCapturingAiohttpSession``.
     """
-    await _ensure_status_capturing_session(bot)
     cid = int(chat_id)
     limiter = _limiter_for_bot(bot)
     attempt = 0

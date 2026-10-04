@@ -12,14 +12,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import httpx
 from aiogram import Bot
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from loguru import logger
 
 from . import db
 from .config import settings
-from .telegram_rate_limit import limited_send_message
+from .telegram_rate_limit import limited_send_message, make_bot
 
 LOGIN_PATH = "/api/login"
 ORDERS_PATH = "/api/v2/orders"
@@ -27,6 +25,8 @@ DOMAINS_PATH = "/api/v2/domains"
 IPS_PATH = "/api/v2/ip"
 TICKETS_PATH = "/api/v2/tickets"
 DEFAULT_TIMEOUT = (30.0, 15.0)
+REQUEST_ATTEMPTS = 3
+REQUEST_BACKOFF_SECONDS = 1.0
 
 
 class UnderdogAuthError(RuntimeError):
@@ -428,6 +428,40 @@ def _build_design_not_in_progress_48h_message(
     )
 
 
+def _entry_ids(entries: Sequence[Any], id_of) -> List[str]:
+    ids = []
+    for entry in entries:
+        try:
+            eid = id_of(entry)
+        except Exception:
+            eid = None
+        if eid is not None:
+            ids.append(str(eid))
+    return ids
+
+
+async def _drop_locally_sent(kind: str, chat_id: int, entries: List[Any], id_of, mark_remote) -> List[Any]:
+    """Entries already delivered to chat_id (tg_underdog_sent) are not sent again — only the Underdog PATCH is retried.
+
+    Returns the entries that still need a Telegram message.
+    """
+    sent = await db.underdog_sent_ids(kind, _entry_ids(entries, id_of), chat_id)
+    if not sent:
+        return entries
+    fresh = []
+    for entry in entries:
+        ids = _entry_ids([entry], id_of)
+        if ids and ids[0] in sent:
+            try:
+                await mark_remote(int(ids[0]))
+                logger.info("Underdog {} {} already delivered to {}, re-marked telegram_sent", kind, ids[0], chat_id)
+            except Exception as exc:
+                logger.warning("Underdog {} {} re-mark failed: {}", kind, ids[0], exc)
+        else:
+            fresh.append(entry)
+    return fresh
+
+
 async def _finish_design_delivery(kind: str, order_id: int, delivered: int, mark_sent) -> bool:
     """Помечаем sent, если доставлено хоть кому-то; иначе не помечаем (повтор в след. цикле) и warning через throttle."""
     if delivered:
@@ -631,6 +665,19 @@ class UnderdogClient:
     async def get_token(self, *, force_refresh: bool = False) -> str:
         return await self._ensure_token(force_refresh=force_refresh)
 
+    async def _send(
+        self, method: str, url: str, params: Optional[Dict[str, Any]], json_body: Optional[Dict[str, Any]]
+    ) -> httpx.Response:
+        assert self.client is not None, "HTTP client is not initialized"
+        headers = self._default_headers()
+        headers["Authorization"] = f"Bearer {await self._ensure_token()}"
+        resp = await self.client.request(method, url, params=params, json=json_body, headers=headers)
+        if resp.status_code == 401:
+            logger.warning("Underdog API unauthorized, refreshing token")
+            headers["Authorization"] = f"Bearer {await self._ensure_token(force_refresh=True)}"
+            resp = await self.client.request(method, url, params=params, json=json_body, headers=headers)
+        return resp
+
     async def request(
         self,
         method: str,
@@ -639,27 +686,27 @@ class UnderdogClient:
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
-        assert self.client is not None, "HTTP client is not initialized"
-        token = await self._ensure_token()
-        headers = self._default_headers()
-        headers["Authorization"] = f"Bearer {token}"
-
+        """Retries 5xx / 429 / transport errors with exponential backoff; all failures raise UnderdogAPIError."""
         url = self._build_url(path)
-        resp = await self.client.request(method, url, params=params, json=json_body, headers=headers)
-
-        if resp.status_code == 401:
-            logger.warning("Underdog API unauthorized, refreshing token")
-            headers["Authorization"] = f"Bearer {await self._ensure_token(force_refresh=True)}"
-            resp = await self.client.request(method, url, params=params, json=json_body, headers=headers)
+        for attempt in range(1, REQUEST_ATTEMPTS + 1):
+            try:
+                resp = await self._send(method, url, params, json_body)
+            except httpx.TransportError as exc:
+                if attempt == REQUEST_ATTEMPTS:
+                    raise UnderdogAPIError(f"Request {method} {path} failed: {type(exc).__name__}: {exc}") from exc
+                logger.warning("Underdog {} {} transport error (attempt {}): {}", method, path, attempt, exc)
+            else:
+                retryable = resp.status_code == 429 or resp.status_code >= 500
+                if not retryable or attempt == REQUEST_ATTEMPTS:
+                    break
+                logger.warning("Underdog {} {} -> {} (attempt {}), retrying", method, path, resp.status_code, attempt)
+            await asyncio.sleep(REQUEST_BACKOFF_SECONDS * 2 ** (attempt - 1))
 
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            try:
-                body = resp.text if hasattr(resp, "text") else ""
-            except Exception:
-                body = ""
-            if body and len(body) > 500:
+            body = resp.text or ""
+            if len(body) > 500:
                 body = body[:500] + "..."
             raise UnderdogAPIError(
                 f"Request {method} {path} failed with status {resp.status_code}: {body}"
@@ -1082,7 +1129,7 @@ class OrderNotifier:
 
         handles = [_resolve_order_owner_handle(order)[0] for order in orders]
         valid_handles = [h for h in handles if h]
-        user_map = await db.fetch_users_by_usernames(valid_handles)
+        user_map = await db.fetch_users_by_usernames(valid_handles, orders_recipients=True)
 
         for order, handle in zip(orders, handles):
             owner = order.get("owner") or {}
@@ -1154,6 +1201,8 @@ class OrderNotifier:
             try:
                 oid = int(order.get("id"))
                 chat_id = int(user["telegram_id"])
+                if not await _drop_locally_sent("order", chat_id, [order], lambda o: o.get("id"), self.underdog.mark_order_telegram_sent):
+                    continue
                 msg = await limited_send_message(self.bot, chat_id, text=message)
                 _log_telegram_send_roundtrip(
                     context="orders_bot_order_ready",
@@ -1163,6 +1212,7 @@ class OrderNotifier:
                     extra={"order_id": oid, "handle": handle},
                 )
                 if _telegram_underdog_send_confirmed(msg):
+                    await db.mark_underdog_sent("order", [str(oid)], chat_id)
                     await self.underdog.mark_order_telegram_sent(oid)
                     await db.admin_notify_throttle_clear(f"orders:delivery_err:{oid}")
                     stats.notified += 1
@@ -1930,7 +1980,7 @@ class DomainNotifier:
         if not per_handle:
             return stats
 
-        user_map = await db.fetch_users_by_usernames(list(per_handle.keys()))
+        user_map = await db.fetch_users_by_usernames(list(per_handle.keys()), orders_recipients=True)
 
         for handle, domain_entries in per_handle.items():
             user = user_map.get(handle)
@@ -1967,6 +2017,12 @@ class DomainNotifier:
 
             try:
                 chat_id = int(user["telegram_id"])
+                domain_entries = await _drop_locally_sent(
+                    "domain", chat_id, domain_entries, lambda e: e["raw"].get("id"), self.underdog.mark_domain_telegram_sent
+                )
+                if not domain_entries:
+                    continue
+                text = _build_domain_notification(domain_entries)
                 msg = await limited_send_message(self.bot, chat_id, text=text)
                 _log_telegram_send_roundtrip(
                     context="orders_bot_domain_expiration",
@@ -1999,6 +2055,7 @@ class DomainNotifier:
                     stats.notified_users += 1
                     stats.notified_domains += len(domain_entries)
                     await self._notify_admins_copy(text)
+                    await db.mark_underdog_sent("domain", _entry_ids(domain_entries, lambda e: e["raw"].get("id")), chat_id)
                     for entry in domain_entries:
                         domain_id = entry["raw"].get("id")
                         if domain_id is None:
@@ -2335,7 +2392,7 @@ class IPNotifier:
             _log_ip_notify_delivery_report(stats, dry_run=dry_run)
             return stats
 
-        user_map = await db.fetch_users_by_usernames(list(per_handle.keys()))
+        user_map = await db.fetch_users_by_usernames(list(per_handle.keys()), orders_recipients=True)
 
         for handle, ip_entries in per_handle.items():
             user = user_map.get(handle)
@@ -2382,6 +2439,12 @@ class IPNotifier:
 
             try:
                 telegram_id = int(user["telegram_id"])
+                ip_entries = await _drop_locally_sent(
+                    "ip", telegram_id, ip_entries, lambda e: _extract_ip_record_id(e["raw"]), self.underdog.mark_ip_telegram_sent
+                )
+                if not ip_entries:
+                    continue
+                text = _build_ip_notification(ip_entries)
                 msg = await limited_send_message(self.bot, telegram_id, text=text)
                 _log_telegram_send_roundtrip(
                     context="orders_bot_ip_expiration",
@@ -2455,6 +2518,9 @@ class IPNotifier:
                                 for e in ip_entries
                             ],
                         }
+                    )
+                    await db.mark_underdog_sent(
+                        "ip", _entry_ids(ip_entries, lambda e: _extract_ip_record_id(e["raw"])), telegram_id
                     )
                     await self._mark_ip_entries_in_underdog(
                         handle=handle,
@@ -2705,7 +2771,7 @@ class TicketNotifier:
             return stats
 
         # Загружаем всех пользователей один раз
-        user_map = await db.fetch_users_by_usernames(list(handles_to_fetch))
+        user_map = await db.fetch_users_by_usernames(list(handles_to_fetch), orders_recipients=True)
 
         # Обрабатываем каждый тикет индивидуально: получили -> отправили -> пометили
         for entry in valid_tickets:
@@ -2769,6 +2835,10 @@ class TicketNotifier:
             # Отправляем уведомление
             try:
                 user_telegram_id = int(user["telegram_id"])
+                if not await _drop_locally_sent(
+                    "ticket", user_telegram_id, [ticket], lambda t: t.get("id"), self.underdog.mark_ticket_telegram_sent
+                ):
+                    continue
                 msg = await limited_send_message(self.bot, user_telegram_id, text=text)
                 _log_telegram_send_roundtrip(
                     context="orders_bot_ticket_completed",
@@ -2813,6 +2883,7 @@ class TicketNotifier:
                     stats.notified_tickets += 1
                     await self._notify_admins_copy(text, exclude_user_id=user_telegram_id)
                     if ticket_id is not None:
+                        await db.mark_underdog_sent("ticket", [str(ticket_id)], user_telegram_id)
                         try:
                             await self.underdog.mark_ticket_telegram_sent(int(ticket_id))
                             tid = int(ticket_id)
@@ -3299,10 +3370,7 @@ def _build_ticket_notification(entries: List[Dict[str, Any]]) -> str:
 
 def _create_bot() -> Bot:
     token = settings.orders_bot_token or settings.telegram_bot_token
-    return Bot(
-        token=token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    return make_bot(token)
 
 
 def _orders_and_main_bots_differ() -> bool:
@@ -3317,10 +3385,7 @@ def _create_main_bot() -> Bot:
     token = (settings.telegram_bot_token or "").strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required when using a separate main bot for admin alerts")
-    return Bot(
-        token=token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    return make_bot(token)
 
 
 def _create_design_bot() -> Bot:
@@ -3330,10 +3395,7 @@ def _create_design_bot() -> Bot:
             "DESIGN_BOT_TOKEN not set: design notify will send via main bot (TELEGRAM_BOT_TOKEN). "
             "Admin copy will arrive in main bot, not DesignBot. Set DESIGN_BOT_TOKEN in cron env for DesignBot.",
         )
-    return Bot(
-        token=token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    return make_bot(token)
 
 
 async def fetch_yesterday_orders(status_id: int = 1, telegram_sent: int = 0) -> List[Dict[str, Any]]:

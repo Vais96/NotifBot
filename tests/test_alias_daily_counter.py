@@ -57,7 +57,7 @@ class AliasDailyCounterTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await app_module._process_keitaro_postback(data)
 
-        log_event.assert_awaited_once_with(data, user_id)
+        log_event.assert_awaited_once_with(data, user_id, None)
         count_sales.assert_awaited_once_with(user_id)
         self.assertTrue(result["routed"])
         self.assertTrue(

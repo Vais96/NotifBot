@@ -206,6 +206,23 @@ Set postback URL in Keitaro to:
 
 Send fields like: status, offer/offer_name, country/geo, source/traffic_source, payout, currency, clickid/click_id. If you set POSTBACK_TOKEN, add header `Authorization: Bearer <token>`.
 
+Every postback is first stored in `tg_inbound_postbacks` (status `pending`) and only then acknowledged with 200; processing runs in the background and sets `done`, `duplicate` (same sale already delivered) or `failed` (with `error`). A restart between the 200 and the Telegram send does not lose the deposit: on startup (after ~60 s) the app re-processes `pending` and `failed` rows with fewer than 3 attempts. Re-processing the same row never logs the event twice.
+
+### Replay postbacks
+```
+POST https://<your-app>/admin/postbacks/replay
+Authorization: Bearer <POSTBACK_TOKEN>
+Content-Type: application/json
+
+{"ids": [123, 124], "dry_run": true}
+// or a UTC window — only pending/failed rows:
+{"from": "2026-10-04T06:00:00", "to": "2026-10-04T09:00:00", "dry_run": false}
+```
+`ids` replays rows in any status (manual resend, recipients get the message again); the `from`/`to` window replays only `pending`/`failed`. `dry_run` defaults to `true` and only returns the matched ids. Response: `{"ok": true, "dry_run": ..., "matched": N, "ids": [...]}`.
+
+### Internal notify endpoints
+`/underdog/domains/notify`, `/underdog/ip/notify`, `/underdog/design/notify` run one at a time per type. If the run finishes within ~25 s the response has `stats` as before; otherwise `{"ok": true, "running": true}` and it continues in the background. While a run is in progress, another call returns `{"ok": false, "busy": true}`.
+
 ## Telegram Webhook
 On startup the app sets webhook to: `${BASE_URL}${WEBHOOK_SECRET_PATH}`. Locally you usually skip webhook; on Railway it's automatically set if BASE_URL is correct.
 

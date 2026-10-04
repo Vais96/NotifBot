@@ -4,7 +4,7 @@ from contextlib import suppress
 from datetime import datetime, timezone, date
 from typing import Any, Dict, Mapping, Tuple, Optional
 
-from fastapi import FastAPI, Request, HTTPException, Header, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from loguru import logger
 from .config import settings
@@ -19,7 +19,7 @@ from .services.keitaro_postbacks import (
     is_sale as is_keitaro_sale,
     sale_postback_fingerprint,
 )
-from aiogram.types import Update, BotCommand
+from aiogram.types import BotCommand, ErrorEvent, Update
 from pydantic import BaseModel, Field
 
 # Sanitize webhook path for route decorator
@@ -36,37 +36,34 @@ if not DESIGN_WEBHOOK_PATH.startswith("/"):
     DESIGN_WEBHOOK_PATH = "/" + DESIGN_WEBHOOK_PATH
 
 app = FastAPI(title="Keitaro Telegram Notifier")
+# One run per notifier type at a time (cron + manual + scheduled loop must not double-send)
+_notify_locks: dict[str, asyncio.Lock] = {kind: asyncio.Lock() for kind in ("domains", "ip", "design")}
+_NOTIFY_INLINE_WAIT_SECONDS = 25
 _design_notify_task: asyncio.Task | None = None
 _keitaro_sync_task: asyncio.Task | None = None
 _new_admin_sync_task: asyncio.Task | None = None
 _daily_revenue_report_task: asyncio.Task | None = None
 
 
+async def _design_notify_all(dry_run: bool) -> dict:
+    """All DesignBot checks once: назначение, выполнение, SLA 24h, 48h not-in-progress."""
+    return {
+        "assignments": await underdog.notify_design_assignments(dry_run=dry_run, bot_instance=design_bot),
+        "completions": await underdog.notify_design_completions(dry_run=dry_run, bot_instance=design_bot),
+        "sla_24h": await underdog.notify_design_sla_24h(dry_run=dry_run, bot_instance=design_bot),
+        "not_in_progress_48h": await underdog.notify_design_not_in_progress_48h(dry_run=dry_run, bot_instance=design_bot),
+    }
+
+
 async def _run_design_notifications() -> None:
-    """Run all DesignBot notification checks once."""
-    assignment_stats = await underdog.notify_design_assignments(
-        dry_run=False,
-        bot_instance=design_bot,
-    )
-    completion_stats = await underdog.notify_design_completions(
-        dry_run=False,
-        bot_instance=design_bot,
-    )
-    sla_stats = await underdog.notify_design_sla_24h(
-        dry_run=False,
-        bot_instance=design_bot,
-    )
-    reminder_stats = await underdog.notify_design_not_in_progress_48h(
-        dry_run=False,
-        bot_instance=design_bot,
-    )
-    logger.info(
-        "Scheduled DesignBot notification check completed",
-        assignments=assignment_stats,
-        completions=completion_stats,
-        sla_24h=sla_stats,
-        not_in_progress_48h=reminder_stats,
-    )
+    """Scheduled run; skipped while a manual /underdog/design/notify run holds the lock."""
+    lock = _notify_locks["design"]
+    if lock.locked():
+        logger.info("Scheduled DesignBot check skipped: another run in progress")
+        return
+    async with lock:
+        stats = await _design_notify_all(dry_run=False)
+    logger.info("Scheduled DesignBot notification check completed", **stats)
 
 
 async def _design_notification_loop(interval_seconds: int) -> None:
@@ -186,6 +183,36 @@ class IPNotifyRequest(BaseModel):
     token: Optional[str] = None
 
 
+class PostbackReplayRequest(BaseModel):
+    """ids — любые статусы; либо окно [from, to) в UTC — только pending/failed."""
+    model_config = {"populate_by_name": True}
+    ids: Optional[list[int]] = Field(default=None, max_length=1000)
+    since: Optional[datetime] = Field(default=None, alias="from")
+    until: Optional[datetime] = Field(default=None, alias="to")
+    dry_run: bool = Field(default=True)
+    token: Optional[str] = None
+
+
+async def _run_notify_job(kind: str, factory, dry_run: bool) -> dict:
+    """Run under the per-type lock in a background task; return stats if it finishes quickly, else running=True."""
+    lock = _notify_locks[kind]
+    if lock.locked():
+        return {"ok": False, "busy": True}
+    await lock.acquire()
+
+    async def job():
+        try:
+            return await factory()
+        finally:
+            lock.release()
+
+    task = _spawn(job(), f"underdog-{kind}-notify")
+    done, _ = await asyncio.wait({task}, timeout=_NOTIFY_INLINE_WAIT_SECONDS)
+    if not done:
+        return {"ok": True, "dry_run": dry_run, "running": True}
+    return {"ok": True, "dry_run": dry_run, "stats": task.result()}
+
+
 def _extract_bearer_token(authorization: str | None) -> str | None:
     """Return a normalized Bearer token, accepting the auth scheme case-insensitively."""
     if not authorization:
@@ -299,22 +326,101 @@ async def _resolve_daily_revenue(user_id: _StatsKey, db_value: float | None, cur
     return display
 
 
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro, name: str) -> asyncio.Task:
+    """create_task with a strong reference (the loop keeps only weak refs to tasks)."""
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+def _log_postback_result(data: dict, result: dict, inbound_id: int | None = None) -> None:
+    logger.info(
+        "Keitaro postback processed",
+        inbound_id=inbound_id,
+        subid=data.get("subid") or data.get("sub_id"),
+        routed=result.get("routed"),
+        sale=result.get("sale"),
+        duplicate=result.get("duplicate"),
+    )
+
+
 async def _run_keitaro_postback_job(data: dict) -> None:
-    """Фоновая обработка: Keitaro ждёт ответ ~5 с, иначе cURL 28 — отдаём 200 раньше."""
+    """Fallback when the inbox INSERT failed: in-memory processing as before (no retry)."""
     try:
-        result = await _process_keitaro_postback(data)
-        logger.info(
-            "Keitaro postback processed",
-            subid=data.get("subid") or data.get("sub_id"),
-            routed=result.get("routed"),
-            sale=result.get("sale"),
-            duplicate=result.get("duplicate"),
-        )
+        _log_postback_result(data, await _process_keitaro_postback(data))
     except Exception:
         logger.exception("Keitaro postback background job failed")
 
 
-async def _process_keitaro_postback(data: dict) -> dict:
+_INBOUND_MAX_ATTEMPTS = 3
+_inbound_in_flight: set[int] = set()
+
+
+async def _process_inbound_postback(inbound_id: int) -> None:
+    """Process one tg_inbound_postbacks row: done / duplicate on success, failed (with error) on exception."""
+    if inbound_id in _inbound_in_flight:
+        return
+    _inbound_in_flight.add(inbound_id)
+    try:
+        data = await db.claim_inbound_postback(inbound_id)
+        if data is None:
+            return
+        try:
+            result = await _process_keitaro_postback(data, inbound_id=inbound_id)
+        except Exception as e:
+            logger.exception("Keitaro postback {} failed", inbound_id)
+            await db.finish_inbound_postback(inbound_id, "failed", f"{type(e).__name__}: {e}")
+            return
+        await db.finish_inbound_postback(inbound_id, "duplicate" if result.get("duplicate") else "done")
+        _log_postback_result(data, result, inbound_id)
+    except Exception:
+        logger.exception("Inbound postback {} bookkeeping failed", inbound_id)
+    finally:
+        _inbound_in_flight.discard(inbound_id)
+
+
+async def _process_inbound_postbacks(ids: list[int]) -> None:
+    for inbound_id in ids:
+        await _process_inbound_postback(inbound_id)
+
+
+_INBOUND_RECOVERY_DELAY_SECONDS = 60
+
+
+async def _recover_inbound_postbacks(delay: float = _INBOUND_RECOVERY_DELAY_SECONDS) -> None:
+    """On startup: rows left pending by a restart/crash and failed rows with attempts left.
+
+    Railway overlaps old/new deployments: wait, and take only rows older than the delay,
+    so rows the old instance is still processing are not picked up twice.
+    """
+    await asyncio.sleep(delay)
+    try:
+        ids = await db.list_inbound_postbacks_for_retry(_INBOUND_MAX_ATTEMPTS, int(delay))
+    except Exception:
+        logger.exception("Failed to list inbound postbacks for retry")
+        return
+    if ids:
+        logger.warning("Recovering {} inbound postbacks: {}", len(ids), ids)
+        await _process_inbound_postbacks(ids)
+
+
+async def _accept_postback(data: dict) -> None:
+    """Persist first, then process in background; Keitaro gets 200 only after the row is stored."""
+    fingerprint = sale_postback_fingerprint(data) if is_keitaro_sale(data) else None
+    try:
+        inbound_id = await db.enqueue_inbound_postback(data, fingerprint)
+    except Exception:
+        logger.exception("Failed to store inbound postback, processing in memory")
+        _spawn(_run_keitaro_postback_job(dict(data)), "keitaro-postback-fallback")
+        return
+    _spawn(_process_inbound_postback(inbound_id), f"keitaro-postback-{inbound_id}")
+
+
+async def _process_keitaro_postback(data: dict, inbound_id: int | None = None) -> dict:
     if is_keitaro_sale(data):
         fp = sale_postback_fingerprint(data)
         if fp:
@@ -329,6 +435,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
                 first = await db.claim_keitaro_sale_postback(
                     fp,
                     click_id=str(click_id).strip() if click_id is not None else None,
+                    inbound_id=inbound_id,
                 )
             except Exception as e:
                 logger.warning(f"Keitaro sale dedupe failed, processing anyway: {e}")
@@ -395,7 +502,7 @@ async def _process_keitaro_postback(data: dict) -> dict:
                     routed_id = None
             except Exception:
                 pass
-        await db.log_event(data, routed_id)
+        await db.log_event(data, routed_id, inbound_id)
     except Exception as e:
         logger.warning(f"Failed to log event: {e}")
         routed_id = None
@@ -550,8 +657,11 @@ async def _process_keitaro_postback(data: dict) -> dict:
                     logger.warning(f"Failed to include helpers for buyer: {e}")
     except Exception as e:
         logger.warning(f"Failed to expand recipients: {e}")
+        if not recipient_ids:
+            raise
 
     # Send message to all recipients (deduped)
+    delivered = 0
     for rid in recipient_ids:
         try:
             message_text = _deposit_message_for_recipient(
@@ -562,8 +672,12 @@ async def _process_keitaro_postback(data: dict) -> dict:
                 is_sale=is_sale,
             )
             await notify_buyer(rid, message_text)
+            delivered += 1
         except Exception as e:
             logger.warning(f"Notify failed for {rid}: {e}")
+    if recipient_ids and not delivered:
+        # Nobody got it (Telegram/network down) — fail so the inbox row is retried
+        raise RuntimeError(f"Postback not delivered to any of {len(recipient_ids)} recipients")
     return {"ok": True, "routed": bool(buyer_id), "buyer_id": buyer_id, "fallback": used_fallback, "sale": is_sale}
 
 
@@ -576,6 +690,7 @@ async def on_startup():
         # Log and re-raise so Railway logs show root cause
         logger.exception(f"DB init failed: {e}")
         raise
+    _spawn(_recover_inbound_postbacks(), "inbound-postback-recovery")
     # set webhook for Telegram
     secret_path = settings.webhook_secret_path.strip()
     if not secret_path.startswith("/"):
@@ -686,6 +801,9 @@ async def on_shutdown():
     _keitaro_sync_task = None
     _new_admin_sync_task = None
     _daily_revenue_report_task = None
+    if _background_tasks:
+        # Let in-flight postbacks/updates finish; unfinished inbox rows stay pending for the next start
+        await asyncio.wait(set(_background_tasks), timeout=5)
     await db.close_pool()
     # Close aiogram bot aiohttp sessions to avoid "Unclosed client session" warnings
     for bot_instance in (bot, orders_bot, design_bot):
@@ -716,7 +834,6 @@ async def db_ping():
 @app.post("/keitaro/postback")
 async def keitaro_postback(
     request: Request,
-    background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ):
     # Parse body leniently; if anything fails, continue with query params only
@@ -747,15 +864,14 @@ async def keitaro_postback(
     if not has_meaningful_fields(data):
         return JSONResponse({"success": 200})
 
-    # Keitaro S2S often uses ~5s HTTP timeout — отвечаем сразу, обработку делаем в фоне
-    background_tasks.add_task(_run_keitaro_postback_job, dict(data))
+    # Keitaro S2S often uses ~5s HTTP timeout — сохраняем в очередь и отвечаем, обработка в фоне
+    await _accept_postback(dict(data))
     return JSONResponse({"ok": True, "accepted": True})
 
 # Some trackers send GET S2S callbacks; mirror POST handler for query params
 @app.get("/keitaro/postback")
 async def keitaro_postback_get(
     request: Request,
-    background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ):
     try:
@@ -769,7 +885,7 @@ async def keitaro_postback_get(
         if not has_meaningful_fields(data):
             return JSONResponse({"success": 200})
 
-        background_tasks.add_task(_run_keitaro_postback_job, dict(data))
+        await _accept_postback(dict(data))
         return JSONResponse({"ok": True, "accepted": True})
 
     except HTTPException:
@@ -779,18 +895,34 @@ async def keitaro_postback_get(
         return {"ok": True}
 
 
+@app.post("/admin/postbacks/replay")
+async def replay_postbacks_endpoint(
+    payload: PostbackReplayRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Переотправить постбеки из tg_inbound_postbacks: строки → pending, обработка в фоне."""
+    _require_internal_token(authorization, payload.token)
+    if not payload.ids and not (payload.since and payload.until):
+        raise HTTPException(422, "Pass ids or both from/to")
+    ids = await db.requeue_inbound_postbacks(
+        ids=payload.ids, since=payload.since, until=payload.until, dry_run=payload.dry_run
+    )
+    if ids and not payload.dry_run:
+        _spawn(_process_inbound_postbacks(ids), "inbound-postback-replay")
+    return {"ok": True, "dry_run": payload.dry_run, "matched": len(ids), "ids": ids}
+
+
 @app.post("/underdog/domains/notify")
 async def notify_expiring_domains_endpoint(
     payload: DomainNotifyRequest,
     authorization: str | None = Header(default=None),
 ):
     _require_internal_token(authorization, payload.token)
-    stats = await underdog.notify_expiring_domains(
-        dry_run=payload.dry_run,
-        days=payload.days,
-        bot_instance=orders_bot,
+    return await _run_notify_job(
+        "domains",
+        lambda: underdog.notify_expiring_domains(dry_run=payload.dry_run, days=payload.days, bot_instance=orders_bot),
+        payload.dry_run,
     )
-    return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
 
 
 @app.post("/underdog/ip/notify")
@@ -799,13 +931,13 @@ async def notify_expiring_ips_endpoint(
     authorization: str | None = Header(default=None),
 ):
     _require_internal_token(authorization, payload.token)
-    stats = await underdog.notify_expiring_ips(
-        dry_run=payload.dry_run,
-        days=payload.days,
-        bot_instance=orders_bot,
-        admin_bot_instance=bot,
+    return await _run_notify_job(
+        "ip",
+        lambda: underdog.notify_expiring_ips(
+            dry_run=payload.dry_run, days=payload.days, bot_instance=orders_bot, admin_bot_instance=bot
+        ),
+        payload.dry_run,
     )
-    return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
 
 
 @app.get("/underdog/design/subscribers")
@@ -835,32 +967,7 @@ async def notify_design_endpoint(
             status_code=503,
         )
 
-    assignment_stats = await underdog.notify_design_assignments(
-        dry_run=payload.dry_run,
-        bot_instance=design_bot,
-    )
-    completion_stats = await underdog.notify_design_completions(
-        dry_run=payload.dry_run,
-        bot_instance=design_bot,
-    )
-    sla_24h_stats = await underdog.notify_design_sla_24h(
-        dry_run=payload.dry_run,
-        bot_instance=design_bot,
-    )
-    not_in_progress_48h_stats = await underdog.notify_design_not_in_progress_48h(
-        dry_run=payload.dry_run,
-        bot_instance=design_bot,
-    )
-    return {
-        "ok": True,
-        "dry_run": payload.dry_run,
-        "stats": {
-            "assignments": assignment_stats,
-            "completions": completion_stats,
-            "sla_24h": sla_24h_stats,
-            "not_in_progress_48h": not_in_progress_48h_stats,
-        },
-    }
+    return await _run_notify_job("design", lambda: _design_notify_all(payload.dry_run), payload.dry_run)
 
 
 @app.post("/reports/daily-revenue")
@@ -874,40 +981,37 @@ async def daily_revenue_report_endpoint(
     return {"ok": True, "dry_run": payload.dry_run, "stats": stats}
 
 
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
+async def _on_handler_error(event: ErrorEvent) -> bool:
+    """Global aiogram errors handler: log and tell the user instead of leaving a spinner."""
+    logger.opt(exception=event.exception).error("Telegram handler failed: update_id={}", event.update.update_id)
+    with suppress(Exception):
+        if event.update.callback_query:
+            await event.update.callback_query.answer("Ошибка, попробуйте ещё раз", show_alert=False)
+        elif event.update.message:
+            await event.update.message.answer("Ошибка, попробуйте ещё раз")
+    return True
+
+
+for _dispatcher in (dp, orders_dp, design_dp):
+    _dispatcher.errors.register(_on_handler_error)
+
+
+async def _feed_update(dispatcher, bot_instance, update: Update, name: str) -> None:
     try:
-        payload = await request.json()
-        update = Update.model_validate(payload)
-        await dp.feed_update(bot, update)
-        return JSONResponse({"ok": True})
+        await dispatcher.feed_update(bot_instance, update)
+    except Exception:
+        logger.exception("{} webhook update {} failed", name, update.update_id)
+
+
+async def _accept_webhook(request: Request, dispatcher, bot_instance, name: str) -> JSONResponse:
+    """ACK Telegram immediately; long handlers (yt-dlp, reports, sync) must not trigger Telegram retries."""
+    try:
+        update = Update.model_validate(await request.json())
     except Exception as e:
         # Never 500 to Telegram: log and ACK to avoid retries blocking updates
-        logger.exception(f"Webhook update handling failed: {e}")
+        logger.exception("{} webhook payload invalid: {}", name, e)
         return JSONResponse({"ok": True})
-
-
-@app.post(ORDERS_WEBHOOK_PATH)
-async def orders_telegram_webhook(request: Request):
-    if not settings.orders_bot_token or settings.orders_bot_token == settings.telegram_bot_token:
-        return JSONResponse({"ok": True})
-    try:
-        payload = await request.json()
-        update = Update.model_validate(payload)
-        await orders_dp.feed_update(orders_bot, update)
-        return JSONResponse({"ok": True})
-    except Exception as e:
-        logger.exception(f"Orders webhook handling failed: {e}")
-        return JSONResponse({"ok": True})
-
-
-@app.post(DESIGN_WEBHOOK_PATH)
-async def design_telegram_webhook(request: Request):
-    if not settings.design_bot_token or settings.design_bot_token == settings.telegram_bot_token:
-        return JSONResponse({"ok": True})
-    try:
-        payload = await request.json()
-        update = Update.model_validate(payload)
+    if name == "design":
         # Лог при каждом апдейте — если при /start в DesignBot здесь пусто, вебхук не доходит
         msg = update.message
         logger.info(
@@ -916,8 +1020,24 @@ async def design_telegram_webhook(request: Request):
             chat_id=msg.chat.id if msg else None,
             text=(msg.text or "")[:50] if msg else None,
         )
-        await design_dp.feed_update(design_bot, update)
+    _spawn(_feed_update(dispatcher, bot_instance, update, name), f"{name}-update-{update.update_id}")
+    return JSONResponse({"ok": True})
+
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    return await _accept_webhook(request, dp, bot, "main")
+
+
+@app.post(ORDERS_WEBHOOK_PATH)
+async def orders_telegram_webhook(request: Request):
+    if not settings.orders_bot_token or settings.orders_bot_token == settings.telegram_bot_token:
         return JSONResponse({"ok": True})
-    except Exception as e:
-        logger.exception(f"Design webhook handling failed: {e}")
+    return await _accept_webhook(request, orders_dp, orders_bot, "orders")
+
+
+@app.post(DESIGN_WEBHOOK_PATH)
+async def design_telegram_webhook(request: Request):
+    if not settings.design_bot_token or settings.design_bot_token == settings.telegram_bot_token:
         return JSONResponse({"ok": True})
+    return await _accept_webhook(request, design_dp, design_bot, "design")

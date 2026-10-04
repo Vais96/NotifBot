@@ -1,19 +1,15 @@
 """Design bot — уведомления о заказах на дизайн (Underdog API: creative, pwaDesign)."""
 
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram import Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 from loguru import logger
 
 from .config import settings
 from . import db
+from .telegram_rate_limit import make_bot
 
-design_bot = Bot(
-    token=settings.design_bot_token or settings.telegram_bot_token,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
+design_bot = make_bot(settings.design_bot_token or settings.telegram_bot_token)
 design_dp = Dispatcher()
 
 
@@ -23,9 +19,9 @@ async def on_design_start(message: Message) -> None:
     chat_id = message.chat.id
     user = message.from_user
     try:
-        if user:
+        if user and message.chat.type == "private":  # в группе chat_id — это группа, не пользователь
             await db.upsert_user(
-                chat_id,
+                user.id,
                 user.username,
                 " ".join(filter(None, [user.first_name, user.last_name])) or None,
             )
