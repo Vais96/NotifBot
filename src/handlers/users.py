@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import STALE_BUTTON, admin_only, callback_parts, is_admin
+from .common import NO_RIGHTS, STALE_BUTTON, admin_only, callback_parts, is_admin
 from ..constants import Role
 from .. import db
 from ..utils.html import safe
@@ -37,7 +37,6 @@ async def _send_list_users(chat_id: int, actor_id: int):
     my_role = my["role"] if my else "buyer"
     if await is_admin(actor_id):
         my_role = "admin"
-    my_team = my.get("team_id") if my else None
     lead_team_ids = await db.list_user_lead_teams(actor_id) if my_role not in ("admin", "head") else []
     visible = []
     for u in users:
@@ -68,7 +67,6 @@ async def _send_list_routes(chat_id: int, actor_id: int):
     my_role = (my or {}).get("role", "buyer")
     if await is_admin(actor_id):
         my_role = "admin"
-    my_team = (my or {}).get("team_id")
     lead_team_ids = await db.list_user_lead_teams(actor_id) if my_role not in ("admin", "head") else []
     rows = await db.list_routes()
     def visible(r: dict) -> bool:
@@ -92,7 +90,6 @@ async def _send_list_routes(chat_id: int, actor_id: int):
 def _user_row_controls(u: dict) -> InlineKeyboardMarkup:
     """Build user row controls keyboard."""
     uid = u["telegram_id"]
-    role = u["role"]
     is_active = u["is_active"]
     buttons = [
         [InlineKeyboardButton(text="buyer", callback_data=f"role:{uid}:buyer"),
@@ -110,7 +107,7 @@ def _user_row_controls(u: dict) -> InlineKeyboardMarkup:
 async def _send_manage(chat_id: int, actor_id: int):
     """Send manage interface for admins."""
     if not await is_admin(actor_id):
-        return await bot.send_message(chat_id, "Только для админов")
+        return await bot.send_message(chat_id, NO_RIGHTS)
     users = await db.list_users()
     if not users:
         return await bot.send_message(chat_id, "Пока нет пользователей, попросите нажать /start")
@@ -186,7 +183,6 @@ async def on_list_routes(message: Message):
     my_role = (my or {}).get("role", "buyer")
     if await is_admin(me):
         my_role = "admin"
-    my_team = (my or {}).get("team_id")
     lead_team_ids = await db.list_user_lead_teams(me) if my_role not in ("admin", "head") else []
     rows = await db.list_routes()
     # filter by role
@@ -233,7 +229,7 @@ async def on_add_rule(message: Message):
         my_role = (my or {}).get("role", "buyer")
         my_team = (my or {}).get("team_id")
         if my_role not in ("admin", "head") and not await is_admin(me):
-            return await message.answer("Недостаточно прав (нужна роль admin/head)")
+            return await message.answer(NO_RIGHTS)
         if my_role == "head":
             target = next((u for u in users if u["telegram_id"] == user_id), None)
             if not target or target.get("team_id") != my_team:

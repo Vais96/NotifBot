@@ -33,22 +33,36 @@ async def on_start(message: Message):
     await send_user_menu(message.chat.id, message.from_user.id)
 
 
+_HELP = (
+    "Доступные команды:\n"
+    "/start — регистрация\n"
+    "/menu — открыть меню\n"
+    "/today — отчёт за сегодня\n"
+    "/yesterday — отчёт за вчера\n"
+    "/week — отчёт за 7 дней\n"
+    "/adskey — мой ключ Ads Workspace (байер/лид/ментор/хэд)\n"
+    "/checkdomain — проверить домен (кто ведёт кампанию)\n"
+    "/listteams — список команд (лид/хэд/админ)\n"
+    "/whoami — показать свой Telegram ID\n"
+    "/ping — проверка связи (pong)\n"
+    "/help — помощь\n"
+    "\n"
+    "Если бот ждёт ввод (домен, ID, число), «отмена» / «cancel» / «-» прекращает ожидание."
+)
+_HELP_ADMIN = (
+    "\n\nАдмину:\n"
+    "/listusers, /manage — пользователи и роли\n"
+    "/setrole &lt;telegram_id&gt; &lt;buyer|lead|head|admin|mentor&gt;\n"
+    "/listroutes, /addrule &lt;user_id&gt; offer=… country=… source=… priority=0 — правила роутинга\n"
+    "/aliases, /setalias &lt;alias&gt; buyer=&lt;id|-&gt; lead=&lt;id|-&gt;, /delalias &lt;alias&gt;\n"
+    "/addmentor &lt;id|@username&gt;, /mentor_follow &lt;mentor_id&gt; &lt;team_id&gt;, /mentor_unfollow &lt;mentor_id&gt; &lt;team_id&gt;"
+)
+
+
 @dp.message(Command("help"))
 async def on_help(message: Message):
-    """Handle /help command - show available commands."""
-    await message.answer(
-        "Доступные команды:\n"
-        "/start — регистрация\n"
-        "/menu — открыть меню\n"
-        "/today — отчёт за сегодня\n"
-        "/yesterday — отчёт за вчера\n"
-        "/week — отчёт за 7 дней\n"
-        "/adskey — мой ключ Ads Workspace (байер/лид/ментор/хэд)\n"
-        "/checkdomain — проверить домен (кто ведёт кампанию)\n"
-        "/whoami — показать свой Telegram ID\n"
-        "/ping — проверка связи (pong)\n"
-        "/help — помощь"
-    )
+    """Handle /help command - show available commands (admin section only for admins)."""
+    await message.answer(_HELP + (_HELP_ADMIN if await is_admin(message.from_user.id) else ""))
 
 
 @dp.message(Command("ping"))

@@ -4,7 +4,7 @@ from aiogram import F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..dispatcher import bot, dp
-from .common import STALE_BUTTON, admin_only, callback_parts, is_admin
+from .common import NO_RIGHTS, STALE_BUTTON, admin_only, callback_parts, is_admin
 from .. import db
 from ..utils.html import safe
 from loguru import logger
@@ -72,7 +72,7 @@ def _buyer_picker(
 async def _send_helpers_list(chat_id: int, actor_id: int):
     """Плашка «Помощники»: список и кнопка добавить."""
     if not await is_admin(actor_id):
-        return await bot.send_message(chat_id, "Только для админов")
+        return await bot.send_message(chat_id, NO_RIGHTS)
     rows = await db.list_helpers_with_buyers()
     await bot.send_message(chat_id, "Помощники:", reply_markup=_helper_add_button())
     if not rows:

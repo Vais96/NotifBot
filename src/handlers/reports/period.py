@@ -134,10 +134,6 @@ async def _send_period_report(chat_id: int, actor_id: int, title: str, days: int
                 )
         filter_user_ids: list[int] | None = None
         if filt.get('buyer_id') or filt.get('team_id'):
-            me = next((u for u in users if u["telegram_id"] == actor_id), None)
-            role = (me or {}).get("role", "buyer")
-            if await is_admin(actor_id):
-                role = "admin"
             allowed_ids = set(user_ids)
             if filt.get('buyer_id'):
                 bid = int(filt['buyer_id'])

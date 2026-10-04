@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import admin_only, get_actor, is_admin
+from .common import NO_RIGHTS, admin_only, get_actor, is_admin
 from .. import db, keitaro_sync
 from ..handlers.users import _send_whoami, _send_list_users, _send_list_routes, _send_manage
 from ..handlers.aliases import _send_aliases
@@ -109,7 +109,7 @@ async def on_menu_click(call: CallbackQuery):
         return await call.answer()
     if key == "refreshdomains":
         if not await is_admin(call.from_user.id):
-            return await call.answer("Нет прав", show_alert=True)
+            return await call.answer(NO_RIGHTS, show_alert=True)
         await call.answer("Начинаю обновление")
         status_msg = await call.message.answer("Запускаю обновление доменов из Keitaro…")
         try:
@@ -122,7 +122,7 @@ async def on_menu_click(call: CallbackQuery):
         return
     if key == "resetfbdata":
         if not await is_admin(call.from_user.id):
-            return await call.answer("Нет прав", show_alert=True)
+            return await call.answer(NO_RIGHTS, show_alert=True)
         warning_text = (
             "⚠️ <b>Внимание</b>\n"
             "Эта операция очистит все данные, загруженные из FB CSV, включая: "

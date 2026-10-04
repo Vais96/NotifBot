@@ -21,6 +21,14 @@ from .common import STALE_BUTTON
 PendingHandler = Callable[[Message, str], Awaitable[object]]
 _HANDLERS: Dict[PendingAction, PendingHandler] = {}
 
+# Cancel any pending input. '-' also cancels, except where it means "clear the value" (_DASH_CLEARS).
+CANCEL_WORDS = {"отмена", "cancel", "стоп", "stop"}
+_DASH_CLEARS = {PendingAction.ALIAS_SET_BUYER, PendingAction.ALIAS_SET_LEAD, PendingAction.KPI_SET}
+_CANCEL_TEXT = {
+    PendingAction.FB_AWAIT_CSV: "Загрузка CSV отменена",
+    PendingAction.DOMAIN_CHECK: "Готово. Проверка доменов завершена",
+}
+
 UNKNOWN_USER_TEXT = (
     "Не удалось распознать пользователя. Пришлите numeric ID или @username. "
     "Если пользователь не писал боту, попросите его отправить /start."
@@ -47,9 +55,6 @@ def parse_action(raw: str) -> Tuple[Optional[PendingAction], str]:
 @pending(PendingAction.FB_AWAIT_CSV)
 async def _fb_await_csv(message: Message, _arg: str):
     # The CSV itself is handled by handlers/fb.py (document handler); here only text arrives.
-    if (message.text or "").strip().lower() in ("-", "стоп", "stop"):
-        await db.clear_pending_action(message.from_user.id)
-        return await message.answer("Загрузка CSV отменена")
     return await message.answer("Пришлите CSV файлом или '-' чтобы отменить ожидание")
 
 
@@ -62,11 +67,7 @@ async def _alias_new(message: Message, _arg: str):
 
 @pending(PendingAction.DOMAIN_CHECK)
 async def _domain_check(message: Message, _arg: str):
-    text = (message.text or "").strip()
-    if text.lower() in ("-", "stop", "стоп"):
-        await db.clear_pending_action(message.from_user.id)
-        return await message.answer("Готово. Проверка доменов завершена")
-    result = await lookup_domains_text(text)
+    result = await lookup_domains_text((message.text or "").strip())
     return await message.answer(result + "\n\nОтправьте следующий домен или '-' чтобы завершить")
 
 
@@ -117,12 +118,8 @@ async def _mentor_add(message: Message, _arg: str):
 
 @pending(PendingAction.HELPER_ADD)
 async def _helper_add(message: Message, _arg: str):
-    value = (message.text or "").strip()
-    if value.lower() in ("-", "отмена", "cancel"):
-        await db.clear_pending_action(message.from_user.id)
-        return await message.answer("Отменено.")
     try:
-        uid = await _resolve_user_id(value)
+        uid = await _resolve_user_id((message.text or "").strip())
     except ValueError as e:
         return await message.answer(safe(str(e)))
     user = await db.get_user(uid)
@@ -172,6 +169,10 @@ async def on_text_fallback(message: Message):
     if handler is None:
         logger.warning("Unknown pending action {!r} for {}", stored[0], message.from_user.id)
         return
+    text = (message.text or "").strip().lower()
+    if text in CANCEL_WORDS or (text == "-" and action not in _DASH_CLEARS):
+        await db.clear_pending_action(message.from_user.id)
+        return await message.answer(_CANCEL_TEXT.get(action, "Отменено."))
     try:
         await handler(message, arg)
     except Exception:

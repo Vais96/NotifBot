@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import get_actor
+from .common import NO_RIGHTS, get_actor
 from ..services.ads_workspace import (
     AdsWorkspaceError,
     ads_key_label,
@@ -63,7 +63,7 @@ async def on_adskey(message: Message):
 async def cb_adskey_rotate(call: CallbackQuery):
     allowed, _ = await _actor_may_use(call.from_user.id)
     if not allowed:
-        return await call.answer("Нет доступа", show_alert=True)
+        return await call.answer(NO_RIGHTS, show_alert=True)
     await call.message.answer(
         "Новый код нужен только если потерял все профили. Чтобы добавить профиль — вставь тот же код, не новый.\n\n"
         "Старый код перестанет работать во всех профилях. Продолжить?",

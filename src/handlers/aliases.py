@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import admin_only, is_admin
+from .common import NO_RIGHTS, admin_only, is_admin
 from .. import db
 from ..utils.html import safe
 from ..constants import PendingAction
@@ -44,7 +44,7 @@ def alias_row_controls(alias: str, buyer_id: int | None, lead_id: int | None) ->
 async def _send_aliases(chat_id: int, actor_id: int):
     """Send list of aliases."""
     if not await is_admin(actor_id):
-        return await bot.send_message(chat_id, "Только для админов")
+        return await bot.send_message(chat_id, NO_RIGHTS)
     rows = await db.list_aliases()
     if not rows:
         await bot.send_message(chat_id, "Алиасов пока нет.")

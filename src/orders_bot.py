@@ -9,7 +9,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 from loguru import logger
 
 from .config import settings
-from .handlers.common import is_admin
+from .handlers.common import NO_RIGHTS, is_admin
 from . import db, underdog
 from .telegram_rate_limit import make_bot
 from .utils.formatting import chunk_lines
@@ -143,7 +143,7 @@ def _format_user_line(user: Dict[str, Any]) -> str:
 @orders_dp.message(Command("users"))
 async def list_bot_users(message: Message) -> None:
     if not await is_admin(message.from_user.id):
-        await message.answer("❌ Эта команда доступна только администраторам.")
+        await message.answer(NO_RIGHTS)
         return
     users = await db.list_users()
     if not users:
@@ -189,7 +189,7 @@ async def list_bot_users(message: Message) -> None:
 @orders_dp.message(Command("unsubscribe"))
 async def unsubscribe_user(message: Message) -> None:
     if not await is_admin(message.from_user.id):
-        await message.answer("❌ Эта команда доступна только администраторам.")
+        await message.answer(NO_RIGHTS)
         return
     text = message.text or ""
     parts = text.split()

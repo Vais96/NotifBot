@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import STALE_BUTTON, admin_only, callback_parts, is_admin
+from .common import NO_RIGHTS, STALE_BUTTON, admin_only, callback_parts, is_admin
 from ..constants import Role
 from .. import db
 from ..utils.html import safe
@@ -49,7 +49,7 @@ def _teams_menu() -> InlineKeyboardMarkup:
 async def _send_teams(chat_id: int, actor_id: int):
     """Send teams management interface."""
     if not await is_admin(actor_id):
-        return await bot.send_message(chat_id, "Только для админов")
+        return await bot.send_message(chat_id, NO_RIGHTS)
     await bot.send_message(chat_id, "Команды — управление", reply_markup=_teams_menu())
 
 
@@ -62,7 +62,7 @@ async def cb_myteam_list(call: CallbackQuery):
     if await is_admin(call.from_user.id) and not team_id:
         team_id = int(me.get("team_id")) if me and me.get("team_id") else None
     if team_id is None:
-        return await call.answer("Нет прав", show_alert=True)
+        return await call.answer(NO_RIGHTS, show_alert=True)
     members = [u for u in users if u.get("team_id") is not None and int(u.get("team_id")) == int(team_id)]
     if not members:
         await call.message.answer("Состав пуст")
@@ -136,7 +136,7 @@ async def on_list_teams(message: Message):
         or (me or {}).get("role") in (Role.LEAD, Role.HEAD)
         or await db.list_user_lead_teams(message.from_user.id)
     ):
-        return await message.answer("Нет прав")
+        return await message.answer(NO_RIGHTS)
     teams = await db.list_teams()
     if not teams:
         return await message.answer("Команд нет")

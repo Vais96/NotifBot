@@ -100,8 +100,6 @@ async def process_fb_csv_upload(
         )
         flag_rows = await db.list_fb_flags()
         flag_by_code = {row["code"].upper(): row for row in flag_rows}
-        flag_id_to_title = {row["id"]: row["title"] for row in flag_rows}
-        flag_id_to_code = {row["id"]: row["code"] for row in flag_rows}
         flags_by_id = {int(row["id"]): row for row in flag_rows if row.get("id") is not None}
         state_map = await db.fetch_fb_campaign_state(parsed.campaign_names)
         latest_day = parsed.latest_day_by_campaign

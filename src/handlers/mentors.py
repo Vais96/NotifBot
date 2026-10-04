@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import STALE_BUTTON, admin_only, callback_parts, is_admin
+from .common import NO_RIGHTS, STALE_BUTTON, admin_only, callback_parts, is_admin
 from .. import db
 from ..utils.html import safe
 from ..handlers.users import _resolve_user_id
@@ -31,7 +31,7 @@ def _mentor_add_controls() -> InlineKeyboardMarkup:
 async def _send_mentors(chat_id: int, actor_id: int):
     """Send mentors management interface."""
     if not await is_admin(actor_id):
-        return await bot.send_message(chat_id, "Только для админов")
+        return await bot.send_message(chat_id, NO_RIGHTS)
     users = await db.list_users()
     mentors = [u for u in users if u.get("role") == "mentor"]
     if not mentors:

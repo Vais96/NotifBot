@@ -37,4 +37,7 @@ Keitaro S2S → `POST|GET /keitaro/postback` (`_authorize_postback` по `POSTBA
 - Роли: `constants.Role` — `buyer`, `lead`, `head`, `admin`, `mentor`, `helper` (`tg_users.role`); права админа — только `await is_admin(...)`. `/listteams` — lead/head/admin. Синк сотрудников: username нормализуется `_norm_username` (strip, без `@`, lower); дубли username в `tg_users` не матчатся (warning); extra-лиды у сотрудников без observer-команд удаляются (кроме `mentor` — их ставит `cb_set_role`).
 - Pending-флоу: `db.set_pending_action(user_id, PendingAction.X или f"{PendingAction.X}:{arg}", None)` → обработчик `@pending(PendingAction.X)` в `handlers/pending.py` (текст) или профильный хендлер (документ — `handlers/fb.py`). Новое действие = член `constants.PendingAction` + функция с `@pending`.
 - Сообщения >4096 — `send_long` (или `chunk_lines`, если у кусков свой формат); локальные чанкеры не писать.
-- Мёртвый код удалять, не комментировать. Новые env — в README.
+- Отказ в правах — всегда `NO_RIGHTS` («Нет прав») из `handlers/common.py` (или `@admin_only`).
+- Отмена ожидания ввода — централизованно в `pending.on_text_fallback`: «отмена» / «cancel» / «стоп» / «stop» и «-»; для `alias:setbuyer|setlead` и `kpi:set` «-» означает «очистить значение» (`_DASH_CLEARS`).
+- `/help` — общий список + админский раздел только для админов (`commands._HELP`, `_HELP_ADMIN`); новую команду добавлять туда.
+- Мёртвый код удалять, не комментировать. Новые env — в README (`.env.example` под `.gitignore` и не в git).
