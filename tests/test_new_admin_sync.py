@@ -89,6 +89,24 @@ class NewAdminEmployeeNormalizationTests(unittest.TestCase):
         }]})[0]
         self.assertEqual(employee.role, "head")
 
+    def test_teamlead_role_maps_to_lead(self) -> None:
+        employee = normalize_employees({"data": [{
+            "telegram": "some_lead",
+            "position": "Buyer",
+            "roles": ["teamlead"],
+            "status": "ACTIVE",
+        }]})[0]
+        self.assertEqual(employee.role, "lead")
+
+    def test_head_of_buyer_role_maps_to_head(self) -> None:
+        employee = normalize_employees({"data": [{
+            "telegram": "head_user",
+            "position": "Head of Buying",
+            "roles": ["head_of_buyer"],
+            "status": "ACTIVE",
+        }]})[0]
+        self.assertEqual(employee.role, "head")
+
     def test_rejects_unknown_response_shape(self) -> None:
         with self.assertRaises(NewAdminSyncError):
             normalize_employees({"data": {"unexpected": True}})

@@ -18,8 +18,9 @@ USERS_PATH = "/users"
 _DETAIL_CONCURRENCY = 10
 _ROLE_MAP = {
     "buyer": "buyer", "баер": "buyer", "байер": "buyer",
-    "lead": "lead", "team lead": "lead", "тимлид": "lead", "лид": "lead",
+    "lead": "lead", "team lead": "lead", "тимлид": "lead", "лид": "lead", "teamlead": "lead",
     "head": "head", "руководитель": "head",
+    "head of buying": "head", "head_of_buyer": "head",
     "bizdev": "head", "biz dev": "head", "business development": "head",
     "биздевом": "head", "биздева": "head", "биздэв": "head", "бизнес дев": "head",
     "admin": "admin", "administrator": "admin",
@@ -109,20 +110,30 @@ def _person_ref(value: Any) -> tuple[int | None, str | None]:
     return _as_int(value), _handle(value) if _as_int(value) is None else None
 
 
+_ROLE_PRIORITY = {
+    "admin": 6,
+    "head": 5,
+    "lead": 4,
+    "mentor": 3,
+    "helper": 2,
+    "buyer": 1,
+}
+
+
 def _role(raw_position: Any, raw_roles: Any, *, is_team_manager: bool) -> str | None:
     """Map the Admin directory job title to the bot permission role."""
     position = str(raw_position or "").strip().lower()
     if "assistant" in position or "помощ" in position:
         return "helper"
-    if is_team_manager:
-        return "lead"
     candidates = [position]
+    if is_team_manager:
+        candidates.append("lead")
     if isinstance(raw_roles, list):
         candidates.extend(str(item).strip().lower() for item in raw_roles)
-    for candidate in candidates:
-        if candidate in _ROLE_MAP:
-            return _ROLE_MAP[candidate]
-    return None
+    matched_roles = [_ROLE_MAP[c] for c in candidates if c in _ROLE_MAP]
+    if not matched_roles:
+        return None
+    return max(matched_roles, key=lambda r: _ROLE_PRIORITY.get(r, 0))
 
 
 def _observer_team_names(memberships: Any) -> tuple[str, ...]:
