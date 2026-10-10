@@ -64,8 +64,9 @@ class AliasDailyCounterTests(unittest.IsolatedAsyncioTestCase):
             any("ДЕПОЗИТОВ ЗА ДЕНЬ" in call.args[1] for call in notify.await_args_list)
         )
         sent = notify.await_args_list[0].args[1]
-        # the line names the buyer whose day it sums — leads watch several buyers at once
-        self.assertIn("ДОХОД ЗА ДЕНЬ · Арсений Симич:</b> <code>612", sent)
+        # БАЙЕР shows the buyer's name, not the campaign alias
+        self.assertIn("👤 <b>БАЙЕР:</b> <code>Арсений Симич</code>", sent)
+        self.assertIn("ДОХОД ЗА ДЕНЬ:</b> <code>612", sent)
         # ДОХОД sits directly above the daily deposit counter
         self.assertLess(sent.index("ДОХОД ЗА ДЕНЬ"), sent.index("ДЕПОЗИТОВ ЗА ДЕНЬ"))
 

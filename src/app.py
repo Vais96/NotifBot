@@ -133,8 +133,8 @@ def _buyer_username(user: dict | None) -> str | None:
     return username or None
 
 
-async def _buyer_label(user_id: int | None, alias_prefix: str | None) -> str | None:
-    """Name the buyer whose day the ДОХОД line sums, for recipients watching several buyers."""
+async def _buyer_label(user_id: int | None) -> str | None:
+    """Buyer's name for the БАЙЕР line (None → formatter falls back to the campaign alias)."""
     if user_id is not None:
         try:
             user = await db.get_user(user_id)
@@ -148,7 +148,7 @@ async def _buyer_label(user_id: int | None, alias_prefix: str | None) -> str | N
             username = (user.get("username") or "").strip().lstrip("@")
             if username:
                 return f"@{username}"
-    return alias_prefix
+    return None
 
 
 def _deposit_message_for_recipient(
@@ -587,13 +587,13 @@ async def _process_keitaro_postback(data: dict, inbound_id: int | None = None) -
             except Exception as e:
                 logger.warning(f"Failed to adjust daily revenue: {e}")
                 daily_revenue = db_daily_revenue
-        buyer_label = await _buyer_label(stats_user_id, alias_prefix)
         if stats_user_id is not None:
             try:
                 kpi = await db.get_kpi(stats_user_id)
                 kpi_daily_goal = kpi.get("daily_goal")
             except Exception as e:
                 logger.warning(f"Failed to get KPI: {e}")
+    buyer_label = await _buyer_label(stats_user_id)
     text = build_notification_text(
         data,
         daily_count=daily_count,

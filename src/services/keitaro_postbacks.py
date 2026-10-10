@@ -127,7 +127,7 @@ def build_notification_text(
         alias = (str(campaign_name).split("_", 1)[0] or "").strip() or None
 
     lines = [
-        f"👤 <b>БАЙЕР:</b> <code>{_html(alias)}</code>",
+        f"👤 <b>БАЙЕР:</b> <code>{_html(buyer_label or alias)}</code>",
         f"🎯 <b>ОФФЕР:</b> <code>{_html(offer_id)} | {_html(offer_name)}</code>",
     ]
     if payout_text:
@@ -141,12 +141,8 @@ def build_notification_text(
     if sub_id_2:
         lines.append(f"📌 <b>SubID2:</b> <code>{_html(sub_id_2)}</code>")
     if daily_revenue is not None:
-        # Leads and heads read many buyers' deposits in one feed — name whose day this is.
-        title = "ДОХОД ЗА ДЕНЬ"
-        if buyer_label:
-            title = f"{title} · {html.escape(str(buyer_label), quote=False)}"
         lines.append(
-            f"💵 <b>{title}:</b> <code>{_html(_format_payout(daily_revenue), '0')} {_html(currency, '')}</code>"
+            f"💵 <b>ДОХОД ЗА ДЕНЬ:</b> <code>{_html(_format_payout(daily_revenue), '0')} {_html(currency, '')}</code>"
         )
     if daily_count is not None:
         lines.append(f"📈 <b>ДЕПОЗИТОВ ЗА ДЕНЬ:</b> <code>{daily_count}</code>")

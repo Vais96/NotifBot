@@ -61,14 +61,15 @@ class NotificationRevenueLineTests(unittest.TestCase):
         text = build_notification_text({"campaign_name": "Nikita_PWA", "profit": "269"}, daily_count=2)
         self.assertNotIn("ДОХОД", text)
 
-    def test_revenue_line_names_the_buyer(self) -> None:
+    def test_buyer_line_shows_name(self) -> None:
         text = build_notification_text(
             {"campaign_name": "Nikita_PWA", "profit": "269", "currency": "USD"},
             daily_count=2,
             daily_revenue=538.4,
             buyer_label="Никита Трунов",
         )
-        self.assertIn("💵 <b>ДОХОД ЗА ДЕНЬ · Никита Трунов:</b> <code>538 USD</code>", text)
+        self.assertIn("👤 <b>БАЙЕР:</b> <code>Никита Трунов</code>", text)
+        self.assertIn("💵 <b>ДОХОД ЗА ДЕНЬ:</b> <code>538 USD</code>", text)
 
 
 class UnroutedDepositRevenueTests(unittest.IsolatedAsyncioTestCase):
@@ -100,7 +101,8 @@ class UnroutedDepositRevenueTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["fallback"])
         alias_stats.assert_awaited_once_with("newbuyer")
         sent = notify.await_args_list[0].args[1]
-        self.assertIn("💵 <b>ДОХОД ЗА ДЕНЬ · newbuyer:</b> <code>612 </code>", sent)
+        self.assertIn("👤 <b>БАЙЕР:</b> <code>NewBuyer</code>", sent)
+        self.assertIn("💵 <b>ДОХОД ЗА ДЕНЬ:</b> <code>612 </code>", sent)
         self.assertIn("📈 <b>ДЕПОЗИТОВ ЗА ДЕНЬ:</b> <code>4</code>", sent)
 
 
