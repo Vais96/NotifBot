@@ -235,6 +235,7 @@ async def _sync_aliases(st: _SyncState) -> None:
 async def _sync_campaign_names(st: _SyncState, employees: List[Any]) -> None:
     """Every active employee's campaign prefixes -> Admin name, Telegram or not (tg_aliases needs a tg user)."""
     resolved_ids = {id(person) for person, _ in st.resolved}
+    without_tg: List[str] = []
     for person in employees:
         if not _is_active(person):
             continue
@@ -244,10 +245,7 @@ async def _sync_campaign_names(st: _SyncState, employees: List[Any]) -> None:
             continue
         has_tg = id(person) in resolved_ids
         if not has_tg:
-            logger.warning(
-                "Admin employee has campaign aliases but no Telegram; deposits go to fallback",
-                aliases=aliases, full_name=name, external_id=getattr(person, "external_id", None),
-            )
+            without_tg.append(f"{'/'.join(aliases)} {name}")
             st.stats["aliases_without_telegram"] += 1
         for alias in aliases:
             await st.cur.execute(
@@ -255,6 +253,9 @@ async def _sync_campaign_names(st: _SyncState, employees: List[Any]) -> None:
                 "ON DUPLICATE KEY UPDATE full_name=new.full_name, has_telegram=new.has_telegram",
                 (alias, name[:255], 1 if has_tg else 0),
             )
+    if without_tg:
+        # one line per sync: whose deposits go to the admin fallback (no Telegram in Admin)
+        logger.warning("Campaign aliases without Telegram ({}): {}", len(without_tg), "; ".join(without_tg))
 
 
 async def _upsert_alias(st: _SyncState, seen_aliases: Dict[str, int], alias: str, uid: int) -> None:
