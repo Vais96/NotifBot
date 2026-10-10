@@ -66,6 +66,16 @@ SCHEMA_SQL = [
         CONSTRAINT fk_tg_alias_lead FOREIGN KEY (lead_id) REFERENCES tg_users (telegram_id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # campaign prefix (Admin «Имя в Keitaro» / employee number) -> Admin full name, for every
+    # active employee incl. those without Telegram: names the БАЙЕР line of unrouted deposits
+    """
+    CREATE TABLE IF NOT EXISTS tg_campaign_names (
+        alias VARCHAR(255) PRIMARY KEY,
+        full_name VARCHAR(255) NOT NULL,
+        has_telegram TINYINT(1) NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
     # simple pending action storage per admin for inline flows
     """
     CREATE TABLE IF NOT EXISTS tg_pending_actions (

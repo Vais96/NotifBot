@@ -232,6 +232,31 @@ async def _sync_aliases(st: _SyncState) -> None:
             await _upsert_alias(st, seen_aliases, alias, uid)
 
 
+async def _sync_campaign_names(st: _SyncState, employees: List[Any]) -> None:
+    """Every active employee's campaign prefixes -> Admin name, Telegram or not (tg_aliases needs a tg user)."""
+    resolved_ids = {id(person) for person, _ in st.resolved}
+    for person in employees:
+        if not _is_active(person):
+            continue
+        aliases = campaign_aliases(person)
+        name = str(getattr(person, "full_name", None) or "").strip()
+        if not aliases or not name:
+            continue
+        has_tg = id(person) in resolved_ids
+        if not has_tg:
+            logger.warning(
+                "Admin employee has campaign aliases but no Telegram; deposits go to fallback",
+                aliases=aliases, full_name=name, external_id=getattr(person, "external_id", None),
+            )
+            st.stats["aliases_without_telegram"] += 1
+        for alias in aliases:
+            await st.cur.execute(
+                "INSERT INTO tg_campaign_names(alias, full_name, has_telegram) VALUES(%s, %s, %s) AS new "
+                "ON DUPLICATE KEY UPDATE full_name=new.full_name, has_telegram=new.has_telegram",
+                (alias, name[:255], 1 if has_tg else 0),
+            )
+
+
 async def _upsert_alias(st: _SyncState, seen_aliases: Dict[str, int], alias: str, uid: int) -> None:
     existing_owner = seen_aliases.get(alias)
     if existing_owner is not None and existing_owner != uid:
@@ -268,7 +293,8 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
     """Persist one trusted employee-directory snapshot atomically (all steps in one transaction)."""
     stats = {"received": len(employees), "matched": 0, "skipped": 0, "users_updated": 0,
              "teams_created": 0, "teams_deleted": 0, "helper_links_updated": 0,
-             "observer_links_updated": 0, "aliases_upserted": 0}
+             "observer_links_updated": 0, "aliases_upserted": 0,
+             "aliases_without_telegram": 0}
     async with transaction(dict_rows=True) as cur:
         st = _SyncState(cur=cur, stats=stats)
         await _load_users(st)
@@ -278,4 +304,5 @@ async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
         await _sync_helper_links(st)
         await _sync_observer_leads(st)
         await _sync_aliases(st)
+        await _sync_campaign_names(st, employees)
     return stats

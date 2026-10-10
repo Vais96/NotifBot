@@ -19,6 +19,14 @@ async def find_alias(alias: Optional[str]) -> Optional[Dict[str, Any]]:
     return await fetch_one("SELECT alias, buyer_id, lead_id FROM tg_aliases WHERE alias=%s", (alias.lower(),), dict_rows=True)
 
 
+async def find_campaign_name(alias: Optional[str]) -> Optional[str]:
+    """Admin full name for a campaign prefix, even when the employee has no Telegram."""
+    if not alias:
+        return None
+    row = await fetch_one("SELECT full_name FROM tg_campaign_names WHERE alias=%s", (alias.strip().lower(),))
+    return (row[0] or None) if row else None
+
+
 _UNSET = object()
 
 

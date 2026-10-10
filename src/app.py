@@ -133,8 +133,9 @@ def _buyer_username(user: dict | None) -> str | None:
     return username or None
 
 
-async def _buyer_label(user_id: int | None) -> str | None:
-    """Buyer's name for the БАЙЕР line (None → formatter falls back to the campaign alias)."""
+async def _buyer_label(user_id: int | None, alias_prefix: str | None = None) -> str | None:
+    """Buyer's name for the БАЙЕР line: tg user, else Admin name by campaign prefix
+    (employee without Telegram), else None → formatter falls back to the campaign alias."""
     if user_id is not None:
         try:
             user = await db.get_user(user_id)
@@ -148,6 +149,11 @@ async def _buyer_label(user_id: int | None) -> str | None:
             username = (user.get("username") or "").strip().lstrip("@")
             if username:
                 return f"@{username}"
+    if alias_prefix:
+        try:
+            return await db.find_campaign_name(alias_prefix)
+        except Exception as e:
+            logger.warning(f"Failed to find Admin name for alias {alias_prefix}: {e}")
     return None
 
 
@@ -593,7 +599,7 @@ async def _process_keitaro_postback(data: dict, inbound_id: int | None = None) -
                 kpi_daily_goal = kpi.get("daily_goal")
             except Exception as e:
                 logger.warning(f"Failed to get KPI: {e}")
-    buyer_label = await _buyer_label(stats_user_id)
+    buyer_label = await _buyer_label(stats_user_id, alias_prefix)
     text = build_notification_text(
         data,
         daily_count=daily_count,

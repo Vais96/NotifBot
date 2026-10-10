@@ -75,6 +75,7 @@ from .sales_stats import (  # noqa: F401
 from .aliases import (  # noqa: F401
     list_alias_lead_buyers,
     find_alias,
+    find_campaign_name,
     _UNSET,
     set_alias,
     list_aliases,
