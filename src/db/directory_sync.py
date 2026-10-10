@@ -233,18 +233,21 @@ async def _sync_aliases(st: _SyncState) -> None:
 
 
 async def _sync_campaign_names(st: _SyncState, employees: List[Any]) -> None:
-    """Every active employee's campaign prefixes -> Admin name, Telegram or not (tg_aliases needs a tg user)."""
+    """Every employee's campaign prefixes -> Admin name, Telegram or not (tg_aliases needs a tg user)."""
     resolved_ids = {id(person) for person, _ in st.resolved}
     without_tg: List[str] = []
-    for person in employees:
-        if not _is_active(person):
-            continue
+    # inactive first so an active owner of the same prefix overwrites it; fired buyers' campaigns
+    # can keep converting, the БАЙЕР line then reads «Имя (уволен)»
+    for person in sorted(employees, key=_is_active):
+        active = _is_active(person)
         aliases = campaign_aliases(person)
         name = str(getattr(person, "full_name", None) or "").strip()
         if not aliases or not name:
             continue
+        if not active:
+            name = f"{name} (уволен)"
         has_tg = id(person) in resolved_ids
-        if not has_tg:
+        if active and not has_tg:
             without_tg.append(f"{'/'.join(aliases)} {name}")
             st.stats["aliases_without_telegram"] += 1
         for alias in aliases:
