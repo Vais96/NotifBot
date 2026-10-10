@@ -130,6 +130,25 @@ class NewAdminEmployeeNormalizationTests(unittest.TestCase):
         })
         self.assertEqual(employee.keitaro_name, "NikolaiPetrychenko")
 
+    def test_admin_number_routes_new_keitaro_campaigns_next_to_the_old_name(self) -> None:
+        from src.db.directory_sync import campaign_aliases
+
+        employee = normalize_employees({"data": [{
+            "id": "cms-id",
+            "telegram": "@dianaunderdog",
+            "fullName": "Диана Симич",
+            "position": "Buyer",
+            "keitaroName": "DianaSimich",
+            "publicId": 3,
+        }]})[0]
+        self.assertEqual(employee.public_id, "3")
+        # `3_PWAPartners[...]` (new Keitaro) and `DianaSimich_PWAPartners[...]` (old) reach the same buyer.
+        self.assertEqual(campaign_aliases(employee), ["dianasimich", "3"])
+        self.assertEqual(campaign_aliases(_employee(keitaro_name=None)), [])
+        card = apply_directory_detail(_employee(), {"id": "cms-id", "publicId": "017"})
+        self.assertEqual(card.public_id, "17")
+        self.assertEqual(campaign_aliases(card), ["17"])
+
 
 class NewAdminKeitaroNameEnrichmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_fetches_user_cards_when_list_omits_keitaro_name(self) -> None:

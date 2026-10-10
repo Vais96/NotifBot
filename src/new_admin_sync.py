@@ -95,6 +95,12 @@ def _keitaro_name(raw: Mapping[str, Any]) -> str | None:
     return _name(value)
 
 
+def _public_id(raw: Mapping[str, Any]) -> str | None:
+    """Admin employee number; since 10.10.2026 new Keitaro campaigns start with it (`3_PWAPartners[...]`)."""
+    value = str(_first(raw, "publicId", "public_id") or "").strip()
+    return str(int(value)) if value.isdigit() else None
+
+
 def keitaro_alias_key(value: Any) -> str | None:
     """Lowercased tg_aliases key from an Admin keitaroName."""
     result = str(value).strip().lower() if value is not None else ""
@@ -170,6 +176,7 @@ class DirectoryEmployee:
     is_active: bool
     observer_team_names: tuple[str, ...] = ()
     keitaro_name: str | None = None
+    public_id: str | None = None
 
 
 def normalize_employees(payload: Any) -> list[DirectoryEmployee]:
@@ -213,6 +220,7 @@ def normalize_employees(payload: Any) -> list[DirectoryEmployee]:
             is_active=str(raw.get("status") or "ACTIVE").upper() == "ACTIVE",
             observer_team_names=_observer_team_names(memberships),
             keitaro_name=_keitaro_name(raw),
+            public_id=_public_id(raw),
         ))
     return employees
 
@@ -225,6 +233,9 @@ def apply_directory_detail(employee: DirectoryEmployee, raw: Any) -> DirectoryEm
     keitaro_name = _keitaro_name(raw)
     if keitaro_name and keitaro_name != employee.keitaro_name:
         updates["keitaro_name"] = keitaro_name
+    public_id = _public_id(raw)
+    if public_id and not employee.public_id:
+        updates["public_id"] = public_id
     telegram_id = _as_int(_first(raw, "telegramId", "telegram_id", "telegramID"))
     if telegram_id and not employee.telegram_id:
         updates["telegram_id"] = telegram_id

@@ -211,44 +211,57 @@ async def _sync_observer_leads(st: _SyncState) -> None:
         st.stats["observer_links_updated"] += 1
 
 
+def campaign_aliases(person: Any) -> List[str]:
+    """Campaign prefixes that route to this person: Admin «Имя в Keitaro» (old campaigns)
+    and the Admin employee number (new Keitaro since 10.10.2026, `3_PWAPartners[...]`)."""
+    aliases: List[str] = []
+    for value in (getattr(person, "keitaro_name", None), getattr(person, "public_id", None)):
+        alias = str(value or "").strip().lower()
+        if alias and alias not in aliases:
+            aliases.append(alias)
+    return aliases
+
+
 async def _sync_aliases(st: _SyncState) -> None:
-    """Admin «Имя в Keitaro» is the campaign prefix used for deposit routing."""
+    """Admin «Имя в Keitaro» and employee number are the campaign prefixes used for deposit routing."""
     seen_aliases: Dict[str, int] = {}
     for person, uid in st.resolved:
         if not _is_active(person):
             continue
-        alias = str(getattr(person, "keitaro_name", None) or "").strip().lower()
-        if not alias:
-            continue
-        existing_owner = seen_aliases.get(alias)
-        if existing_owner is not None and existing_owner != uid:
-            logger.warning(
-                "Duplicate Admin keitaroName; keeping first alias owner",
-                alias=alias,
-                kept_user_id=existing_owner,
-                skipped_user_id=uid,
-            )
-            continue
-        seen_aliases[alias] = uid
-        await st.cur.execute("SELECT buyer_id FROM tg_aliases WHERE alias=%s", (alias,))
-        previous = await st.cur.fetchone()
-        previous_buyer = previous.get("buyer_id") if previous else None
-        if previous_buyer is not None and int(previous_buyer) != uid:
-            logger.warning(
-                "Admin keitaroName reassigns existing alias",
-                alias=alias,
-                previous_buyer_id=int(previous_buyer),
-                new_buyer_id=uid,
-            )
-        await st.cur.execute(
-            """
-            INSERT INTO tg_aliases(alias, buyer_id, lead_id)
-            VALUES(%s, %s, NULL) AS new
-            ON DUPLICATE KEY UPDATE buyer_id=new.buyer_id
-            """,
-            (alias, uid),
+        for alias in campaign_aliases(person):
+            await _upsert_alias(st, seen_aliases, alias, uid)
+
+
+async def _upsert_alias(st: _SyncState, seen_aliases: Dict[str, int], alias: str, uid: int) -> None:
+    existing_owner = seen_aliases.get(alias)
+    if existing_owner is not None and existing_owner != uid:
+        logger.warning(
+            "Duplicate Admin campaign alias; keeping first alias owner",
+            alias=alias,
+            kept_user_id=existing_owner,
+            skipped_user_id=uid,
         )
-        st.stats["aliases_upserted"] += 1
+        return
+    seen_aliases[alias] = uid
+    await st.cur.execute("SELECT buyer_id FROM tg_aliases WHERE alias=%s", (alias,))
+    previous = await st.cur.fetchone()
+    previous_buyer = previous.get("buyer_id") if previous else None
+    if previous_buyer is not None and int(previous_buyer) != uid:
+        logger.warning(
+            "Admin campaign alias reassigns existing alias",
+            alias=alias,
+            previous_buyer_id=int(previous_buyer),
+            new_buyer_id=uid,
+        )
+    await st.cur.execute(
+        """
+        INSERT INTO tg_aliases(alias, buyer_id, lead_id)
+        VALUES(%s, %s, NULL) AS new
+        ON DUPLICATE KEY UPDATE buyer_id=new.buyer_id
+        """,
+        (alias, uid),
+    )
+    st.stats["aliases_upserted"] += 1
 
 
 async def sync_employee_directory(employees: List[Any]) -> Dict[str, int]:
