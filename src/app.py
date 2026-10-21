@@ -123,6 +123,9 @@ _DEPOSIT_FOOTERS_BY_USERNAME: dict[str, str] = {
     "maria_underdog": (
         "\n\nСОЛНЫШКО У ТЕБЯ ВСЕ ПОЛУЧИТСЯ! ТЫ САМАЯ САМАЯ ЛУЧШАЯ! Все будет заебись, пусть дальше капают депозитики"
     ),
+    # Илья Клемпарский: старый ник в tg_users и новый из Admin — подпись одна
+    "illia_klemparskyi_underdog": "\n\nУЩЬ-УЩЬ",
+    "illia_k_underdog": "\n\nУЩЬ-УЩЬ",
 }
 
 
