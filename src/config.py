@@ -49,8 +49,8 @@ class Settings(BaseModel):
     )
     port: int = Field(default=8080, validation_alias="PORT")
     postback_token: SecretStr = Field(default="", validation_alias="POSTBACK_TOKEN")
-    keitaro_api_key: SecretStr = Field(default="", validation_alias="KEITARO_API_KEY")
-    keitaro_base_url: str = Field(default="", validation_alias="KEITARO_BASE_URL")
+    binom_api_key: SecretStr = Field(default="", validation_alias="BINOM_API_KEY")
+    binom_base_url: str = Field(default="", validation_alias="BINOM_BASE_URL")
     youtube_cookies_path: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES_PATH")
     youtube_cookies_raw: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES")
     youtube_cookies_base64: Optional[str] = Field(default=None, validation_alias="YTDLP_COOKIES_B64")
@@ -86,9 +86,9 @@ class Settings(BaseModel):
         default=3600,
         validation_alias="DESIGN_NOTIFY_INTERVAL_SECONDS",
     )
-    # Как часто подтягивать кампании/домены из Keitaro. 0 отключает встроенный цикл.
-    keitaro_sync_interval_seconds: int = Field(
-        default=86400,
+    # Как часто подтягивать кампании/домены из Binom (имя переменной осталось с Keitaro). 0 отключает цикл.
+    binom_sync_interval_seconds: int = Field(
+        default=3600,
         validation_alias="KEITARO_SYNC_INTERVAL_SECONDS",
     )
     # Ежедневная сводка дохода по командам для лидов/менторов/хэдов: время «ЧЧ:ММ» и таймзона.
@@ -162,8 +162,8 @@ class Settings(BaseModel):
             "UNDERDOG_NOTIFY_ADMIN_USERNAMES": underdog_notify_admin_usernames,
             "PORT": _env_int("PORT", 8080),
             "POSTBACK_TOKEN": os.getenv("POSTBACK_TOKEN", ""),
-            "KEITARO_API_KEY": os.getenv("KEITARO_API_KEY", ""),
-            "KEITARO_BASE_URL": os.getenv("KEITARO_BASE_URL", ""),
+            "BINOM_API_KEY": os.getenv("BINOM_API_KEY", ""),
+            "BINOM_BASE_URL": os.getenv("BINOM_BASE_URL", ""),
             "YTDLP_COOKIES_PATH": os.getenv("YTDLP_COOKIES_PATH"),
             "YTDLP_COOKIES": os.getenv("YTDLP_COOKIES"),
             "YTDLP_COOKIES_B64": os.getenv("YTDLP_COOKIES_B64"),
@@ -184,7 +184,7 @@ class Settings(BaseModel):
             "DESIGN_BROADCAST_CHAT_IDS": _parse_id_list("DESIGN_BROADCAST_CHAT_IDS"),
             "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": _env_int("DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS", 48),
             "DESIGN_NOTIFY_INTERVAL_SECONDS": _env_int("DESIGN_NOTIFY_INTERVAL_SECONDS", 3600),
-            "KEITARO_SYNC_INTERVAL_SECONDS": _env_int("KEITARO_SYNC_INTERVAL_SECONDS", 86400),
+            "KEITARO_SYNC_INTERVAL_SECONDS": _env_int("KEITARO_SYNC_INTERVAL_SECONDS", 3600),
             "DAILY_REVENUE_REPORT_TIME": os.getenv("DAILY_REVENUE_REPORT_TIME", "23:55").strip(),
             "DAILY_REVENUE_REPORT_TZ": os.getenv("DAILY_REVENUE_REPORT_TZ", "UTC").strip() or "UTC",
         }

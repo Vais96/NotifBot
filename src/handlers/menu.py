@@ -6,7 +6,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from ..dispatcher import bot, dp
 from .common import NO_RIGHTS, admin_only, get_actor, is_admin
-from .. import db, keitaro_sync
+from .. import db, binom_sync
 from ..handlers.users import _send_whoami, _send_list_users, _send_list_routes, _send_manage
 from ..handlers.aliases import _send_aliases
 from ..handlers.teams import _send_teams, _send_myteam
@@ -111,12 +111,12 @@ async def on_menu_click(call: CallbackQuery):
         if not await is_admin(call.from_user.id):
             return await call.answer(NO_RIGHTS, show_alert=True)
         await call.answer("Начинаю обновление")
-        status_msg = await call.message.answer("Запускаю обновление доменов из Keitaro…")
+        status_msg = await call.message.answer("Запускаю обновление доменов из Binom…")
         try:
-            count = await keitaro_sync.sync_campaigns()
+            count = await binom_sync.sync_campaigns()
         except Exception as exc:
-            logger.exception("Failed to refresh Keitaro domains", error=exc)
-            await status_msg.edit_text("Не удалось обновить домены. Проверь логи и настройки Keitaro API.")
+            logger.exception("Failed to refresh Binom domains", error=exc)
+            await status_msg.edit_text("Не удалось обновить домены. Проверь логи и настройки Binom API.")
         else:
             await status_msg.edit_text(f"Готово. Добавлено/обновлено {count} кампаний с доменами.")
         return

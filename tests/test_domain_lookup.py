@@ -8,7 +8,7 @@ os.environ.setdefault("BASE_URL", "https://example.test")
 
 from src.handlers.menu import main_menu  # noqa: E402
 from src.keitaro import campaign_row_matches_domain, hosts_match, parse_campaign_name  # noqa: E402
-from src.keitaro_sync import _prepare_rows, extract_campaign_list  # noqa: E402
+from src.binom_sync import BINOM_ID_OFFSET, _prepare_rows, extract_campaign_list  # noqa: E402
 from src.utils.domain import extract_domains  # noqa: E402
 
 
@@ -51,7 +51,24 @@ class ExtractDomainsTests(unittest.TestCase):
         self.assertIn("bar.online", domains)
 
 
-class KeitaroSyncParseTests(unittest.TestCase):
+class BinomSyncParseTests(unittest.TestCase):
+    def test_extracts_bare_binom_list(self) -> None:
+        payload = [
+            {"id": 8, "name": "130_PWAPartners[loteriakino.com -> solantrania.com]", "trafficSourceId": 1},
+            "junk",
+        ]
+        rows = extract_campaign_list(payload)
+        self.assertEqual(len(rows), 1)
+        prepared = _prepare_rows(rows)
+        self.assertEqual(prepared[0]["id"], BINOM_ID_OFFSET + 8)
+        self.assertEqual(prepared[0]["alias_key"], "130")
+        self.assertEqual(prepared[0]["source_domain"], "loteriakino.com")
+        self.assertEqual(prepared[0]["target_domain"], "solantrania.com")
+
+    def test_rejects_unexpected_payload(self) -> None:
+        with self.assertRaises(ValueError):
+            extract_campaign_list({"error": "forbidden"})
+
     def test_extracts_wrapped_campaign_list(self) -> None:
         rows = extract_campaign_list({"campaigns": [{"id": 1, "name": "a"}]})
         self.assertEqual(len(rows), 1)

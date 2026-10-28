@@ -2,6 +2,10 @@
 
 from enum import StrEnum
 
+# ponytail: Binom ids share `keitaro_campaigns` (and its BIGINT PK) with frozen Keitaro rows; the offset keeps them apart.
+# Switch to a `source` column if the Keitaro rows are ever dropped or a third tracker appears.
+BINOM_ID_OFFSET = 1_000_000_000
+
 # Keitaro conversion statuses that count as a deposit (postback routing, daily counters, reports)
 SALE_STATUSES: tuple[str, ...] = (
     "sale", "approved", "approve", "confirmed", "confirm", "purchase", "purchased", "paid", "success", "ftd",

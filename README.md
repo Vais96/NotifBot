@@ -19,8 +19,8 @@ A FastAPI + aiogram bot that receives Keitaro S2S postbacks and notifies the app
 - ADMINS: Comma-separated Telegram user IDs with admin rights
 - PORT: Port to listen on (Railway provides)
 - POSTBACK_TOKEN: Token for Keitaro postbacks and internal endpoints (Authorization header). Empty = no auth; the app logs a warning on startup.
-- KEITARO_API_KEY / KEITARO_BASE_URL: Admin API for campaign/domain lookup (`/checkdomain`)
-- KEITARO_SYNC_INTERVAL_SECONDS: How often to pull new Keitaro domains (default `86400` = daily; `0` disables)
+- BINOM_BASE_URL / BINOM_API_KEY: Binom v2 tracker root (without `/public/api/v1`) and its API key — campaign/domain lookup (`/checkdomain`) reads `GET /public/api/v1/campaign/short/info` (since 21.10.2026 campaigns live in Binom; old Keitaro campaigns stay in the cache)
+- KEITARO_SYNC_INTERVAL_SECONDS: How often to pull new Binom domains (default `3600` = hourly; `0` disables; the name is left from Keitaro)
 - NEW_ADMIN_API_URL / NEW_ADMIN_API_KEY: new Admin API and its machine key. The bot reads `GET /users` and synchronizes matched Telegram users, their roles, teams and helper-to-buyer links.
 - ADS_WORKSPACE_API_URL / ADS_WORKSPACE_TOKEN: Ads Workspace API. Buyers, leads, mentors and heads get a personal activation code from the «Мой ключ для АДС» menu. The token must match `INTERNAL_TOKEN` on ads-workspace-api.
 - NEW_ADMIN_SYNC_INTERVAL_SECONDS: Directory refresh interval (default `3600` = hourly; `0` disables). The first refresh runs immediately after startup.
@@ -158,7 +158,7 @@ Note: The `tickets` process in Procfile is for a persistent worker, not for sche
 
 Веб-процесс автоматически проверяет design-уведомления раз в час. Интервал задаётся через `DESIGN_NOTIFY_INTERVAL_SECONDS=3600`; значение `0` отключает встроенную проверку.
 
-Каждый день бот сам подтягивает кампании из Keitaro и **дописывает новые домены** в локальный кэш, чтобы `/checkdomain` находил свежие лендинги. Интервал: `KEITARO_SYNC_INTERVAL_SECONDS=86400` (0 — выключить). Админ может обновить вручную кнопкой «Обновить домены». Помощники проверяют домены командой `/checkdomain` или кнопкой в `/menu`.
+Каждый час бот сам подтягивает кампании из Binom (с 21.10.2026; старые кампании Keitaro остаются в кэше) и **дописывает новые домены** в локальный кэш, чтобы `/checkdomain` находил свежие лендинги. Интервал: `KEITARO_SYNC_INTERVAL_SECONDS=3600` (0 — выключить). Админ может обновить вручную кнопкой «Обновить домены». Помощники проверяют домены командой `/checkdomain` или кнопкой в `/menu`.
 
 **Альтернативно — одна команда для внешнего крона:**
 ```bash

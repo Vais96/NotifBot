@@ -2,7 +2,7 @@
 
 from typing import Optional, List, Dict, Any, Tuple, Iterable
 from datetime import date, timedelta, datetime
-from ..constants import SALE_STATUSES
+from ..constants import BINOM_ID_OFFSET, SALE_STATUSES
 from .pool import _executemany_rows, fetch_all, transaction
 
 
@@ -55,22 +55,19 @@ async def find_campaigns_by_domain(domain: str) -> List[Dict[str, Any]]:
         WHERE source_domain=%s OR target_domain=%s
            OR source_domain LIKE %s OR target_domain LIKE %s
            OR name LIKE %s
-        ORDER BY prefix IS NULL, prefix ASC, name ASC
+        ORDER BY id >= %s DESC, prefix IS NULL, prefix ASC, name ASC
         """,
-        (value, value, like_host, like_host, like_name), dict_rows=True)
+        (value, value, like_host, like_host, like_name, BINOM_ID_OFFSET), dict_rows=True)
+    # Binom (live) rows first; a Keitaro row with the same name is the same campaign before the move.
     matched: List[Dict[str, Any]] = []
-    seen_ids: set[int] = set()
+    seen_names: set[str] = set()
     for row in rows or []:
         if not campaign_row_matches_domain(row, value):
             continue
-        try:
-            cid = int(row.get("id"))
-        except Exception:
-            cid = None
-        if cid is not None:
-            if cid in seen_ids:
-                continue
-            seen_ids.add(cid)
+        name = str(row.get("name") or "").strip().lower()
+        if name in seen_names:
+            continue
+        seen_names.add(name)
         matched.append(row)
     return matched
 
