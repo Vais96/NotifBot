@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..dispatcher import bot, dp
-from .common import NO_RIGHTS, admin_only, get_actor, is_admin
+from .common import NO_RIGHTS, STALE_BUTTON, admin_only, get_actor, is_admin
 from .. import db, binom_sync
 from ..handlers.users import _send_whoami, _send_list_users, _send_list_routes, _send_manage
 from ..handlers.aliases import _send_aliases
@@ -24,10 +24,8 @@ ADS_KEY_BUTTON = [InlineKeyboardButton(text="Мой ключ для АДС", cal
 
 def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = False) -> InlineKeyboardMarkup:
     """Build main menu keyboard."""
-    checkdomain_btn = [InlineKeyboardButton(text="Проверить домен", callback_data="menu:checkdomain")]
     if role == "helper" and not is_admin:
         buttons = [
-            checkdomain_btn,
             [InlineKeyboardButton(text="Отчеты", callback_data="menu:reports"), InlineKeyboardButton(text="KPI", callback_data="menu:kpi")],
             [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
             [InlineKeyboardButton(text="Загрузить CSV", callback_data="menu:uploadcsv")],
@@ -40,7 +38,6 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
     ]
     if can_use_ads_key(is_admin, role):
         buttons.insert(0, ADS_KEY_BUTTON)
-    buttons.append(checkdomain_btn)
     buttons.append([InlineKeyboardButton(text="Загрузить CSV", callback_data="menu:uploadcsv")])
     buttons.append([InlineKeyboardButton(text="Скачать видео", callback_data="menu:yt_download")])
     if is_admin:
@@ -87,10 +84,6 @@ async def on_menu_click(call: CallbackQuery):
         return await call.answer()
     if key == "listroutes":
         await _send_list_routes(call.message.chat.id, call.from_user.id)
-        return await call.answer()
-    if key == "checkdomain":
-        await db.set_pending_action(call.from_user.id, PendingAction.DOMAIN_CHECK, None)
-        await call.message.answer("Пришлите домен в формате example.com или ссылку")
         return await call.answer()
     if key == "uploadcsv":
         await db.set_pending_action(call.from_user.id, PendingAction.FB_AWAIT_CSV, None)
@@ -167,6 +160,8 @@ async def on_menu_click(call: CallbackQuery):
     if key == "kpi":
         await _send_kpi_menu(call.message.chat.id, call.from_user.id)
         return await call.answer()
+    # Removed items (e.g. «Проверить домен», 09.11) on old menus.
+    await call.answer(STALE_BUTTON, show_alert=True)
 
 
 @dp.callback_query(F.data == "resetfbdata:confirm")

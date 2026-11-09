@@ -22,10 +22,7 @@ async def on_start(message: Message):
     me = await db.get_user(message.from_user.id)
     role = (me or {}).get("role")
     if role == "helper":
-        await message.answer(
-            "Привет! Вы помощник.\n"
-            "Проверять домены: /checkdomain или кнопка «Проверить домен» в меню."
-        )
+        await message.answer("Привет! Вы помощник.")
     else:
         await message.answer(
             "Привет! Ты зарегистрирован. Роли, команды и привязки синхронизируются из Admin API."
@@ -41,13 +38,12 @@ _HELP = (
     "/yesterday — отчёт за вчера\n"
     "/week — отчёт за 7 дней\n"
     "/adskey — мой ключ Ads Workspace (байер/лид/ментор/хэд)\n"
-    "/checkdomain — проверить домен (кто ведёт кампанию)\n"
     "/listteams — список команд (лид/хэд/админ)\n"
     "/whoami — показать свой Telegram ID\n"
     "/ping — проверка связи (pong)\n"
     "/help — помощь\n"
     "\n"
-    "Если бот ждёт ввод (домен, ID, число), «отмена» / «cancel» / «-» прекращает ожидание."
+    "Если бот ждёт ввод (ID, число, CSV), «отмена» / «cancel» / «-» прекращает ожидание."
 )
 _HELP_ADMIN = (
     "\n\nАдмину:\n"

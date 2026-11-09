@@ -53,6 +53,16 @@ async def admin_notify_throttle_clear(dedupe_key: str) -> None:
         logger.warning("admin_notify_throttle_clear failed", key=k, error=str(e))
 
 
+async def claim_cap_low_alert(dedupe_key: str, chat_id: int) -> bool:
+    """True — предупреждение этому чату по ключу ещё не слали (и теперь помечено)."""
+    async with cursor() as cur:
+        await cur.execute(
+            "INSERT IGNORE INTO tg_cap_low_sent (dedupe_key, chat_id) VALUES (%s, %s)",
+            (dedupe_key[:128], chat_id),
+        )
+        return int(cur.rowcount or 0) == 1
+
+
 async def underdog_sent_ids(kind: str, external_ids: List[str], chat_id: int) -> set:
     if not external_ids:
         return set()

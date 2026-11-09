@@ -389,6 +389,15 @@ SCHEMA_SQL = [
         PRIMARY KEY (kind, external_id, chat_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # «Капа заканчивается» байеру: одно предупреждение на оффер и окно капы (services/offer_cap.cap_low_key)
+    """
+    CREATE TABLE IF NOT EXISTS tg_cap_low_sent (
+        dedupe_key VARCHAR(128) NOT NULL,
+        chat_id BIGINT NOT NULL,
+        sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (dedupe_key, chat_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
     # Durable inbox for Keitaro postbacks: row is written before the 200, processed afterwards, retried on startup
     """
     CREATE TABLE IF NOT EXISTS tg_inbound_postbacks (
