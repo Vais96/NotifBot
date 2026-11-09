@@ -94,6 +94,7 @@ def build_notification_text(
     kpi_daily_goal: int | None = None,
     daily_revenue: float | None = None,
     buyer_label: str | None = None,
+    cap_line: str | None = None,
 ) -> str:
     payout = _clean(
         data.get("profit")
@@ -130,6 +131,8 @@ def build_notification_text(
         f"👤 <b>БАЙЕР:</b> <code>{_html(buyer_label or alias)}</code>",
         f"🎯 <b>ОФФЕР:</b> <code>{_html(offer_id)} | {_html(offer_name)}</code>",
     ]
+    if cap_line:
+        lines.append(cap_line)
     if payout_text:
         lines.append(
             f"💰 <b>ПРОФИТ:</b> <code>{_html(payout_text, '')} {_html(currency, '')}</code>"

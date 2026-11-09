@@ -1,4 +1,4 @@
-"""Binom v2 campaigns → local `keitaro_campaigns` cache for /checkdomain (since 21.10.2026 campaigns live in Binom)."""
+"""Binom v2 campaigns → local `keitaro_campaigns` cache (buyer ownership for FB CSV uploads; since 21.10.2026 campaigns live in Binom)."""
 
 import asyncio
 from typing import Any, Dict, List

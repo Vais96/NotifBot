@@ -19,9 +19,9 @@ A FastAPI + aiogram bot that receives Keitaro S2S postbacks and notifies the app
 - ADMINS: Comma-separated Telegram user IDs with admin rights
 - PORT: Port to listen on (Railway provides)
 - POSTBACK_TOKEN: Token for Keitaro postbacks and internal endpoints (Authorization header). Empty = no auth; the app logs a warning on startup.
-- BINOM_BASE_URL / BINOM_API_KEY: Binom v2 tracker root (without `/public/api/v1`) and its API key — campaign/domain lookup (`/checkdomain`) reads `GET /public/api/v1/campaign/short/info` (since 21.10.2026 campaigns live in Binom; old Keitaro campaigns stay in the cache)
+- BINOM_BASE_URL / BINOM_API_KEY: Binom v2 tracker root (without `/public/api/v1`) and its API key — the campaign cache (buyer ownership for FB CSV uploads) reads `GET /public/api/v1/campaign/short/info` (since 21.10.2026 campaigns live in Binom; old Keitaro campaigns stay in the cache)
 - KEITARO_SYNC_INTERVAL_SECONDS: How often to pull new Binom domains (default `3600` = hourly; `0` disables; the name is left from Keitaro)
-- NEW_ADMIN_API_URL / NEW_ADMIN_API_KEY: new Admin API and its machine key. The bot reads `GET /users` and synchronizes matched Telegram users, their roles, teams and helper-to-buyer links.
+- NEW_ADMIN_API_URL / NEW_ADMIN_API_KEY: new Admin API and its machine key. The bot reads `GET /users` and synchronizes matched Telegram users, their roles, teams and helper-to-buyer links. Deposit notifications read the offer's cap left from `GET /v1/offers/{id}/cap?clickId=` — the key needs the `offers_read` section in the admin; without it the cap line is just omitted.
 - ADS_WORKSPACE_API_URL / ADS_WORKSPACE_TOKEN: Ads Workspace API. Buyers, leads, mentors and heads get a personal activation code from the «Мой ключ для АДС» menu. The token must match `INTERNAL_TOKEN` on ads-workspace-api.
 - NEW_ADMIN_SYNC_INTERVAL_SECONDS: Directory refresh interval (default `3600` = hourly; `0` disables). The first refresh runs immediately after startup.
 - YTDLP_COOKIES_PATH: Optional path to cookies.txt in Netscape format for YouTube downloads (если отсутствует — бот работает без авторизации)
@@ -158,7 +158,7 @@ Note: The `tickets` process in Procfile is for a persistent worker, not for sche
 
 Веб-процесс автоматически проверяет design-уведомления раз в час. Интервал задаётся через `DESIGN_NOTIFY_INTERVAL_SECONDS=3600`; значение `0` отключает встроенную проверку.
 
-Каждый час бот сам подтягивает кампании из Binom (с 21.10.2026; старые кампании Keitaro остаются в кэше) и **дописывает новые домены** в локальный кэш, чтобы `/checkdomain` находил свежие лендинги. Интервал: `KEITARO_SYNC_INTERVAL_SECONDS=3600` (0 — выключить). Админ может обновить вручную кнопкой «Обновить домены». Помощники проверяют домены командой `/checkdomain` или кнопкой в `/menu`.
+Каждый час бот сам подтягивает кампании из Binom (с 21.10.2026; старые кампании Keitaro остаются в кэше) в локальный кэш (по нему загрузка FB CSV находит байера кампании). Интервал: `KEITARO_SYNC_INTERVAL_SECONDS=3600` (0 — выключить). Админ может обновить вручную кнопкой «Обновить домены». Проверка домена (`/checkdomain`) убрана 09.11.2026.
 
 **Альтернативно — одна команда для внешнего крона:**
 ```bash
@@ -175,6 +175,9 @@ python -m src.underdog --notify-design --apply
 **HTTP:** `POST /underdog/design/notify` (как у domains: `dry_run`, Bearer POSTBACK_TOKEN или `token` в body).
 
 **Опционально — рассылка в группу:** если нужна одна общая лента в группе/канале, задайте **DESIGN_BROADCAST_CHAT_IDS** (ID чата через запятую). Добавьте DesignBot в группу; тогда каждое уведомление дублируется туда. Основная рассылка — личные сообщения всем, кто нажал /start в DesignBot.
+
+## Капа оффера в уведомлении о депозите (09.11.2026)
+В каждом уведомлении о депозите — строка `🚦 ОСТАЛОСЬ КАПЫ: 6 из 30` (`/день`, ` фикс.` — по периоду капы). Остаток считает админка underD (`GET /api/v1/offers/{id}/cap`, `services/offer_cap.py`); деп, который её синк ещё не записал, учтён сверху по SubID. Админка недоступна, у оффера нет капы или анкап — строки нет, уведомление уходит как раньше. Когда остаётся ≤ 6, отдельное «⚠️ Капа заканчивается» / «🛑 Капа закончилась» получают только байеры, лившие оффер за вчера и сегодня (кампании с кликами отдаёт админка, байер — по алиасу кампании, как у депа), — один раз на байера, оффер и окно капы (`tg_cap_low_sent`; подняли капу — предупредит снова). Биздевам об этом пишет бот админки в их чат, в группу офферов капа не идёт.
 
 ## Daily revenue summary (итоги дня по командам)
 Каждый депозит-уведомление показывает `💵 ДОХОД ЗА ДЕНЬ · <Имя байера>` — сумму всех депозитов **этого байера** за текущий день (UTC), тогда как `💰 ПРОФИТ` — сумма только этого депозита. Строка одинакова для всех получателей (байер, лид, ментор, хэд, админ, помощник), поэтому лид видит дневной доход по каждому своему байеру отдельно. Если депозит не удалось смаршрутизировать на Telegram-пользователя (байер без строки в `tg_aliases`), дневные суммы считаются по префиксу кампании — строка не пропадает.
@@ -228,8 +231,7 @@ Content-Type: application/json
 On startup the app sets webhook to: `${BASE_URL}${WEBHOOK_SECRET_PATH}`. Locally you usually skip webhook; on Railway it's automatically set if BASE_URL is correct.
 
 ## Commands (role-aware)
-- /menu — main menu (helpers see «Проверить домен» first)
-- /checkdomain — look up who runs a domain (all roles, including helpers)
+- /menu — main menu
 - /listusers — users with roles and teams (admin/head see all, lead sees own team, buyer sees self)
 - /listroutes — list routing rules (MVP: visible to all)
 - /addrule <user_id> offer=OFF|* country=RU|* source=FB|* priority=0 — add a rule (admin/head)

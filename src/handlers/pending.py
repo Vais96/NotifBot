@@ -11,10 +11,8 @@ from loguru import logger
 from .. import db
 from ..constants import PendingAction, Role
 from ..dispatcher import dp
-from ..handlers.domains import notify_helper_domain_access
 from ..handlers.users import _resolve_user_id
 from ..handlers.youtube import handle_youtube_download
-from ..utils.domain import lookup_domains_text
 from ..utils.html import safe
 from .common import STALE_BUTTON
 
@@ -26,7 +24,6 @@ CANCEL_WORDS = {"отмена", "cancel", "стоп", "stop"}
 _DASH_CLEARS = {PendingAction.ALIAS_SET_BUYER, PendingAction.ALIAS_SET_LEAD, PendingAction.KPI_SET}
 _CANCEL_TEXT = {
     PendingAction.FB_AWAIT_CSV: "Загрузка CSV отменена",
-    PendingAction.DOMAIN_CHECK: "Готово. Проверка доменов завершена",
 }
 
 UNKNOWN_USER_TEXT = (
@@ -65,10 +62,6 @@ async def _alias_new(message: Message, _arg: str):
     return await message.answer("Алиас создан. Откройте Алиасы в меню, чтобы назначить buyer/lead")
 
 
-@pending(PendingAction.DOMAIN_CHECK)
-async def _domain_check(message: Message, _arg: str):
-    result = await lookup_domains_text((message.text or "").strip())
-    return await message.answer(result + "\n\nОтправьте следующий домен или '-' чтобы завершить")
 
 
 @pending(PendingAction.YOUTUBE_AWAIT_URL)
@@ -128,11 +121,9 @@ async def _helper_add(message: Message, _arg: str):
     await db.set_user_role(uid, Role.HELPER)
     await db.clear_pending_action(message.from_user.id)
     name = user.get("full_name") or user.get("username") or uid
-    await notify_helper_domain_access(uid)
     return await message.answer(
         f"Пользователь {safe(name)} (@{safe(user.get('username') or uid)}) назначен помощником.\n"
-        "Откройте «Помощники» в меню и нажмите «Назначить байера» рядом с ним.\n"
-        "Помощнику уже доступны /checkdomain и кнопка «Проверить домен»."
+        "Откройте «Помощники» в меню и нажмите «Назначить байера» рядом с ним."
     )
 
 

@@ -11,7 +11,6 @@ from .. import db
 from ..utils.html import safe
 from ..utils.formatting import chunk_lines
 from loguru import logger
-from ..handlers.domains import notify_helper_domain_access
 
 
 async def _send_users_chunked(chat_id: int, lines: list[str]) -> None:
@@ -275,8 +274,6 @@ async def cb_set_role(call: CallbackQuery):
             await db.set_team_lead_override(team_id, int(uid))
         elif role != "lead":
             await db.clear_team_lead_override(team_id)
-    if role == "helper":
-        await notify_helper_domain_access(int(uid))
     if u:
         await call.message.edit_reply_markup(reply_markup=_user_row_controls(u))
         await call.answer("Роль обновлена")

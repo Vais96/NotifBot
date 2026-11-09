@@ -13,6 +13,7 @@ from .orders_bot import orders_dp, orders_bot
 from .design_bot import design_dp, design_bot
 from . import handlers  # noqa: F401 ensure handlers are registered
 from . import db, underdog, binom_sync, new_admin_sync, daily_revenue_report
+from .services import offer_cap
 from .services.keitaro_postbacks import (
     build_notification_text,
     has_meaningful_fields,
@@ -173,6 +174,28 @@ def _deposit_message_for_recipient(
         if footer:
             return base_text + footer
     return base_text
+
+
+async def _notify_cap_low(cap_state: dict | None) -> None:
+    """«Капа заканчивается» байерам, лившим оффер за сутки (кампании — из админки, байер — по алиасу, как у депа).
+
+    Один раз на байера, оффер и окно капы. Сбой не роняет постбэк.
+    """
+    if not offer_cap.is_cap_low(cap_state):
+        return
+    try:
+        buyer_ids: set[int] = set()
+        for prefix in offer_cap.campaign_prefixes(cap_state):
+            alias = await db.find_alias(prefix)
+            if alias and alias.get("buyer_id"):
+                buyer_ids.add(int(alias["buyer_id"]))
+        key = offer_cap.cap_low_key(cap_state, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        text = offer_cap.cap_low_text(cap_state)
+        for buyer_id in buyer_ids:
+            if await db.claim_cap_low_alert(key, buyer_id):
+                await notify_buyer(buyer_id, text)
+    except Exception:
+        logger.exception("Cap-low alert failed for offer {}", (cap_state or {}).get("offerId"))
 
 
 class DomainNotifyRequest(BaseModel):
@@ -603,12 +626,14 @@ async def _process_keitaro_postback(data: dict, inbound_id: int | None = None) -
             except Exception as e:
                 logger.warning(f"Failed to get KPI: {e}")
     buyer_label = await _buyer_label(stats_user_id, alias_prefix)
+    cap_state = await offer_cap.fetch_cap_state(offer_id, subid) if is_sale else None
     text = build_notification_text(
         data,
         daily_count=daily_count,
         kpi_daily_goal=kpi_daily_goal,
         daily_revenue=daily_revenue,
         buyer_label=buyer_label,
+        cap_line=offer_cap.cap_line(cap_state),
     )
 
     # Determine recipients
@@ -687,6 +712,7 @@ async def _process_keitaro_postback(data: dict, inbound_id: int | None = None) -
     if recipient_ids and not delivered:
         # Nobody got it (Telegram/network down) — fail so the inbox row is retried
         raise RuntimeError(f"Postback not delivered to any of {len(recipient_ids)} recipients")
+    await _notify_cap_low(cap_state)
     return {"ok": True, "routed": bool(buyer_id), "buyer_id": buyer_id, "fallback": used_fallback, "sale": is_sale}
 
 
@@ -726,7 +752,6 @@ async def on_startup():
             BotCommand(command="today", description="Отчет за сегодня"),
             BotCommand(command="yesterday", description="Отчет за вчера"),
             BotCommand(command="week", description="Отчет за 7 дней"),
-            BotCommand(command="checkdomain", description="Проверить домен"),
             BotCommand(command="whoami", description="Ваш Telegram ID"),
             BotCommand(command="ping", description="Проверка связи"),
             BotCommand(command="help", description="Помощь"),

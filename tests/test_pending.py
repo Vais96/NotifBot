@@ -33,11 +33,11 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending.parse_action("team:new"), (None, ""))
 
     async def test_cancel_words_everywhere(self) -> None:
-        for stored in ("alias:new", "alias:setbuyer:foo", "domain:check"):
+        for stored in ("alias:new", "alias:setbuyer:foo", "fb:await_csv"):
             reply, set_alias, clear = await self._run(stored, "Отмена")
             set_alias.assert_not_awaited()
             clear.assert_awaited_once_with(7)
-        self.assertEqual(reply, "Готово. Проверка доменов завершена")
+        self.assertEqual(reply, "Загрузка CSV отменена")
 
     async def test_dash_cancels_new_alias_but_clears_assignment(self) -> None:
         reply, set_alias, _ = await self._run("alias:new", "-")
