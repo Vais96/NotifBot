@@ -11,6 +11,7 @@ from loguru import logger
 from .. import db
 from ..constants import PendingAction, Role
 from ..dispatcher import dp
+from ..handlers.comment_links import handle_comment_link_text
 from ..handlers.users import _resolve_user_id
 from ..handlers.youtube import handle_youtube_download
 from ..utils.html import safe
@@ -24,6 +25,7 @@ CANCEL_WORDS = {"отмена", "cancel", "стоп", "stop"}
 _DASH_CLEARS = {PendingAction.ALIAS_SET_BUYER, PendingAction.ALIAS_SET_LEAD, PendingAction.KPI_SET}
 _CANCEL_TEXT = {
     PendingAction.FB_AWAIT_CSV: "Загрузка CSV отменена",
+    PendingAction.COMMENT_LINK: "Создание ссылки отменено.",
 }
 
 UNKNOWN_USER_TEXT = (
@@ -67,6 +69,11 @@ async def _alias_new(message: Message, _arg: str):
 @pending(PendingAction.YOUTUBE_AWAIT_URL)
 async def _youtube_await_url(message: Message, _arg: str):
     return await handle_youtube_download(message)
+
+
+@pending(PendingAction.COMMENT_LINK)
+async def _comment_link_input(message: Message, arg: str):
+    return await handle_comment_link_text(message, arg)
 
 
 async def _alias_assign(message: Message, alias: str, field: str, done_text: str):
