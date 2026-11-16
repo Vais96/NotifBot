@@ -14,6 +14,7 @@ from ..handlers.mentors import _send_mentors
 from ..handlers.helpers import _send_helpers_list
 from ..handlers.reports import _send_reports_menu, _send_kpi_menu
 from ..handlers.ads_key import send_ads_key
+from ..handlers.comment_links import start_comment_link_flow
 from ..services.ads_workspace import can_use_ads_key
 from loguru import logger
 from ..constants import PendingAction
@@ -30,6 +31,7 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
             [InlineKeyboardButton(text="Кто я", callback_data="menu:whoami"), InlineKeyboardButton(text="Правила", callback_data="menu:listroutes")],
             [InlineKeyboardButton(text="Загрузить CSV", callback_data="menu:uploadcsv")],
             [InlineKeyboardButton(text="Скачать видео", callback_data="menu:yt_download")],
+            [InlineKeyboardButton(text="🔗 Ссылка для комментария", callback_data="menu:commentlink")],
         ]
         return InlineKeyboardMarkup(inline_keyboard=buttons)
     buttons = [
@@ -40,6 +42,7 @@ def main_menu(is_admin: bool, role: str | None = None, has_lead_access: bool = F
         buttons.insert(0, ADS_KEY_BUTTON)
     buttons.append([InlineKeyboardButton(text="Загрузить CSV", callback_data="menu:uploadcsv")])
     buttons.append([InlineKeyboardButton(text="Скачать видео", callback_data="menu:yt_download")])
+    buttons.append([InlineKeyboardButton(text="🔗 Ссылка для комментария", callback_data="menu:commentlink")])
     if is_admin:
         buttons += [
             [InlineKeyboardButton(text="Пользователи", callback_data="menu:listusers"), InlineKeyboardButton(text="Управление", callback_data="menu:manage")],
@@ -98,6 +101,14 @@ async def on_menu_click(call: CallbackQuery):
         await call.message.answer(
             "Пришлите ссылку на видео YouTube.\n"
             "Если передумаете, отправьте '-' чтобы отменить."
+        )
+        return await call.answer()
+    if key == "commentlink":
+        await start_comment_link_flow(
+            call.message.chat.id,
+            call.from_user.id,
+            call.from_user.username,
+            call.from_user.full_name,
         )
         return await call.answer()
     if key == "refreshdomains":

@@ -5,7 +5,7 @@ from datetime import datetime, timezone, date
 from typing import Any, Dict, Mapping, Tuple, Optional
 
 from fastapi import FastAPI, Request, HTTPException, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from loguru import logger
 from .config import secret, settings
 from .dispatcher import dp, bot, notify_buyer
@@ -14,6 +14,7 @@ from .design_bot import design_dp, design_bot
 from . import handlers  # noqa: F401 ensure handlers are registered
 from . import db, underdog, binom_sync, new_admin_sync, daily_revenue_report
 from .services import offer_cap
+from .services.comment_links import merge_redirect_query
 from .services.keitaro_postbacks import (
     build_notification_text,
     has_meaningful_fields,
@@ -749,6 +750,7 @@ async def on_startup():
     try:
         await bot.set_my_commands([
             BotCommand(command="menu", description="Открыть меню"),
+            BotCommand(command="link", description="Ссылка для комментария"),
             BotCommand(command="today", description="Отчет за сегодня"),
             BotCommand(command="yesterday", description="Отчет за вчера"),
             BotCommand(command="week", description="Отчет за 7 дней"),
@@ -860,6 +862,23 @@ async def db_ping():
     except Exception as e:
         logger.exception(e)
         raise HTTPException(500, f"DB ping failed: {e}")
+
+
+async def _track_short_link_click(slug: str) -> None:
+    try:
+        await db.increment_short_link_clicks(slug)
+    except Exception as exc:
+        logger.warning("Failed to increment click count for {}: {}", slug, exc)
+
+
+@app.get("/r/{slug}")
+async def redirect_short_link(slug: str, request: Request):
+    target_url = await db.get_short_link(slug.strip().lower())
+    if not target_url:
+        raise HTTPException(404, "Short link not found")
+    _spawn(_track_short_link_click(slug.strip().lower()), f"short-link-click-{slug}")
+    destination = merge_redirect_query(target_url, request.query_params.multi_items())
+    return RedirectResponse(url=destination, status_code=302, headers={"Cache-Control": "no-store"})
 
 @app.post("/keitaro/postback")
 async def keitaro_postback(

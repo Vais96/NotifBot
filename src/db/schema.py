@@ -412,6 +412,17 @@ SCHEMA_SQL = [
         INDEX idx_inbound_status_created (status, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
+    # Built-in short links for FB comment redirects (/r/<slug> -> target_url with fbclid forwarding)
+    """
+    CREATE TABLE IF NOT EXISTS tg_short_links (
+        slug VARCHAR(64) PRIMARY KEY,
+        target_url TEXT NOT NULL,
+        created_by BIGINT NULL,
+        clicks INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_tg_short_links_creator (created_by)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
 ]
 
 

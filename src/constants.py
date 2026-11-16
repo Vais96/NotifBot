@@ -32,3 +32,4 @@ class PendingAction(StrEnum):
     MENTOR_ADD = "mentor:add"
     HELPER_ADD = "helper:add"
     KPI_SET = "kpi:set"
+    COMMENT_LINK = "clink"

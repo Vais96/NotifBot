@@ -140,3 +140,8 @@ from .fb_analytics import (  # noqa: F401
     recompute_fb_campaign_totals,
     reset_fb_upload_data,
 )
+from .short_links import (  # noqa: F401
+    create_short_link,
+    get_short_link,
+    increment_short_link_clicks,
+)

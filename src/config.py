@@ -74,6 +74,8 @@ class Settings(BaseModel):
     )
     ads_workspace_api_url: str = Field(default="", validation_alias="ADS_WORKSPACE_API_URL")
     ads_workspace_token: SecretStr = Field(default="", validation_alias="ADS_WORKSPACE_TOKEN")
+    # Домен для коротких ссылок (/r/<slug>), например https://go.example.com. Пусто = BASE_URL.
+    short_link_base_url: str = Field(default="", validation_alias="SHORT_LINK_BASE_URL")
     # Чат(ы) для рассылки design-уведомлений (группа/канал). Все участники видят сообщение. Через запятую: -100123, -100456
     design_broadcast_chat_ids: List[int] = Field(default_factory=list, validation_alias="DESIGN_BROADCAST_CHAT_IDS")
     # Через сколько часов после назначения напомнить взять таск в работу (по умолчанию 48 = 2 дня)
@@ -181,6 +183,7 @@ class Settings(BaseModel):
             "NEW_ADMIN_SYNC_INTERVAL_SECONDS": _env_int("NEW_ADMIN_SYNC_INTERVAL_SECONDS", 3600),
             "ADS_WORKSPACE_API_URL": os.getenv("ADS_WORKSPACE_API_URL", ""),
             "ADS_WORKSPACE_TOKEN": os.getenv("ADS_WORKSPACE_TOKEN", ""),
+            "SHORT_LINK_BASE_URL": os.getenv("SHORT_LINK_BASE_URL", ""),
             "DESIGN_BROADCAST_CHAT_IDS": _parse_id_list("DESIGN_BROADCAST_CHAT_IDS"),
             "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": _env_int("DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS", 48),
             "DESIGN_NOTIFY_INTERVAL_SECONDS": _env_int("DESIGN_NOTIFY_INTERVAL_SECONDS", 3600),
