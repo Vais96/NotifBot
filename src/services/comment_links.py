@@ -376,14 +376,53 @@ def _param_sort_key(item: Tuple[str, str]) -> Tuple[int, int, str]:
     return (2, 0, key.lower())
 
 
+def extract_campaign_metadata(campaign_name: str) -> Dict[str, str]:
+    """Extract buyer alias (sub1), 2-letter geo (sub4), and numeric account_id (sub6)
+    from campaign names like '77_TH_1740624179668966_15.11'.
+    """
+    raw = (campaign_name or "").strip()
+    if not raw:
+        return {}
+    parts = [p.strip() for p in raw.split("_") if p.strip()]
+    if len(parts) < 2:
+        return {}
+
+    geo: Optional[str] = None
+    if re.fullmatch(r"[A-Za-z]{2}", parts[1]):
+        geo = parts[1].upper()
+
+    account_id: Optional[str] = None
+    for part in parts[1:]:
+        if re.fullmatch(r"\d{6,20}", part):
+            account_id = part
+            break
+
+    extracted: Dict[str, str] = {}
+    # Only treat parts[0] as buyer alias when the name matches the <alias>_<GEO|account_id>... pattern.
+    if (geo or account_id) and not re.fullmatch(r"\d{1,2}\.\d{1,2}(?:\.\d{2,4})?", parts[0]):
+        extracted["sub1"] = parts[0]
+    if geo:
+        extracted["geo"] = geo
+    if account_id:
+        extracted["account_id"] = account_id
+    return extracted
+
+
 def build_comment_link(base_url: str, fields: Mapping[str, str]) -> BuiltLink:
     """Substitute macros, add missing Binom sub params + fbp, and return the built URL."""
     parsed_base = parse_base_link(base_url)
-    cleaned_fields: Dict[str, str] = {
+    explicit_fields: Dict[str, str] = {
         k: str(v).strip()
         for k, v in fields.items()
         if k != "custom_slug" and v is not None and str(v).strip() and str(v).strip().lower() not in _SKIP_TOKENS
     }
+    auto_fields: Dict[str, str] = {}
+    if explicit_fields.get("campaign_name"):
+        for auto_key, auto_val in extract_campaign_metadata(explicit_fields["campaign_name"]).items():
+            if auto_key not in explicit_fields:
+                auto_fields[auto_key] = auto_val
+
+    cleaned_fields: Dict[str, str] = {**auto_fields, **explicit_fields}
 
     placed: set[str] = set()
     updated_params: List[Tuple[str, str]] = []
@@ -393,8 +432,8 @@ def build_comment_link(base_url: str, fields: Mapping[str, str]) -> BuiltLink:
 
     for key, val in parsed_base.params:
         lower_key = key.lower()
-        if lower_key in cleaned_fields and _SUB_KEY_RE.fullmatch(lower_key):
-            updated_params.append((key, cleaned_fields[lower_key]))
+        if lower_key in explicit_fields and _SUB_KEY_RE.fullmatch(lower_key):
+            updated_params.append((key, explicit_fields[lower_key]))
             placed.add(lower_key)
             continue
 
@@ -404,8 +443,11 @@ def build_comment_link(base_url: str, fields: Mapping[str, str]) -> BuiltLink:
 
         mapped_field = param_to_field.get(lower_key)
         if mapped_field and mapped_field in cleaned_fields and mapped_field not in placed:
-            if not new_val.strip() or _is_macro_value(val) or mapped_field == "pixel":
+            if not new_val.strip() or _is_macro_value(val) or (mapped_field == "pixel" and mapped_field in explicit_fields):
                 new_val = cleaned_fields[mapped_field]
+                placed.add(mapped_field)
+            elif mapped_field in auto_fields:
+                # Base URL already provides a static value for this slot; don't duplicate auto-extracted metadata into another subN.
                 placed.add(mapped_field)
 
         updated_params.append((key, new_val))
@@ -415,7 +457,8 @@ def build_comment_link(base_url: str, fields: Mapping[str, str]) -> BuiltLink:
     for key, val in cleaned_fields.items():
         if _SUB_KEY_RE.fullmatch(key) and key.lower() not in placed:
             if key.lower() in used_keys_lower:
-                updated_params = [(k, val if k.lower() == key.lower() else v) for k, v in updated_params]
+                if key in explicit_fields:
+                    updated_params = [(k, val if k.lower() == key.lower() else v) for k, v in updated_params]
             else:
                 updated_params.append((key.lower(), val))
                 used_keys_lower.add(key.lower())

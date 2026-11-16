@@ -23,6 +23,7 @@ from src.services.comment_links import (  # noqa: E402
     ShortLinkTakenError,
     build_comment_link,
     create_short_link_for_url,
+    extract_campaign_metadata,
     extract_first_line_url_and_rest,
     format_result_message,
     merge_redirect_query,
@@ -157,6 +158,33 @@ class CommentLinksServiceTests(unittest.TestCase):
         )
         self.assertFalse(built.has_pixel)
         self.assertNotIn("{{", built.long_url)
+
+    def test_extract_campaign_metadata(self) -> None:
+        self.assertEqual(
+            extract_campaign_metadata("77_TH_1740624179668966_15.11"),
+            {"sub1": "77", "geo": "TH", "account_id": "1740624179668966"},
+        )
+        self.assertEqual(
+            extract_campaign_metadata("bronsmarmelad_vn_1234567890_16.11"),
+            {"sub1": "bronsmarmelad", "geo": "VN", "account_id": "1234567890"},
+        )
+        self.assertEqual(extract_campaign_metadata("simple_campaign"), {})
+
+        built = build_comment_link("https://luckytop.online", {"campaign_name": "77_TH_1740624179668966_15.11"})
+        self.assertEqual(
+            built.params,
+            (
+                ("sub1", "77"),
+                ("sub2", "77_TH_1740624179668966_15.11"),
+                ("sub4", "TH"),
+                ("sub6", "1740624179668966"),
+            ),
+        )
+        built_override = build_comment_link(
+            "https://luckytop.online",
+            {"campaign_name": "77_TH_1740624179668966_15.11", "account_id": "99999999"},
+        )
+        self.assertIn(("sub6", "99999999"), built_override.params)
 
     def test_extract_first_line_url_and_rest(self) -> None:
         url, rest = extract_first_line_url_and_rest("https://luckytop.online/?sub1=77\nКампания: c1\nКаб: 55")
@@ -357,6 +385,40 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
         clear_pending.assert_awaited_once_with(503)
         final_text = [c for c in calls if type(c).__name__ == "SendMessage"][-1].text
         self.assertIn("https://example.test/r/my-custom-name", final_text)
+
+    async def test_guided_campaign_autofills_account_id_and_skips_account_step(self) -> None:
+        calls = []
+
+        async def fake_request(self_, bot_, method, timeout=None):
+            calls.append(method)
+            if type(method).__name__ == "SendMessage":
+                return SimpleNamespace(message_id=91, chat=SimpleNamespace(id=method.chat_id), text=method.text)
+            return True
+
+        draft = {
+            "base_url": "https://luckytop.online/?sub1=77&sub2={{campaign.name}}&sub3={{ad.name}}&sub4=TH&fbp=149185",
+            "has_pixel": True,
+            "fields": {},
+        }
+        set_pending = AsyncMock()
+        set_cache = AsyncMock()
+
+        with (
+            patch.object(type(bot.session), "make_request", fake_request),
+            patch(
+                "src.handlers.pending.db.get_pending_action",
+                AsyncMock(return_value=(f"{PendingAction.COMMENT_LINK}:params", None)),
+            ),
+            patch("src.handlers.comment_links.db.get_ui_cache_value", AsyncMock(return_value=json.dumps(draft))),
+            patch("src.handlers.comment_links.db.set_ui_cache_list", set_cache),
+            patch("src.handlers.comment_links.db.set_pending_action", set_pending),
+        ):
+            await dp.feed_update(bot, _text_update(504, "77_TH_1740624179668966_15.11", update_id=6))
+
+        set_pending.assert_awaited_once_with(504, f"{PendingAction.COMMENT_LINK}:step:adset_name", None)
+        sent_text = [c for c in calls if type(c).__name__ == "SendMessage"][-1].text
+        self.assertIn("1740624179668966", sent_text)
+        self.assertIn("Шаг 2/3", sent_text)  # campaign, adset, ad (account_id and pixel skipped)
 
 
 if __name__ == "__main__":

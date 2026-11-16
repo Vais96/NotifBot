@@ -22,6 +22,7 @@ from ..services.comment_links import (
     ShortLinkTakenError,
     build_comment_link,
     create_short_link_for_url,
+    extract_campaign_metadata,
     extract_first_line_url_and_rest,
     format_result_message,
     parse_base_link,
@@ -115,17 +116,54 @@ async def _load_last_base(user_id: int) -> Optional[str]:
     return await db.get_ui_cache_value(user_id, _CACHE_LAST_KIND, 0)
 
 
-def _next_guided_field(current: Optional[str], has_pixel: bool) -> Optional[str]:
-    fields = [f for f in GUIDED_FIELDS if not (f == "pixel" and has_pixel)]
-    if not fields:
+def _active_guided_fields(draft: Dict[str, Any]) -> List[str]:
+    has_pixel = bool(draft.get("has_pixel"))
+    fields_map = draft.get("fields") or {}
+    result: List[str] = []
+    for field_name in GUIDED_FIELDS:
+        if field_name == "pixel" and has_pixel:
+            continue
+        if field_name == "account_id" and str(fields_map.get("account_id") or "").strip():
+            continue
+        result.append(field_name)
+    return result
+
+
+def _next_guided_field(current: Optional[str], draft: Dict[str, Any]) -> Optional[str]:
+    has_pixel = bool(draft.get("has_pixel"))
+    base_fields = [f for f in GUIDED_FIELDS if not (f == "pixel" and has_pixel)]
+    if not base_fields:
         return None
     if current is None:
-        return fields[0]
+        active = _active_guided_fields(draft)
+        return active[0] if active else None
     try:
-        idx = fields.index(current)
+        start_idx = base_fields.index(current) + 1
     except ValueError:
         return None
-    return fields[idx + 1] if idx + 1 < len(fields) else None
+    fields_map = draft.get("fields") or {}
+    for candidate in base_fields[start_idx:]:
+        if candidate == "account_id" and str(fields_map.get("account_id") or "").strip():
+            continue
+        return candidate
+    return None
+
+
+def _apply_campaign_autofill(draft_fields: Dict[str, str], campaign_name: str) -> Optional[str]:
+    """Merge metadata extracted from campaign_name without overwriting explicit entries."""
+    extracted = extract_campaign_metadata(campaign_name)
+    for key, val in extracted.items():
+        draft_fields.setdefault(key, val)
+    parts: List[str] = []
+    if extracted.get("account_id"):
+        parts.append(f"ID каба <code>{safe(extracted['account_id'])}</code>")
+    if extracted.get("sub1"):
+        parts.append(f"байер <code>{safe(extracted['sub1'])}</code>")
+    if extracted.get("geo"):
+        parts.append(f"гео <code>{safe(extracted['geo'])}</code>")
+    if not parts:
+        return None
+    return "✨ Из названия кампании определено: " + ", ".join(parts)
 
 
 def _format_params_prompt(base_url: str) -> str:
@@ -140,28 +178,34 @@ def _format_params_prompt(base_url: str) -> str:
         "<code>Кампания: название_кампании</code>",
         "<code>Адсет: название_адсета</code>",
         "<code>Объявление: название_объявления</code>",
-        "<code>Каб: id_каба</code>",
+        "<code>Каб: id_каба</code> <i>(подтянется сам из 77_TH_1740624179668966_15.11)</i>",
     ])
     if not parsed.has_pixel:
         lines.append("<code>Пиксель: id_пикселя</code>")
     lines.extend([
         "",
-        "Можно также прислать просто 4 строки подряд (кампания, адсет, объявление, ID каба) "
-        "или сразу одно название кампании, чтобы продолжить по шагам.",
+        "Можно также прислать просто строки подряд или одно название кампании, чтобы продолжить по шагам.",
     ])
     return "\n".join(lines)
 
 
-async def _send_guided_step(chat_id: int, user_id: int, field_name: str, draft: Dict[str, Any]) -> None:
+async def _send_guided_step(
+    chat_id: int,
+    user_id: int,
+    field_name: str,
+    draft: Dict[str, Any],
+    *,
+    note: Optional[str] = None,
+) -> None:
     title, example = GUIDED_PROMPTS[field_name]
-    has_pixel = bool(draft.get("has_pixel"))
-    fields = [f for f in GUIDED_FIELDS if not (f == "pixel" and has_pixel)]
-    step_num = fields.index(field_name) + 1
-    total_steps = len(fields)
+    fields = _active_guided_fields(draft)
+    step_num = fields.index(field_name) + 1 if field_name in fields else 1
+    total_steps = max(step_num, len(fields))
     await db.set_pending_action(user_id, f"{PendingAction.COMMENT_LINK}:step:{field_name}", None)
+    prefix = f"{note}\n\n" if note else ""
     await bot.send_message(
         chat_id,
-        f"Шаг {step_num}/{total_steps}. Введите <b>{safe(title)}</b>:\n{example}",
+        f"{prefix}Шаг {step_num}/{total_steps}. Введите <b>{safe(title)}</b>:\n{example}",
         reply_markup=_step_kb(),
     )
 
@@ -319,10 +363,11 @@ async def handle_comment_link_text(message: Message, arg: str) -> None:
                 await _proceed_after_fields(chat_id, user_id, draft)
                 return
             draft["fields"]["campaign_name"] = rest
+            note = _apply_campaign_autofill(draft["fields"], rest)
             await _save_draft(user_id, draft)
-            next_field = _next_guided_field("campaign_name", parsed.has_pixel)
+            next_field = _next_guided_field("campaign_name", draft)
             if next_field:
-                await _send_guided_step(chat_id, user_id, next_field, draft)
+                await _send_guided_step(chat_id, user_id, next_field, draft, note=note)
                 return
             await _proceed_after_fields(chat_id, user_id, draft)
             return
@@ -362,7 +407,6 @@ async def handle_comment_link_text(message: Message, arg: str) -> None:
         await _finish_with_result(chat_id, user_id, draft, short_url=short_url)
         return
 
-    has_pixel = bool(draft.get("has_pixel"))
     fields, is_structured = parse_fields_input(raw_text)
 
     if arg == "params":
@@ -374,11 +418,12 @@ async def handle_comment_link_text(message: Message, arg: str) -> None:
             return
         draft_fields = dict(draft.get("fields") or {})
         draft_fields["campaign_name"] = raw_text
+        note = _apply_campaign_autofill(draft_fields, raw_text)
         draft["fields"] = draft_fields
         await _save_draft(user_id, draft)
-        next_field = _next_guided_field("campaign_name", has_pixel)
+        next_field = _next_guided_field("campaign_name", draft)
         if next_field:
-            await _send_guided_step(chat_id, user_id, next_field, draft)
+            await _send_guided_step(chat_id, user_id, next_field, draft, note=note)
             return
         await _proceed_after_fields(chat_id, user_id, draft)
         return
@@ -398,11 +443,12 @@ async def handle_comment_link_text(message: Message, arg: str) -> None:
 
         draft_fields = dict(draft.get("fields") or {})
         draft_fields[field_name] = raw_text
+        note = _apply_campaign_autofill(draft_fields, raw_text) if field_name == "campaign_name" else None
         draft["fields"] = draft_fields
         await _save_draft(user_id, draft)
-        next_field = _next_guided_field(field_name, has_pixel)
+        next_field = _next_guided_field(field_name, draft)
         if next_field:
-            await _send_guided_step(chat_id, user_id, next_field, draft)
+            await _send_guided_step(chat_id, user_id, next_field, draft, note=note)
             return
         await _proceed_after_fields(chat_id, user_id, draft)
         return
@@ -461,7 +507,7 @@ async def cb_clink_guided(call: CallbackQuery) -> None:
         await db.clear_pending_action(user_id)
         await call.answer("Черновик устарел. Нажмите /link", show_alert=True)
         return
-    first_field = _next_guided_field(None, bool(draft.get("has_pixel")))
+    first_field = _next_guided_field(None, draft)
     if not first_field:
         await _proceed_after_fields(call.message.chat.id, user_id, draft)
         await call.answer()
@@ -479,7 +525,7 @@ async def cb_clink_skip(call: CallbackQuery) -> None:
         await call.answer("Шаг уже не актуален", show_alert=True)
         return
     current_field = stored[0].split(":step:", 1)[1]
-    next_field = _next_guided_field(current_field, bool(draft.get("has_pixel")))
+    next_field = _next_guided_field(current_field, draft)
     await call.answer("Пропущено")
     if next_field:
         await _send_guided_step(call.message.chat.id, user_id, next_field, draft)
