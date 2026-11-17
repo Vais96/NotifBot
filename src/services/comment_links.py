@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import secrets
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from loguru import logger
@@ -17,8 +17,23 @@ from ..utils.html import safe
 _MACRO_RE = re.compile(r"\{\{\s*([^}]+?)\s*\}\}")
 _SUB_KEY_RE = re.compile(r"^sub(\d+)$", re.IGNORECASE)
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]$|^[a-z0-9]{2}$")
+_DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$")
 _SKIP_TOKENS = {".", "skip", "пропуск", "пропустить", "none", "нет"}
 _RANDOM_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+RESERVED_SLUGS = frozenset({
+    "r",
+    "health",
+    "db",
+    "keitaro",
+    "admin",
+    "underdog",
+    "reports",
+    "telegram",
+    "api",
+    "docs",
+    "redoc",
+    "openapi",
+})
 
 # Macro name (inside {{...}}) -> canonical field name
 _MACRO_TO_FIELD: Dict[str, str] = {
@@ -176,6 +191,9 @@ _KEY_ALIASES: Dict[str, str] = {
     "название": "custom_slug",
     "название ссылки": "custom_slug",
     "короткая ссылка": "custom_slug",
+    "домен": "short_domain",
+    "domain": "short_domain",
+    "короткий домен": "short_domain",
 }
 
 
@@ -187,8 +205,12 @@ class InvalidSlugError(ValueError):
     """Raised when a custom short-link slug has invalid syntax."""
 
 
+class InvalidShortDomainError(ValueError):
+    """Raised when a custom short-link domain has invalid syntax."""
+
+
 class ShortLinkTakenError(RuntimeError):
-    """Raised when the requested custom slug already exists in tg_short_links."""
+    """Raised when the requested custom slug already exists for that domain."""
 
 
 class LinkShortenError(RuntimeError):
@@ -414,7 +436,10 @@ def build_comment_link(base_url: str, fields: Mapping[str, str]) -> BuiltLink:
     explicit_fields: Dict[str, str] = {
         k: str(v).strip()
         for k, v in fields.items()
-        if k != "custom_slug" and v is not None and str(v).strip() and str(v).strip().lower() not in _SKIP_TOKENS
+        if k not in ("custom_slug", "short_domain")
+        and v is not None
+        and str(v).strip()
+        and str(v).strip().lower() not in _SKIP_TOKENS
     }
     auto_fields: Dict[str, str] = {}
     if explicit_fields.get("campaign_name"):
@@ -514,24 +539,109 @@ def normalize_slug(raw_slug: str) -> str:
             "Название должно быть от 2 до 64 символов: латиница (a-z), цифры, «-» или «_» "
             "(например: thai-slot-1)."
         )
+    if cleaned in RESERVED_SLUGS:
+        raise InvalidSlugError("Это название зарезервировано системой, выберите другое.")
     return cleaned
 
 
+def normalize_short_domain(raw_domain: str) -> str:
+    """Normalize and validate a short-link domain name (e.g. 'https://Go.Example.com/' -> 'go.example.com')."""
+    cleaned = _clean_url_token(raw_domain)
+    if not cleaned:
+        raise InvalidShortDomainError("Домен пустой. Пришлите, например, <code>myshort.online</code>.")
+    if any(ch.isspace() for ch in cleaned):
+        raise InvalidShortDomainError("В домене не должно быть пробелов.")
+    probe = cleaned if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned) else f"https://{cleaned}"
+    parsed = urlparse(probe)
+    host = (parsed.netloc or "").strip().lower()
+    if ":" in host:
+        host = host.split(":", 1)[0].strip()
+    if not host or not _DOMAIN_RE.fullmatch(host):
+        raise InvalidShortDomainError(
+            "Некорректный домен. Укажите домен вида <code>myshort.online</code> или <code>go.myshort.online</code>."
+        )
+    return host
+
+
+def extract_request_host(x_forwarded_host: Optional[str], host_header: Optional[str]) -> str:
+    """Extract lowercase hostname without port from X-Forwarded-Host or Host header."""
+    raw = (x_forwarded_host or "").split(",", 1)[0].strip() or (host_header or "").strip()
+    if ":" in raw:
+        raw = raw.split(":", 1)[0].strip()
+    return raw.lower()
+
+
 def generate_random_slug(length: int = 6) -> str:
-    return "".join(secrets.choice(_RANDOM_ALPHABET) for _ in range(length))
+    while True:
+        candidate = "".join(secrets.choice(_RANDOM_ALPHABET) for _ in range(length))
+        if candidate not in RESERVED_SLUGS:
+            return candidate
 
 
-def short_link_base() -> str:
-    """Base origin used for short links (SHORT_LINK_BASE_URL if set, else BASE_URL)."""
+def default_short_domain() -> str:
+    """Default hostname used for short links (SHORT_LINK_BASE_URL if set, else BASE_URL)."""
+    raw = (settings.short_link_base_url or settings.base_url or "").strip()
+    if not raw:
+        return ""
+    try:
+        return normalize_short_domain(raw)
+    except InvalidShortDomainError:
+        return ""
+
+
+def bot_cname_target() -> str:
+    """Public Railway/server host of the bot for CNAME instructions."""
+    raw = (settings.base_url or "").strip()
+    if not raw:
+        return ""
+    try:
+        return normalize_short_domain(raw)
+    except InvalidShortDomainError:
+        return ""
+
+
+def short_link_base(domain: Optional[str] = None) -> str:
+    """Origin used for short links (explicit domain, else SHORT_LINK_BASE_URL or BASE_URL)."""
+    if domain:
+        norm = normalize_short_domain(domain)
+        return f"https://{norm}"
     raw = (settings.short_link_base_url or settings.base_url or "").strip().rstrip("/")
     if raw and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw):
         raw = "https://" + raw
     return raw
 
 
-def short_link_url(slug: str) -> str:
-    base = short_link_base()
-    return f"{base}/r/{slug}" if base else f"/r/{slug}"
+def short_link_url(slug: str, domain: Optional[str] = None) -> str:
+    base = short_link_base(domain)
+    return f"{base}/{slug}" if base else f"/{slug}"
+
+
+async def list_available_domains(user_id: int, *, include_all: bool = False) -> List[Dict[str, Any]]:
+    """Return active short domains for user_id plus configured env/bot domain fallback."""
+    rows = list(await db.list_short_domains_for_user(user_id, include_all=include_all))
+    seen = {str(r.get("domain") or "").lower() for r in rows}
+
+    env_domain = default_short_domain()
+    if env_domain and env_domain not in seen:
+        rows.append({
+            "domain": env_domain,
+            "owner_id": None,
+            "is_shared": 1,
+            "is_active": 1,
+            "is_builtin": True,
+        })
+        seen.add(env_domain)
+
+    bot_domain = bot_cname_target()
+    if bot_domain and bot_domain not in seen:
+        rows.append({
+            "domain": bot_domain,
+            "owner_id": None,
+            "is_shared": 1,
+            "is_active": 1,
+            "is_builtin": True,
+        })
+    return rows
 
 
 def merge_redirect_query(target_url: str, incoming_params: Iterable[Tuple[str, str]]) -> str:
@@ -555,26 +665,29 @@ async def create_short_link_for_url(
     long_url: str,
     created_by: Optional[int],
     custom_slug: Optional[str] = None,
+    domain: Optional[str] = None,
 ) -> str:
-    """Persist a short link in DB and return its public /r/<slug> URL."""
+    """Persist a short link in DB for (domain, slug) and return its public https://<domain>/<slug> URL."""
+    resolved_domain = normalize_short_domain(domain) if domain and domain.strip() else default_short_domain()
+
     if custom_slug is not None and custom_slug.strip():
         slug = normalize_slug(custom_slug)
         try:
-            created = await db.create_short_link(slug, long_url, created_by)
+            created = await db.create_short_link(slug, long_url, created_by, domain=resolved_domain)
         except Exception as exc:
-            logger.exception("Failed to save short link slug={}", slug)
+            logger.exception("Failed to save short link domain={} slug={}", resolved_domain, slug)
             raise LinkShortenError("Ошибка базы данных при сохранении короткой ссылки") from exc
         if not created:
             raise ShortLinkTakenError(slug)
-        return short_link_url(slug)
+        return short_link_url(slug, resolved_domain or None)
 
     for _ in range(6):
         slug = generate_random_slug()
         try:
-            if await db.create_short_link(slug, long_url, created_by):
-                return short_link_url(slug)
+            if await db.create_short_link(slug, long_url, created_by, domain=resolved_domain):
+                return short_link_url(slug, resolved_domain or None)
         except Exception as exc:
-            logger.exception("Failed to save generated short link")
+            logger.exception("Failed to save generated short link domain={}", resolved_domain)
             raise LinkShortenError("Ошибка базы данных при создании короткой ссылки") from exc
     raise LinkShortenError("Не удалось подобрать свободный код, попробуйте ещё раз")
 

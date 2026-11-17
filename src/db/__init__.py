@@ -142,6 +142,12 @@ from .fb_analytics import (  # noqa: F401
 )
 from .short_links import (  # noqa: F401
     create_short_link,
+    resolve_short_link,
     get_short_link,
     increment_short_link_clicks,
+    list_short_domains_for_user,
+    get_short_domain,
+    add_short_domain,
+    set_short_domain_shared,
+    deactivate_short_domain,
 )

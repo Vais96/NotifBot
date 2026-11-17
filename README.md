@@ -23,7 +23,7 @@ A FastAPI + aiogram bot that receives Keitaro S2S postbacks and notifies the app
 - KEITARO_SYNC_INTERVAL_SECONDS: How often to pull new Binom domains (default `3600` = hourly; `0` disables; the name is left from Keitaro)
 - NEW_ADMIN_API_URL / NEW_ADMIN_API_KEY: new Admin API and its machine key. The bot reads `GET /users` and synchronizes matched Telegram users, their roles, teams and helper-to-buyer links. Deposit notifications read the offer's cap left from `GET /v1/offers/{id}/cap?clickId=` — the key needs the `offers_read` section in the admin; without it the cap line is just omitted.
 - ADS_WORKSPACE_API_URL / ADS_WORKSPACE_TOKEN: Ads Workspace API. Buyers, leads, mentors and heads get a personal activation code from the «Мой ключ для АДС» menu. The token must match `INTERNAL_TOKEN` on ads-workspace-api.
-- SHORT_LINK_BASE_URL: Optional custom domain origin (e.g. `https://go.example.com`) for `/link` short links (`/r/<slug>`). Empty = uses `BASE_URL`. The redirect preserves query params such as `fbclid`.
+- SHORT_LINK_BASE_URL: Optional default short-link domain origin (e.g. `https://go.example.com`) for `/link` short links (`https://<domain>/<slug>`, `/r/<slug>` also supported). Additional shared or per-buyer domains can be added in `/domains`. Empty = uses `BASE_URL`. Redirects preserve query params such as `fbclid`.
 - NEW_ADMIN_SYNC_INTERVAL_SECONDS: Directory refresh interval (default `3600` = hourly; `0` disables). The first refresh runs immediately after startup.
 - YTDLP_COOKIES_PATH: Optional path to cookies.txt in Netscape format for YouTube downloads (если отсутствует — бот работает без авторизации)
 - YTDLP_COOKIES: Альтернатива YTDLP_COOKIES_PATH — содержимое файла cookies.txt (многострочная строка)

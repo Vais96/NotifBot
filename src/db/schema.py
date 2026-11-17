@@ -412,15 +412,29 @@ SCHEMA_SQL = [
         INDEX idx_inbound_status_created (status, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
-    # Built-in short links for FB comment redirects (/r/<slug> -> target_url with fbclid forwarding)
+    # Built-in short links for FB comment redirects (/<slug> or /r/<slug> -> target_url with fbclid forwarding)
     """
     CREATE TABLE IF NOT EXISTS tg_short_links (
-        slug VARCHAR(64) PRIMARY KEY,
+        domain VARCHAR(255) NOT NULL DEFAULT '',
+        slug VARCHAR(64) NOT NULL,
         target_url TEXT NOT NULL,
         created_by BIGINT NULL,
         clicks INT NOT NULL DEFAULT 0,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (domain, slug),
+        INDEX idx_tg_short_links_slug (slug),
         INDEX idx_tg_short_links_creator (created_by)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    # Domains connected for built-in short links (shared by admins or personal per buyer)
+    """
+    CREATE TABLE IF NOT EXISTS tg_short_domains (
+        domain VARCHAR(255) PRIMARY KEY,
+        owner_id BIGINT NULL,
+        is_shared TINYINT(1) NOT NULL DEFAULT 0,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_tg_short_domains_owner (owner_id, is_active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """,
 ]
@@ -433,6 +447,7 @@ _COLUMN_MIGRATIONS: List[Tuple[str, str, str]] = [
     ("tg_events", "inbound_id", "inbound_id BIGINT NULL"),
     ("tg_users", "orders_opt_out", "orders_opt_out TINYINT(1) NOT NULL DEFAULT 0"),
     ("tg_keitaro_sale_dedupe", "inbound_id", "inbound_id BIGINT NULL"),
+    ("tg_short_links", "domain", "domain VARCHAR(255) NOT NULL DEFAULT '' FIRST"),
 ]
 
 
@@ -442,6 +457,7 @@ _INDEX_MIGRATIONS: List[Tuple[str, str, str]] = [
     ("tg_events", "idx_events_created", "INDEX idx_events_created (created_at)"),
     ("tg_events", "idx_events_routed_created", "INDEX idx_events_routed_created (routed_user_id, created_at)"),
     ("tg_events", "uq_events_inbound", "UNIQUE INDEX uq_events_inbound (inbound_id)"),
+    ("tg_short_links", "idx_tg_short_links_slug", "INDEX idx_tg_short_links_slug (slug)"),
 ]
 
 
@@ -513,6 +529,16 @@ async def _apply_schema(conn: aiomysql.Connection) -> None:
                     await cur.execute(f"ALTER TABLE {table} ADD {clause}")
             except Exception as e:
                 logger.warning("Failed to add index {}.{}: {}", table, index, e)
+        # Upgrade tg_short_links PK from (slug) to (domain, slug) on existing DBs
+        try:
+            await cur.execute("SHOW INDEX FROM tg_short_links WHERE Key_name = 'PRIMARY'")
+            pk_rows = await cur.fetchall()
+            pk_cols = [str(r[4]).lower() for r in pk_rows if len(r) > 4]
+            if pk_cols == ["slug"]:
+                logger.info("Altering tg_short_links: migrating PRIMARY KEY to (domain, slug)")
+                await cur.execute("ALTER TABLE tg_short_links DROP PRIMARY KEY, ADD PRIMARY KEY (domain, slug)")
+        except Exception as e:
+            logger.warning("Failed to migrate tg_short_links primary key: {}", e)
     try:
         await _ensure_fb_reference_data(conn)
     except Exception as e:

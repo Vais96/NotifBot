@@ -19,14 +19,17 @@ from src.dispatcher import bot, dp  # noqa: E402
 from src.handlers.menu import main_menu  # noqa: E402
 from src.services.comment_links import (  # noqa: E402
     InvalidBaseLinkError,
+    InvalidShortDomainError,
     InvalidSlugError,
     ShortLinkTakenError,
     build_comment_link,
     create_short_link_for_url,
     extract_campaign_metadata,
     extract_first_line_url_and_rest,
+    extract_request_host,
     format_result_message,
     merge_redirect_query,
+    normalize_short_domain,
     normalize_slug,
     parse_base_link,
     parse_fields_input,
@@ -89,6 +92,7 @@ class CommentLinksServiceTests(unittest.TestCase):
             "Адсет: adset_1\n"
             "Объявление: creo_1\n"
             "ID каба: 11223344\n"
+            "Домен: myshort.online\n"
             "Название: thai-slot-1\n"
             "Пиксель: ."
         )
@@ -101,6 +105,7 @@ class CommentLinksServiceTests(unittest.TestCase):
                 "adset_name": "adset_1",
                 "ad_name": "creo_1",
                 "account_id": "11223344",
+                "short_domain": "myshort.online",
                 "custom_slug": "thai-slot-1",
             },
         )
@@ -123,6 +128,7 @@ class CommentLinksServiceTests(unittest.TestCase):
                 "adset_name": "adset 1",
                 "ad_name": "creo_1",
                 "account_id": "1234567890",
+                "short_domain": "myshort.online",
                 "custom_slug": "ignored-in-query",
             },
         )
@@ -143,6 +149,7 @@ class CommentLinksServiceTests(unittest.TestCase):
         self.assertIn("sub6=1234567890", built.long_url)
         self.assertIn("fbp=1491853589548065", built.long_url)
         self.assertNotIn("custom_slug", built.long_url)
+        self.assertNotIn("short_domain", built.long_url)
 
     def test_build_comment_link_drops_unexpanded_macros_and_avoids_sub_collision(self) -> None:
         base = "https://luckytop.online/?sub1=77&sub2={{campaign.name}}&sub3={{ad.name}}&sub5=split"
@@ -180,28 +187,33 @@ class CommentLinksServiceTests(unittest.TestCase):
                 ("sub6", "1740624179668966"),
             ),
         )
-        built_override = build_comment_link(
-            "https://luckytop.online",
-            {"campaign_name": "77_TH_1740624179668966_15.11", "account_id": "99999999"},
-        )
-        self.assertIn(("sub6", "99999999"), built_override.params)
 
     def test_extract_first_line_url_and_rest(self) -> None:
         url, rest = extract_first_line_url_and_rest("https://luckytop.online/?sub1=77\nКампания: c1\nКаб: 55")
         self.assertEqual(url, "https://luckytop.online/?sub1=77")
         self.assertEqual(rest, "Кампания: c1\nКаб: 55")
 
-    def test_slug_normalization_and_short_link_domain(self) -> None:
+    def test_slug_domain_normalization_and_root_url(self) -> None:
         self.assertEqual(normalize_slug("  Thai Slot 1  "), "thai-slot-1")
         with self.assertRaises(InvalidSlugError):
             normalize_slug("a")
         with self.assertRaises(InvalidSlugError):
             normalize_slug("bad/slug")
+        with self.assertRaises(InvalidSlugError):
+            normalize_slug("health")
 
-        with patch("src.services.comment_links.settings.short_link_base_url", "https://go.mybrand.com/"):
-            self.assertEqual(short_link_url("thai-slot-1"), "https://go.mybrand.com/r/thai-slot-1")
+        self.assertEqual(normalize_short_domain("https://Go.MyBrand.com/path"), "go.mybrand.com")
+        with self.assertRaises(InvalidShortDomainError):
+            normalize_short_domain("bad domain")
+        with self.assertRaises(InvalidShortDomainError):
+            normalize_short_domain("localhost")
+
+        self.assertEqual(extract_request_host("Go.Brand.com, proxy", "example.test:8080"), "go.brand.com")
+        self.assertEqual(extract_request_host(None, "Example.Test:443"), "example.test")
+
+        self.assertEqual(short_link_url("games", "mybrand.online"), "https://mybrand.online/games")
         with patch("src.services.comment_links.settings.short_link_base_url", ""):
-            self.assertEqual(short_link_url("thai-slot-1"), "https://example.test/r/thai-slot-1")
+            self.assertEqual(short_link_url("games"), "https://example.test/games")
 
     def test_merge_redirect_query_forwards_fbclid_without_overwriting_subs(self) -> None:
         target = "https://luckytop.online/?sub1=77&sub2=cmp&fbp=12345"
@@ -213,24 +225,39 @@ class CommentLinksServiceTests(unittest.TestCase):
 
     def test_format_result_message_escapes_html_and_warns_without_pixel(self) -> None:
         built = build_comment_link("https://luckytop.online/?sub1=77", {"campaign_name": "a<b&c"})
-        text = format_result_message(built, "https://example.test/r/my-link")
-        self.assertIn("<code>https://example.test/r/my-link</code>", text)
+        text = format_result_message(built, "https://myshort.online/my-link")
+        self.assertIn("<code>https://myshort.online/my-link</code>", text)
         self.assertIn("a&lt;b&amp;c", text)
         self.assertIn("Пиксель (fbp) не указан", text)
 
 
 class ShortLinkCreationAndRedirectTests(unittest.IsolatedAsyncioTestCase):
-    async def test_create_short_link_with_custom_slug_and_taken_error(self) -> None:
+    async def test_create_short_link_scoped_to_domain(self) -> None:
         with patch("src.services.comment_links.db.create_short_link", AsyncMock(return_value=True)) as create_mock:
-            url = await create_short_link_for_url("https://luckytop.online/?sub1=77", 42, custom_slug="Thai Slot 1")
-        self.assertEqual(url, "https://example.test/r/thai-slot-1")
-        create_mock.assert_awaited_once_with("thai-slot-1", "https://luckytop.online/?sub1=77", 42)
+            url = await create_short_link_for_url(
+                "https://luckytop.online/?sub1=77",
+                42,
+                custom_slug="Games",
+                domain="myshort.online",
+            )
+        self.assertEqual(url, "https://myshort.online/games")
+        create_mock.assert_awaited_once_with(
+            "games",
+            "https://luckytop.online/?sub1=77",
+            42,
+            domain="myshort.online",
+        )
 
         with (
             patch("src.services.comment_links.db.create_short_link", AsyncMock(return_value=False)),
             self.assertRaises(ShortLinkTakenError),
         ):
-            await create_short_link_for_url("https://luckytop.online/?sub1=77", 42, custom_slug="thai-slot-1")
+            await create_short_link_for_url(
+                "https://luckytop.online/?sub1=77",
+                42,
+                custom_slug="games",
+                domain="myshort.online",
+            )
 
     async def test_create_short_link_auto_slug_retries_on_collision(self) -> None:
         create_mock = AsyncMock(side_effect=[False, True])
@@ -238,25 +265,42 @@ class ShortLinkCreationAndRedirectTests(unittest.IsolatedAsyncioTestCase):
             patch("src.services.comment_links.db.create_short_link", create_mock),
             patch("src.services.comment_links.generate_random_slug", side_effect=["dup111", "ok2222"]),
         ):
-            url = await create_short_link_for_url("https://luckytop.online/?sub1=77", 42, custom_slug=None)
-        self.assertEqual(url, "https://example.test/r/ok2222")
+            url = await create_short_link_for_url("https://luckytop.online/?sub1=77", 42, domain="myshort.online")
+        self.assertEqual(url, "https://myshort.online/ok2222")
         self.assertEqual(create_mock.await_count, 2)
 
 
 class RedirectEndpointTests(unittest.TestCase):
-    def test_redirect_endpoint_forwards_fbclid_and_returns_404_when_missing(self) -> None:
+    def test_root_and_legacy_r_redirects_forward_host_and_fbclid(self) -> None:
         client = TestClient(app_module.app)
+        resolve_mock = AsyncMock(return_value=("myshort.online", "https://luckytop.online/?sub1=77&fbp=149185"))
         with (
-            patch("src.app.db.get_short_link", AsyncMock(return_value="https://luckytop.online/?sub1=77&fbp=149185")),
+            patch("src.app.db.resolve_short_link", resolve_mock),
             patch("src.app.db.increment_short_link_clicks", AsyncMock()),
         ):
-            resp = client.get("/r/thai-slot-1?fbclid=IwY2xyz", follow_redirects=False)
+            resp = client.get(
+                "/games?fbclid=IwY2xyz",
+                headers={"host": "myshort.online"},
+                follow_redirects=False,
+            )
+        resolve_mock.assert_awaited_once_with("games", host="myshort.online")
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp.headers["location"], "https://luckytop.online/?sub1=77&fbp=149185&fbclid=IwY2xyz")
 
-        with patch("src.app.db.get_short_link", AsyncMock(return_value=None)):
-            resp_missing = client.get("/r/unknown", follow_redirects=False)
+        with (
+            patch("src.app.db.resolve_short_link", AsyncMock(return_value=("", "https://luckytop.online/?sub1=77"))),
+            patch("src.app.db.increment_short_link_clicks", AsyncMock()),
+        ):
+            resp_legacy = client.get("/r/legacy1?fbclid=abc", follow_redirects=False)
+        self.assertEqual(resp_legacy.status_code, 302)
+        self.assertEqual(resp_legacy.headers["location"], "https://luckytop.online/?sub1=77&fbclid=abc")
+
+        with patch("src.app.db.resolve_short_link", AsyncMock(return_value=None)):
+            resp_missing = client.get("/unknown", follow_redirects=False)
         self.assertEqual(resp_missing.status_code, 404)
+
+        # Static routes still work and are not shadowed by /{slug}
+        self.assertEqual(client.get("/health").json(), {"status": "ok"})
 
 
 class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -265,7 +309,7 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
             callbacks = [btn.callback_data for row in main_menu(role == "admin", role).inline_keyboard for btn in row]
             self.assertIn("menu:commentlink", callbacks, role)
 
-    async def test_link_command_one_message_with_custom_slug(self) -> None:
+    async def test_link_command_one_message_with_custom_domain_and_slug(self) -> None:
         calls = []
 
         async def fake_request(self_, bot_, method, timeout=None):
@@ -277,6 +321,7 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
         set_pending = AsyncMock()
         clear_pending = AsyncMock()
         set_cache = AsyncMock()
+        domains_rows = [{"domain": "myshort.online", "owner_id": 501, "is_shared": 0, "is_active": 1}]
 
         with (
             patch.object(type(bot.session), "make_request", fake_request),
@@ -285,6 +330,8 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
             patch("src.handlers.comment_links.db.get_ui_cache_value", AsyncMock(return_value=None)),
             patch("src.handlers.comment_links.db.set_pending_action", set_pending),
             patch("src.handlers.comment_links.db.clear_pending_action", clear_pending),
+            patch("src.handlers.comment_links.is_admin", AsyncMock(return_value=False)),
+            patch("src.services.comment_links.db.list_short_domains_for_user", AsyncMock(return_value=domains_rows)),
             patch("src.handlers.pending.db.clear_pending_action", clear_pending),
             patch(
                 "src.handlers.pending.db.get_pending_action",
@@ -301,6 +348,7 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
                 "Адсет: adset_a\n"
                 "Объявление: creo_b\n"
                 "Каб: 555666\n"
+                "Домен: myshort.online\n"
                 "Название: thai-creo-b"
             )
             await dp.feed_update(bot, _text_update(501, payload, update_id=2))
@@ -309,7 +357,7 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
         sent = [c for c in calls if type(c).__name__ == "SendMessage"]
         self.assertTrue(sent)
         final_text = sent[-1].text
-        self.assertIn("https://example.test/r/thai-creo-b", final_text)
+        self.assertIn("https://myshort.online/thai-creo-b", final_text)
         self.assertIn("sub5=adset_a", final_text)
         self.assertIn("sub6=555666", final_text)
         self.assertIn("fbp=1491853589548065", final_text)
@@ -340,6 +388,8 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
             patch("src.handlers.comment_links.db.set_ui_cache_list", AsyncMock()),
             patch("src.handlers.comment_links.db.set_pending_action", set_pending),
             patch("src.handlers.comment_links.db.clear_pending_action", clear_pending),
+            patch("src.handlers.comment_links.is_admin", AsyncMock(return_value=False)),
+            patch("src.services.comment_links.db.list_short_domains_for_user", AsyncMock(return_value=[])),
         ):
             await dp.feed_update(bot, _callback_update(502, "clink:skip", update_id=3))
             set_pending.assert_awaited_once_with(502, f"{PendingAction.COMMENT_LINK}:slug", None)
@@ -354,7 +404,7 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Полная ссылка с сабами", final_text)
         self.assertNotIn("Короткая ссылка:", final_text)
 
-    async def test_slug_step_accepts_custom_name(self) -> None:
+    async def test_buyer_can_add_personal_domain_and_use_root_slug(self) -> None:
         calls = []
 
         async def fake_request(self_, bot_, method, timeout=None):
@@ -363,28 +413,28 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace(message_id=88, chat=SimpleNamespace(id=method.chat_id), text=method.text)
             return True
 
-        draft = {
-            "base_url": "https://luckytop.online/?sub1=77&fbp=149185",
-            "has_pixel": True,
-            "fields": {"campaign_name": "cmp1"},
-        }
+        add_dom = AsyncMock(return_value="added")
         clear_pending = AsyncMock()
         with (
             patch.object(type(bot.session), "make_request", fake_request),
             patch(
                 "src.handlers.pending.db.get_pending_action",
-                AsyncMock(return_value=(f"{PendingAction.COMMENT_LINK}:slug", None)),
+                AsyncMock(return_value=(f"{PendingAction.COMMENT_LINK}:add_domain", None)),
             ),
-            patch("src.handlers.comment_links.db.get_ui_cache_value", AsyncMock(return_value=json.dumps(draft))),
+            patch("src.handlers.comment_links.is_admin", AsyncMock(return_value=False)),
+            patch("src.handlers.comment_links.db.add_short_domain", add_dom),
             patch("src.handlers.comment_links.db.set_ui_cache_list", AsyncMock()),
             patch("src.handlers.comment_links.db.clear_pending_action", clear_pending),
-            patch("src.services.comment_links.db.create_short_link", AsyncMock(return_value=True)),
+            patch("src.services.comment_links.db.list_short_domains_for_user", AsyncMock(return_value=[
+                {"domain": "buyerdom.online", "owner_id": 503, "is_shared": 0, "is_active": 1},
+            ])),
         ):
-            await dp.feed_update(bot, _text_update(503, "my-custom-name", update_id=5))
+            await dp.feed_update(bot, _text_update(503, "https://buyerdom.online/", update_id=5))
 
+        add_dom.assert_awaited_once_with("buyerdom.online", 503, is_shared=False, allow_takeover=False)
         clear_pending.assert_awaited_once_with(503)
-        final_text = [c for c in calls if type(c).__name__ == "SendMessage"][-1].text
-        self.assertIn("https://example.test/r/my-custom-name", final_text)
+        sent = [c for c in calls if type(c).__name__ == "SendMessage"]
+        self.assertTrue(any("buyerdom.online" in m.text for m in sent))
 
     async def test_guided_campaign_autofills_account_id_and_skips_account_step(self) -> None:
         calls = []
@@ -418,7 +468,7 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
         set_pending.assert_awaited_once_with(504, f"{PendingAction.COMMENT_LINK}:step:adset_name", None)
         sent_text = [c for c in calls if type(c).__name__ == "SendMessage"][-1].text
         self.assertIn("1740624179668966", sent_text)
-        self.assertIn("Шаг 2/3", sent_text)  # campaign, adset, ad (account_id and pixel skipped)
+        self.assertIn("Шаг 2/3", sent_text)
 
 
 if __name__ == "__main__":

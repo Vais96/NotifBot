@@ -14,7 +14,7 @@ from .design_bot import design_dp, design_bot
 from . import handlers  # noqa: F401 ensure handlers are registered
 from . import db, underdog, binom_sync, new_admin_sync, daily_revenue_report
 from .services import offer_cap
-from .services.comment_links import merge_redirect_query
+from .services.comment_links import RESERVED_SLUGS, extract_request_host, merge_redirect_query
 from .services.keitaro_postbacks import (
     build_notification_text,
     has_meaningful_fields,
@@ -864,21 +864,30 @@ async def db_ping():
         raise HTTPException(500, f"DB ping failed: {e}")
 
 
-async def _track_short_link_click(slug: str) -> None:
+async def _track_short_link_click(slug: str, domain: str = "") -> None:
     try:
-        await db.increment_short_link_clicks(slug)
+        await db.increment_short_link_clicks(slug, domain=domain)
     except Exception as exc:
-        logger.warning("Failed to increment click count for {}: {}", slug, exc)
+        logger.warning("Failed to increment click count for {}/{}: {}", domain, slug, exc)
+
+
+async def _serve_short_link(slug: str, request: Request) -> RedirectResponse:
+    norm_slug = slug.strip().lower()
+    if not norm_slug or norm_slug in RESERVED_SLUGS:
+        raise HTTPException(404, "Short link not found")
+    host = extract_request_host(request.headers.get("x-forwarded-host"), request.headers.get("host"))
+    resolved = await db.resolve_short_link(norm_slug, host=host)
+    if not resolved:
+        raise HTTPException(404, "Short link not found")
+    matched_domain, target_url = resolved
+    _spawn(_track_short_link_click(norm_slug, matched_domain), f"short-link-click-{norm_slug}")
+    destination = merge_redirect_query(target_url, request.query_params.multi_items())
+    return RedirectResponse(url=destination, status_code=302, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/r/{slug}")
 async def redirect_short_link(slug: str, request: Request):
-    target_url = await db.get_short_link(slug.strip().lower())
-    if not target_url:
-        raise HTTPException(404, "Short link not found")
-    _spawn(_track_short_link_click(slug.strip().lower()), f"short-link-click-{slug}")
-    destination = merge_redirect_query(target_url, request.query_params.multi_items())
-    return RedirectResponse(url=destination, status_code=302, headers={"Cache-Control": "no-store"})
+    return await _serve_short_link(slug, request)
 
 @app.post("/keitaro/postback")
 async def keitaro_postback(
@@ -1095,3 +1104,9 @@ async def design_telegram_webhook(request: Request):
     if not settings.design_bot_token or settings.design_bot_token == settings.telegram_bot_token:
         return JSONResponse({"ok": True})
     return await _accept_webhook(request, design_dp, design_bot, "design")
+
+
+# Keep last so static routes and webhooks always take precedence over root short-link slugs.
+@app.get("/{slug}")
+async def redirect_root_short_link(slug: str, request: Request):
+    return await _serve_short_link(slug, request)
