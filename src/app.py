@@ -875,7 +875,11 @@ async def _serve_short_link(slug: str, request: Request) -> RedirectResponse:
     norm_slug = slug.strip().lower()
     if not norm_slug or norm_slug in RESERVED_SLUGS:
         raise HTTPException(404, "Short link not found")
-    host = extract_request_host(request.headers.get("x-forwarded-host"), request.headers.get("host"))
+    host = extract_request_host(
+        request.headers.get("x-forwarded-host"),
+        request.headers.get("host"),
+        request.headers.get("x-short-host"),
+    )
     resolved = await db.resolve_short_link(norm_slug, host=host)
     if not resolved:
         raise HTTPException(404, "Short link not found")
@@ -885,7 +889,7 @@ async def _serve_short_link(slug: str, request: Request) -> RedirectResponse:
     return RedirectResponse(url=destination, status_code=302, headers={"Cache-Control": "no-store"})
 
 
-@app.get("/r/{slug}")
+@app.api_route("/r/{slug}", methods=["GET", "HEAD"])
 async def redirect_short_link(slug: str, request: Request):
     return await _serve_short_link(slug, request)
 
@@ -1107,6 +1111,6 @@ async def design_telegram_webhook(request: Request):
 
 
 # Keep last so static routes and webhooks always take precedence over root short-link slugs.
-@app.get("/{slug}")
+@app.api_route("/{slug}", methods=["GET", "HEAD"])
 async def redirect_root_short_link(slug: str, request: Request):
     return await _serve_short_link(slug, request)

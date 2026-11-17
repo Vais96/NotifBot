@@ -76,6 +76,9 @@ class Settings(BaseModel):
     ads_workspace_token: SecretStr = Field(default="", validation_alias="ADS_WORKSPACE_TOKEN")
     # Домен для коротких ссылок (/r/<slug>), например https://go.example.com. Пусто = BASE_URL.
     short_link_base_url: str = Field(default="", validation_alias="SHORT_LINK_BASE_URL")
+    # Автоподключение доменов к Cloudflare Worker при добавлении в /domains (опционально)
+    cloudflare_api_token: SecretStr = Field(default="", validation_alias="CLOUDFLARE_API_TOKEN")
+    cloudflare_worker_name: str = Field(default="", validation_alias="CLOUDFLARE_WORKER_NAME")
     # Чат(ы) для рассылки design-уведомлений (группа/канал). Все участники видят сообщение. Через запятую: -100123, -100456
     design_broadcast_chat_ids: List[int] = Field(default_factory=list, validation_alias="DESIGN_BROADCAST_CHAT_IDS")
     # Через сколько часов после назначения напомнить взять таск в работу (по умолчанию 48 = 2 дня)
@@ -184,6 +187,8 @@ class Settings(BaseModel):
             "ADS_WORKSPACE_API_URL": os.getenv("ADS_WORKSPACE_API_URL", ""),
             "ADS_WORKSPACE_TOKEN": os.getenv("ADS_WORKSPACE_TOKEN", ""),
             "SHORT_LINK_BASE_URL": os.getenv("SHORT_LINK_BASE_URL", ""),
+            "CLOUDFLARE_API_TOKEN": os.getenv("CLOUDFLARE_API_TOKEN", ""),
+            "CLOUDFLARE_WORKER_NAME": os.getenv("CLOUDFLARE_WORKER_NAME", ""),
             "DESIGN_BROADCAST_CHAT_IDS": _parse_id_list("DESIGN_BROADCAST_CHAT_IDS"),
             "DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS": _env_int("DESIGN_TAKE_IN_PROGRESS_REMINDER_HOURS", 48),
             "DESIGN_NOTIFY_INTERVAL_SECONDS": _env_int("DESIGN_NOTIFY_INTERVAL_SECONDS", 3600),

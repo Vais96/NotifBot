@@ -563,9 +563,17 @@ def normalize_short_domain(raw_domain: str) -> str:
     return host
 
 
-def extract_request_host(x_forwarded_host: Optional[str], host_header: Optional[str]) -> str:
-    """Extract lowercase hostname without port from X-Forwarded-Host or Host header."""
-    raw = (x_forwarded_host or "").split(",", 1)[0].strip() or (host_header or "").strip()
+def extract_request_host(
+    x_forwarded_host: Optional[str],
+    host_header: Optional[str],
+    x_short_host: Optional[str] = None,
+) -> str:
+    """Extract lowercase hostname without port from X-Short-Host, X-Forwarded-Host, or Host header."""
+    raw = (
+        (x_short_host or "").strip()
+        or (x_forwarded_host or "").split(",", 1)[0].strip()
+        or (host_header or "").strip()
+    )
     if ":" in raw:
         raw = raw.split(":", 1)[0].strip()
     return raw.lower()

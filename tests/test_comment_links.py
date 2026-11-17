@@ -17,6 +17,11 @@ from src import handlers  # noqa: E402,F401
 from src.constants import PendingAction  # noqa: E402
 from src.dispatcher import bot, dp  # noqa: E402
 from src.handlers.menu import main_menu  # noqa: E402
+from src.services.cloudflare_short_domains import (  # noqa: E402
+    CloudflareProvisionResult,
+    CloudflareZoneNotFoundError,
+    provision_domain_in_cloudflare,
+)
 from src.services.comment_links import (  # noqa: E402
     InvalidBaseLinkError,
     InvalidShortDomainError,
@@ -210,6 +215,10 @@ class CommentLinksServiceTests(unittest.TestCase):
 
         self.assertEqual(extract_request_host("Go.Brand.com, proxy", "example.test:8080"), "go.brand.com")
         self.assertEqual(extract_request_host(None, "Example.Test:443"), "example.test")
+        self.assertEqual(
+            extract_request_host("bot.up.railway.app", "bot.up.railway.app", "WorkerHost.Online"),
+            "workerhost.online",
+        )
 
         self.assertEqual(short_link_url("games", "mybrand.online"), "https://mybrand.online/games")
         with patch("src.services.comment_links.settings.short_link_base_url", ""):
@@ -280,12 +289,18 @@ class RedirectEndpointTests(unittest.TestCase):
         ):
             resp = client.get(
                 "/games?fbclid=IwY2xyz",
+                headers={"host": "bot.up.railway.app", "x-short-host": "myshort.online"},
+                follow_redirects=False,
+            )
+            resp_head = client.head(
+                "/games?fbclid=IwY2xyz",
                 headers={"host": "myshort.online"},
                 follow_redirects=False,
             )
-        resolve_mock.assert_awaited_once_with("games", host="myshort.online")
+        resolve_mock.assert_awaited_with("games", host="myshort.online")
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp.headers["location"], "https://luckytop.online/?sub1=77&fbp=149185&fbclid=IwY2xyz")
+        self.assertEqual(resp_head.status_code, 302)
 
         with (
             patch("src.app.db.resolve_short_link", AsyncMock(return_value=("", "https://luckytop.online/?sub1=77"))),
@@ -469,6 +484,85 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
         sent_text = [c for c in calls if type(c).__name__ == "SendMessage"][-1].text
         self.assertIn("1740624179668966", sent_text)
         self.assertIn("Шаг 2/3", sent_text)
+
+
+class CloudflareProvisioningTests(unittest.IsolatedAsyncioTestCase):
+    async def test_provision_creates_dns_and_worker_routes(self) -> None:
+        responses = [
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": [{"id": "z1", "status": "active", "name_servers": ["ns1.cf", "ns2.cf"]}]}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": []}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": {"id": "d1"}}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": []}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": {"id": "d2"}}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": []}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": {"id": "r1"}}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": {"id": "r2"}}),
+        ]
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("src.services.cloudflare_short_domains.settings.cloudflare_api_token", "cf-secret"),
+            patch("src.services.cloudflare_short_domains.settings.cloudflare_worker_name", "short-proxy"),
+            patch("src.services.cloudflare_short_domains.httpx.AsyncClient", return_value=mock_client),
+        ):
+            res = await provision_domain_in_cloudflare("myshort.online")
+
+        self.assertEqual(res.zone_status, "active")
+        self.assertEqual(res.dns_created, ("myshort.online", "www.myshort.online"))
+        self.assertEqual(res.routes_created, ("myshort.online/*", "www.myshort.online/*"))
+
+    async def test_provision_raises_when_zone_missing(self) -> None:
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(
+            return_value=SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": []})
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("src.services.cloudflare_short_domains.settings.cloudflare_api_token", "cf-secret"),
+            patch("src.services.cloudflare_short_domains.settings.cloudflare_worker_name", "short-proxy"),
+            patch("src.services.cloudflare_short_domains.httpx.AsyncClient", return_value=mock_client),
+            self.assertRaises(CloudflareZoneNotFoundError),
+        ):
+            await provision_domain_in_cloudflare("missing.online")
+
+    async def test_add_domain_handler_runs_cloudflare_provisioning(self) -> None:
+        calls = []
+
+        async def fake_request(self_, bot_, method, timeout=None):
+            calls.append(method)
+            return SimpleNamespace(message_id=95, chat=SimpleNamespace(id=method.chat_id), text=method.text)
+
+        cf_res = CloudflareProvisionResult(
+            domain="cfdom.online",
+            zone_status="active",
+            dns_created=("cfdom.online",),
+            routes_created=("cfdom.online/*",),
+            name_servers=("ns1.cf",),
+        )
+        with (
+            patch.object(type(bot.session), "make_request", fake_request),
+            patch(
+                "src.handlers.pending.db.get_pending_action",
+                AsyncMock(return_value=(f"{PendingAction.COMMENT_LINK}:add_domain", None)),
+            ),
+            patch("src.handlers.comment_links.is_admin", AsyncMock(return_value=True)),
+            patch("src.handlers.comment_links.db.add_short_domain", AsyncMock(return_value="added")),
+            patch("src.handlers.comment_links.db.set_ui_cache_list", AsyncMock()),
+            patch("src.handlers.comment_links.db.clear_pending_action", AsyncMock()),
+            patch("src.handlers.comment_links.is_cloudflare_configured", return_value=True),
+            patch("src.handlers.comment_links.provision_domain_in_cloudflare", AsyncMock(return_value=cf_res)) as prov,
+            patch("src.services.comment_links.db.list_short_domains_for_user", AsyncMock(return_value=[])),
+        ):
+            await dp.feed_update(bot, _text_update(505, "cfdom.online", update_id=7))
+
+        prov.assert_awaited_once_with("cfdom.online")
+        sent = [c.text for c in calls if type(c).__name__ == "SendMessage"]
+        self.assertTrue(any("Worker route подключён" in t for t in sent))
 
 
 if __name__ == "__main__":

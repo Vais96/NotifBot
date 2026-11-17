@@ -13,6 +13,12 @@ from loguru import logger
 from .. import db
 from ..constants import PendingAction
 from ..dispatcher import bot, dp
+from ..services.cloudflare_short_domains import (
+    CloudflareProvisionError,
+    CloudflareZoneNotFoundError,
+    is_cloudflare_configured,
+    provision_domain_in_cloudflare,
+)
 from ..services.comment_links import (
     GUIDED_FIELDS,
     GUIDED_PROMPTS,
@@ -374,6 +380,37 @@ async def _proceed_after_fields(chat_id: int, user_id: int, draft: Dict[str, Any
     await _send_slug_prompt(chat_id, user_id, draft)
 
 
+async def _try_provision_cloudflare(domain: str) -> str:
+    """Provision Cloudflare DNS + Worker route when CLOUDFLARE_* is configured; returns status note."""
+    if not is_cloudflare_configured():
+        cname = bot_cname_target()
+        if cname:
+            return (
+                f"\nЗаведите домен в Cloudflare, добавьте проксируемый CNAME → <code>{safe(cname)}</code> "
+                f"и подключите маршрут Worker <code>{safe(domain)}/*</code>."
+            )
+        return ""
+    try:
+        res = await provision_domain_in_cloudflare(domain)
+    except CloudflareZoneNotFoundError:
+        return (
+            f"\n⚠️ Домен <code>{safe(domain)}</code> пока не найден в вашем Cloudflare. "
+            "Добавьте сайт в Cloudflare, смените NS у регистратора и нажмите ☁️ в /domains."
+        )
+    except CloudflareProvisionError as exc:
+        return f"\n⚠️ Не удалось настроить Cloudflare автоматически: {safe(str(exc))}"
+
+    parts: List[str] = []
+    if res.dns_created:
+        parts.append("DNS создан")
+    if res.routes_created:
+        parts.append("Worker route подключён")
+    if not parts:
+        parts.append("DNS и Worker route уже настроены")
+    status_hint = " (зона ждёт смены NS)" if res.zone_status != "active" else ""
+    return f"\n☁️ Cloudflare: {', '.join(parts)}{safe(status_hint)}."
+
+
 async def send_domains_menu(chat_id: int, user_id: int) -> None:
     """Show user's and shared short-link domains with DNS setup instructions."""
     admin = await is_admin(user_id)
@@ -403,15 +440,18 @@ async def send_domains_menu(chat_id: int, user_id: int) -> None:
             lines.append(f"• <code>{safe(dom)}</code> — <i>{safe(badge)}</i>")
 
     buttons: List[List[InlineKeyboardButton]] = []
+    cf_enabled = is_cloudflare_configured()
     for idx, r in enumerate(db_domains):
         dom = str(r["domain"])
         is_owner = r.get("owner_id") is not None and int(r["owner_id"]) == int(user_id)
         row_btns: List[InlineKeyboardButton] = []
         if admin:
             share_label = f"👤 Скрыть {dom}" if r.get("is_shared") else f"🌐 Общий: {dom}"
-            row_btns.append(InlineKeyboardButton(text=share_label[:40], callback_data=f"clink:domshare:{idx}"))
+            row_btns.append(InlineKeyboardButton(text=share_label[:36], callback_data=f"clink:domshare:{idx}"))
+        if cf_enabled and (admin or is_owner):
+            row_btns.append(InlineKeyboardButton(text=f"☁️ CF: {dom}"[:24], callback_data=f"clink:domcf:{idx}"))
         if admin or is_owner:
-            row_btns.append(InlineKeyboardButton(text=f"🗑 {dom}"[:30], callback_data=f"clink:domdel:{idx}"))
+            row_btns.append(InlineKeyboardButton(text=f"🗑 {dom}"[:24], callback_data=f"clink:domdel:{idx}"))
         if row_btns:
             buttons.append(row_btns)
 
@@ -504,12 +544,7 @@ async def handle_comment_link_text(message: Message, arg: str) -> None:
             await _save_last_domain(user_id, domain)
         except Exception:
             pass
-        cname = bot_cname_target()
-        dns_hint = (
-            f"\nНаправьте CNAME домена на <code>{safe(cname)}</code> (или добавьте домен на Railway / Cloudflare)."
-            if cname
-            else ""
-        )
+        cf_note = await _try_provision_cloudflare(domain)
         scope_note = " (общий для команды; в /domains можно скрыть)" if admin else ""
 
         if arg == "add_domain_flow":
@@ -517,12 +552,12 @@ async def handle_comment_link_text(message: Message, arg: str) -> None:
             if draft and draft.get("base_url"):
                 draft["domain"] = domain
                 await _save_draft(user_id, draft)
-                await message.answer(f"✅ Домен <code>{safe(domain)}</code> добавлен{scope_note}.{dns_hint}")
+                await message.answer(f"✅ Домен <code>{safe(domain)}</code> добавлен{scope_note}.{cf_note}")
                 await _send_slug_prompt(chat_id, user_id, draft)
                 return
 
         await db.clear_pending_action(user_id)
-        await message.answer(f"✅ Домен <code>{safe(domain)}</code> добавлен{scope_note}.{dns_hint}")
+        await message.answer(f"✅ Домен <code>{safe(domain)}</code> добавлен{scope_note}.{cf_note}")
         await send_domains_menu(chat_id, user_id)
         return
 
@@ -869,6 +904,29 @@ async def cb_clink_domshare(call: CallbackQuery) -> None:
     await db.set_short_domain_shared(dom, new_shared)
     await call.answer("Общий для всех" if new_shared else "Скрыт из общих")
     await send_domains_menu(call.message.chat.id, user_id)
+
+
+@dp.callback_query(F.data.startswith("clink:domcf:"))
+async def cb_clink_domcf(call: CallbackQuery) -> None:
+    user_id = call.from_user.id
+    try:
+        idx = int(call.data.split(":", 2)[2])
+    except Exception:
+        await call.answer("Некорректный выбор", show_alert=True)
+        return
+    dom = await db.get_ui_cache_value(user_id, _CACHE_MANAGE_DOMAINS_KIND, idx)
+    row = await db.get_short_domain(dom) if dom else None
+    if not row:
+        await call.answer("Список устарел", show_alert=True)
+        return
+    admin = await is_admin(user_id)
+    is_owner = row.get("owner_id") is not None and int(row["owner_id"]) == int(user_id)
+    if not (admin or is_owner):
+        await call.answer("Нет прав", show_alert=True)
+        return
+    await call.answer("Настраиваю Cloudflare…")
+    cf_note = await _try_provision_cloudflare(dom)
+    await call.message.answer(f"☁️ <b>{safe(dom)}</b>{cf_note}")
 
 
 @dp.callback_query(F.data.startswith("clink:domdel:"))
