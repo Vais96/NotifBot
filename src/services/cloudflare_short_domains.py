@@ -17,6 +17,10 @@ CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 class CloudflareProvisionError(RuntimeError):
     """Raised when Cloudflare API provisioning fails."""
 
+    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
 
 class CloudflareZoneNotFoundError(CloudflareProvisionError):
     """Raised when the domain does not exist in the configured Cloudflare account."""
@@ -29,6 +33,7 @@ class CloudflareProvisionResult:
     dns_created: Tuple[str, ...]
     routes_created: Tuple[str, ...]
     name_servers: Tuple[str, ...]
+    dns_skipped_no_perm: bool = False
 
 
 def is_cloudflare_configured() -> bool:
@@ -61,7 +66,7 @@ async def _cf_request(
         errors = payload.get("errors") or []
         msg = "; ".join(str(e.get("message") or e) for e in errors if e) or f"HTTP {resp.status_code}"
         logger.warning("Cloudflare API {} {} failed: {}", method, path, msg)
-        raise CloudflareProvisionError(msg)
+        raise CloudflareProvisionError(msg, http_status=resp.status_code)
     return payload
 
 
@@ -87,27 +92,35 @@ async def provision_domain_in_cloudflare(domain: str) -> CloudflareProvisionResu
 
         cname_target = bot_cname_target()
         dns_created: List[str] = []
-        for hostname in (norm, f"www.{norm}"):
-            rec_resp = await _cf_request(
-                client,
-                "GET",
-                f"/zones/{zone_id}/dns_records",
-                token,
-                params={"name": hostname},
-            )
-            existing = [
-                r for r in (rec_resp.get("result") or [])
-                if str(r.get("type") or "").upper() in ("A", "AAAA", "CNAME")
-            ]
-            if existing:
-                continue
-            body: Dict[str, Any] = (
-                {"type": "CNAME", "name": hostname, "content": cname_target, "proxied": True, "ttl": 1}
-                if cname_target
-                else {"type": "A", "name": hostname, "content": "192.0.2.1", "proxied": True, "ttl": 1}
-            )
-            await _cf_request(client, "POST", f"/zones/{zone_id}/dns_records", token, json_body=body)
-            dns_created.append(hostname)
+        dns_skipped_no_perm = False
+        try:
+            for hostname in (norm, f"www.{norm}"):
+                rec_resp = await _cf_request(
+                    client,
+                    "GET",
+                    f"/zones/{zone_id}/dns_records",
+                    token,
+                    params={"name": hostname},
+                )
+                existing = [
+                    r for r in (rec_resp.get("result") or [])
+                    if str(r.get("type") or "").upper() in ("A", "AAAA", "CNAME")
+                ]
+                if existing:
+                    continue
+                body: Dict[str, Any] = (
+                    {"type": "CNAME", "name": hostname, "content": cname_target, "proxied": True, "ttl": 1}
+                    if cname_target
+                    else {"type": "A", "name": hostname, "content": "192.0.2.1", "proxied": True, "ttl": 1}
+                )
+                await _cf_request(client, "POST", f"/zones/{zone_id}/dns_records", token, json_body=body)
+                dns_created.append(hostname)
+        except CloudflareProvisionError as exc:
+            if exc.http_status in (401, 403):
+                dns_skipped_no_perm = True
+                logger.info("Cloudflare DNS skipped for {} (token lacks DNS:Edit permission)", norm)
+            else:
+                raise
 
         routes_resp = await _cf_request(client, "GET", f"/zones/{zone_id}/workers/routes", token)
         existing_routes = {
@@ -133,4 +146,5 @@ async def provision_domain_in_cloudflare(domain: str) -> CloudflareProvisionResu
         dns_created=tuple(dns_created),
         routes_created=tuple(routes_created),
         name_servers=name_servers,
+        dns_skipped_no_perm=dns_skipped_no_perm,
     )

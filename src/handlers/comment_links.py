@@ -406,7 +406,9 @@ async def _try_provision_cloudflare(domain: str) -> str:
     if res.routes_created:
         parts.append("Worker route подключён")
     if not parts:
-        parts.append("DNS и Worker route уже настроены")
+        parts.append("Worker route уже настроен" if res.dns_skipped_no_perm else "DNS и Worker route уже настроены")
+    if res.dns_skipped_no_perm:
+        parts.append("DNS пропущен (у токена нет права DNS:Edit — проверь проксируемую запись в Cloudflare)")
     status_hint = " (зона ждёт смены NS)" if res.zone_status != "active" else ""
     return f"\n☁️ Cloudflare: {', '.join(parts)}{safe(status_hint)}."
 

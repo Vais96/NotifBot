@@ -514,6 +514,29 @@ class CloudflareProvisioningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.dns_created, ("myshort.online", "www.myshort.online"))
         self.assertEqual(res.routes_created, ("myshort.online/*", "www.myshort.online/*"))
 
+    async def test_provision_continues_to_routes_when_dns_forbidden(self) -> None:
+        responses = [
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": [{"id": "z1", "status": "active", "name_servers": ["ns1.cf"]}]}),
+            SimpleNamespace(status_code=403, json=lambda: {"success": False, "errors": [{"message": "Authentication error"}]}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": []}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": {"id": "r1"}}),
+            SimpleNamespace(status_code=200, json=lambda: {"success": True, "result": {"id": "r2"}}),
+        ]
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("src.services.cloudflare_short_domains.settings.cloudflare_api_token", "cf-secret"),
+            patch("src.services.cloudflare_short_domains.settings.cloudflare_worker_name", "short-proxy"),
+            patch("src.services.cloudflare_short_domains.httpx.AsyncClient", return_value=mock_client),
+        ):
+            res = await provision_domain_in_cloudflare("myshort.online")
+
+        self.assertTrue(res.dns_skipped_no_perm)
+        self.assertEqual(res.routes_created, ("myshort.online/*", "www.myshort.online/*"))
+
     async def test_provision_raises_when_zone_missing(self) -> None:
         mock_client = AsyncMock()
         mock_client.request = AsyncMock(
