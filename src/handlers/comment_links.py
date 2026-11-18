@@ -38,6 +38,7 @@ from ..services.comment_links import (
     normalize_short_domain,
     parse_base_link,
     parse_fields_input,
+    parse_slug_or_domain_input,
     short_link_url,
 )
 from ..utils.html import safe
@@ -67,8 +68,6 @@ def _cancel_kb(last_base_url: Optional[str] = None) -> InlineKeyboardMarkup:
 def _params_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📝 Заполнить по шагам", callback_data="clink:guided")],
-            [InlineKeyboardButton(text="⚡ Собрать как есть", callback_data="clink:build")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="clink:cancel")],
         ]
     )
@@ -233,18 +232,18 @@ def _format_params_prompt(base_url: str) -> str:
         lines.append(f"Уже в ссылке: {found}")
     lines.extend([
         "",
-        "Отправьте данные для подстановки — <b>в одном сообщении</b> или нажмите «По шагам»:",
+        "<b>Шаг 1.</b> Отправьте <b>Название кампании (sub2)</b>:",
+        "Например: <code>77_TH_1740624179668966_15.11</code>",
+        "<i>(из такого названия бот сам вытащит ID каба, байера и гео, после чего спросит адсет и объявление)</i>",
+        "",
+        "Либо пришлите все поля сразу одним сообщением:",
         "<code>Кампания: название_кампании</code>",
         "<code>Адсет: название_адсета</code>",
         "<code>Объявление: название_объявления</code>",
-        "<code>Каб: id_каба</code> <i>(подтянется сам из 77_TH_1740624179668966_15.11)</i>",
+        "<code>Каб: id_каба</code>",
     ])
     if not parsed.has_pixel:
         lines.append("<code>Пиксель: id_пикселя</code>")
-    lines.extend([
-        "",
-        "Можно также прислать просто строки подряд или одно название кампании, чтобы продолжить по шагам.",
-    ])
     return "\n".join(lines)
 
 
@@ -536,12 +535,7 @@ async def handle_comment_link_text(message: Message, arg: str) -> None:
             await message.answer(f"{str(exc)}\nПопробуйте ещё раз или отправьте <code>-</code> для отмены.")
             return
         admin = await is_admin(user_id)
-        status = await db.add_short_domain(domain, user_id, is_shared=admin, allow_takeover=admin)
-        if status == "taken":
-            await message.answer(
-                f"Домен <code>{safe(domain)}</code> уже привязан к другому пользователю. Пришлите другой домен или <code>-</code>."
-            )
-            return
+        await db.add_short_domain(domain, user_id, is_shared=admin, allow_takeover=admin)
         try:
             await _save_last_domain(user_id, domain)
         except Exception:
@@ -609,12 +603,39 @@ async def handle_comment_link_text(message: Message, arg: str) -> None:
 
     if arg == "slug":
         built = build_comment_link(str(draft.get("base_url") or ""), draft.get("fields") or {})
-        domain = await _resolve_user_short_domain(user_id, draft_domain=draft.get("domain"))
+        parsed_dom, parsed_slug = parse_slug_or_domain_input(raw_text)
+        if parsed_dom:
+            admin = await is_admin(user_id)
+            try:
+                await db.add_short_domain(parsed_dom, user_id, is_shared=admin, allow_takeover=admin)
+                await _save_last_domain(user_id, parsed_dom)
+            except Exception as exc:
+                logger.warning("Failed to save domain {} from slug step: {}", parsed_dom, exc)
+            cf_note = await _try_provision_cloudflare(parsed_dom)
+            draft["domain"] = parsed_dom
+            await _save_draft(user_id, draft)
+            if not parsed_slug:
+                example_url = short_link_url("games", parsed_dom)
+                await message.answer(
+                    f"🌐 Домен для короткой ссылки установлен: <code>{safe(parsed_dom)}</code>{cf_note}\n\n"
+                    f"Теперь введите <b>короткое название (alias)</b> после слэша без точки "
+                    f"(например <code>games</code> → <code>{safe(example_url)}</code>) "
+                    "или нажмите «🎲 Случайное название»:",
+                    reply_markup=_slug_kb(),
+                    disable_web_page_preview=True,
+                )
+                return
+            domain = parsed_dom
+            slug_input = parsed_slug
+        else:
+            domain = await _resolve_user_short_domain(user_id, draft_domain=draft.get("domain"))
+            slug_input = raw_text
+
         try:
             short_url = await create_short_link_for_url(
                 built.long_url,
                 user_id,
-                custom_slug=raw_text,
+                custom_slug=slug_input,
                 domain=domain,
             )
         except InvalidSlugError as exc:

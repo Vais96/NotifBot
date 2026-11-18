@@ -38,6 +38,7 @@ from src.services.comment_links import (  # noqa: E402
     normalize_slug,
     parse_base_link,
     parse_fields_input,
+    parse_slug_or_domain_input,
     short_link_url,
 )
 
@@ -223,6 +224,10 @@ class CommentLinksServiceTests(unittest.TestCase):
         self.assertEqual(short_link_url("games", "mybrand.online"), "https://mybrand.online/games")
         with patch("src.services.comment_links.settings.short_link_base_url", ""):
             self.assertEqual(short_link_url("games"), "https://example.test/games")
+
+        self.assertEqual(parse_slug_or_domain_input("fortunegames2.online"), ("fortunegames2.online", None))
+        self.assertEqual(parse_slug_or_domain_input("https://fortunegames2.online/slot1"), ("fortunegames2.online", "slot1"))
+        self.assertEqual(parse_slug_or_domain_input("thai-slot-1"), (None, "thai-slot-1"))
 
     def test_merge_redirect_query_forwards_fbclid_without_overwriting_subs(self) -> None:
         target = "https://luckytop.online/?sub1=77&sub2=cmp&fbp=12345"
@@ -484,6 +489,40 @@ class CommentLinksHandlerTests(unittest.IsolatedAsyncioTestCase):
         sent_text = [c for c in calls if type(c).__name__ == "SendMessage"][-1].text
         self.assertIn("1740624179668966", sent_text)
         self.assertIn("Шаг 2/3", sent_text)
+
+    async def test_pasting_domain_at_slug_step_switches_domain_instead_of_error(self) -> None:
+        calls = []
+
+        async def fake_request(self_, bot_, method, timeout=None):
+            calls.append(method)
+            return SimpleNamespace(message_id=92, chat=SimpleNamespace(id=method.chat_id), text=method.text)
+
+        draft = {
+            "base_url": "https://rolltheluck.online/?sub1=111&sub4=MY&fbp=167552",
+            "has_pixel": True,
+            "fields": {"campaign_name": "cmp1", "ad_name": "ad1"},
+        }
+        set_cache = AsyncMock()
+        add_dom = AsyncMock(return_value="added")
+
+        with (
+            patch.object(type(bot.session), "make_request", fake_request),
+            patch(
+                "src.handlers.pending.db.get_pending_action",
+                AsyncMock(return_value=(f"{PendingAction.COMMENT_LINK}:slug", None)),
+            ),
+            patch("src.handlers.comment_links.db.get_ui_cache_value", AsyncMock(return_value=json.dumps(draft))),
+            patch("src.handlers.comment_links.db.set_ui_cache_list", set_cache),
+            patch("src.handlers.comment_links.db.add_short_domain", add_dom),
+            patch("src.handlers.comment_links.is_admin", AsyncMock(return_value=False)),
+            patch("src.handlers.comment_links.is_cloudflare_configured", return_value=False),
+        ):
+            await dp.feed_update(bot, _text_update(506, "fortunegames2.online", update_id=8))
+
+        add_dom.assert_awaited_once_with("fortunegames2.online", 506, is_shared=False, allow_takeover=False)
+        sent_text = [c for c in calls if type(c).__name__ == "SendMessage"][-1].text
+        self.assertIn("Домен для короткой ссылки установлен: <code>fortunegames2.online</code>", sent_text)
+        self.assertIn("https://fortunegames2.online/games", sent_text)
 
 
 class CloudflareProvisioningTests(unittest.IsolatedAsyncioTestCase):

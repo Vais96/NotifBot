@@ -102,19 +102,19 @@ GUIDED_FIELDS: Tuple[str, ...] = (
 
 GUIDED_PROMPTS: Dict[str, Tuple[str, str]] = {
     "campaign_name": (
-        "Название кампании",
+        "Название кампании (sub2)",
         "Например: <code>77_TH_1740624179668966_15.11</code>",
     ),
     "adset_name": (
-        "Название адсета",
+        "Название адсета (sub5)",
         "Например: <code>adset_1</code>",
     ),
     "ad_name": (
-        "Название объявления (крео)",
+        "Название объявления / крео (sub3)",
         "Например: <code>creo_1</code>",
     ),
     "account_id": (
-        "ID рекламного кабинета",
+        "ID рекламного кабинета (sub6)",
         "Например: <code>123456789012345</code>",
     ),
     "pixel": (
@@ -542,6 +542,35 @@ def normalize_slug(raw_slug: str) -> str:
     if cleaned in RESERVED_SLUGS:
         raise InvalidSlugError("Это название зарезервировано системой, выберите другое.")
     return cleaned
+
+
+def parse_slug_or_domain_input(raw_text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Detect if the user pasted a domain ('fortunegames2.online') or 'fortunegames2.online/slug'
+    at the slug prompt instead of a bare slug.
+
+    Returns (domain, slug):
+    - ('fortunegames2.online', None) when only a domain was sent
+    - ('fortunegames2.online', 'slot1') when domain/slug was sent
+    - (None, raw_text) when a normal slug (no domain) was sent
+    """
+    cleaned = _clean_url_token(raw_text)
+    if not cleaned or any(ch.isspace() for ch in cleaned):
+        return None, raw_text
+    probe = cleaned if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned) else (
+        f"https://{cleaned}" if "." in cleaned.split("/", 1)[0] else ""
+    )
+    if not probe:
+        return None, raw_text
+    parsed = urlparse(probe)
+    host = (parsed.netloc or "").strip().lower()
+    if ":" in host:
+        host = host.split(":", 1)[0].strip()
+    if not host or not _DOMAIN_RE.fullmatch(host):
+        return None, raw_text
+    path_slug = (parsed.path or "").strip("/")
+    if not path_slug:
+        return host, None
+    return host, path_slug
 
 
 def normalize_short_domain(raw_domain: str) -> str:

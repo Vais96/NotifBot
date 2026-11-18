@@ -61,7 +61,7 @@ async def increment_short_link_clicks(slug: str, domain: str = "") -> None:
 
 
 async def list_short_domains_for_user(user_id: int, *, include_all: bool = False) -> List[Dict[str, Any]]:
-    """List active short-link domains visible to user_id (shared + own, or all for admin)."""
+    """List active short-link domains (user's own domains first, then shared/team domains)."""
     if include_all:
         return await fetch_all(
             "SELECT domain, owner_id, is_shared, is_active, created_at "
@@ -70,9 +70,9 @@ async def list_short_domains_for_user(user_id: int, *, include_all: bool = False
         )
     return await fetch_all(
         "SELECT domain, owner_id, is_shared, is_active, created_at "
-        "FROM tg_short_domains WHERE is_active=1 AND (is_shared=1 OR owner_id=%s) "
+        "FROM tg_short_domains WHERE is_active=1 "
         "ORDER BY (owner_id=%s) DESC, is_shared DESC, domain ASC",
-        (user_id, user_id),
+        (user_id,),
         dict_rows=True,
     )
 
