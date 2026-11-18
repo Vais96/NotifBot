@@ -87,6 +87,7 @@ async def provision_domain_in_cloudflare(domain: str) -> CloudflareProvisionResu
 
         zone = zones[0]
         zone_id = str(zone["id"])
+        account_id = str(((zone.get("account") or {}) if isinstance(zone.get("account"), dict) else {}).get("id") or "")
         zone_status = str(zone.get("status") or "unknown")
         name_servers = tuple(str(ns) for ns in (zone.get("name_servers") or []) if ns)
 
@@ -122,23 +123,59 @@ async def provision_domain_in_cloudflare(domain: str) -> CloudflareProvisionResu
             else:
                 raise
 
-        routes_resp = await _cf_request(client, "GET", f"/zones/{zone_id}/workers/routes", token)
-        existing_routes = {
-            str(r.get("pattern") or "").lower(): str(r.get("script") or "")
-            for r in (routes_resp.get("result") or [])
-        }
         routes_created: List[str] = []
-        for pattern in (f"{norm}/*", f"www.{norm}/*"):
-            if pattern in existing_routes:
-                continue
-            await _cf_request(
-                client,
-                "POST",
-                f"/zones/{zone_id}/workers/routes",
-                token,
-                json_body={"pattern": pattern, "script": worker_name},
-            )
-            routes_created.append(pattern)
+        try:
+            routes_resp = await _cf_request(client, "GET", f"/zones/{zone_id}/workers/routes", token)
+            existing_routes = {
+                str(r.get("pattern") or "").lower(): str(r.get("script") or "")
+                for r in (routes_resp.get("result") or [])
+            }
+            for pattern in (f"{norm}/*", f"www.{norm}/*"):
+                if pattern in existing_routes:
+                    continue
+                await _cf_request(
+                    client,
+                    "POST",
+                    f"/zones/{zone_id}/workers/routes",
+                    token,
+                    json_body={"pattern": pattern, "script": worker_name},
+                )
+                routes_created.append(pattern)
+        except CloudflareProvisionError as route_exc:
+            if route_exc.http_status in (401, 403) and account_id:
+                # Fallback to Workers Custom Domains (requires Account -> Workers Scripts -> Edit)
+                try:
+                    dom_resp = await _cf_request(client, "GET", f"/accounts/{account_id}/workers/domains", token)
+                    existing_doms = {
+                        str(d.get("hostname") or "").lower()
+                        for d in (dom_resp.get("result") or [])
+                    }
+                    for hostname in (norm, f"www.{norm}"):
+                        if hostname in existing_doms:
+                            continue
+                        await _cf_request(
+                            client,
+                            "PUT",
+                            f"/accounts/{account_id}/workers/domains",
+                            token,
+                            json_body={
+                                "environment": "production",
+                                "hostname": hostname,
+                                "service": worker_name,
+                                "zone_id": zone_id,
+                            },
+                        )
+                        routes_created.append(hostname)
+                    dns_skipped_no_perm = False
+                except CloudflareProvisionError as dom_exc:
+                    if dom_exc.http_status == 409:
+                        raise CloudflareProvisionError(
+                            "У токена нет прав Zone → Workers Routes → Edit и Zone → DNS → Edit "
+                            "(либо удалите старые A/CNAME записи в DNS домена в Cloudflare, либо добавьте эти права токену)."
+                        ) from dom_exc
+                    raise
+            else:
+                raise
 
     return CloudflareProvisionResult(
         domain=norm,
